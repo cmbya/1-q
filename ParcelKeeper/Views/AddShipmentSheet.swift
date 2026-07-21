@@ -4,22 +4,26 @@ struct AddShipmentSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: ShipmentStore
 
-    let detection: CarrierDetection
+    let initialDraft: ShipmentImportDraft
 
     @State private var trackingNumber: String
     @State private var selectedCarrier: CarrierOption
-    @State private var status: ShipmentStatus = .inTransit
-    @State private var note = ""
-    @State private var pickupCode = ""
+    @State private var status: ShipmentStatus
+    @State private var note: String
+    @State private var pickupCode: String
     @State private var reminderEnabled = false
     @State private var reminderDate = Date().addingTimeInterval(8 * 60 * 60)
     @State private var showingDuplicateAlert = false
     @State private var notificationDenied = false
+    @State private var isSaving = false
 
-    init(detection: CarrierDetection) {
-        self.detection = detection
-        _trackingNumber = State(initialValue: detection.trackingNumber)
-        _selectedCarrier = State(initialValue: detection.carrier)
+    init(draft: ShipmentImportDraft) {
+        initialDraft = draft
+        _trackingNumber = State(initialValue: draft.trackingNumber)
+        _selectedCarrier = State(initialValue: draft.carrier)
+        _status = State(initialValue: draft.status)
+        _note = State(initialValue: draft.note)
+        _pickupCode = State(initialValue: draft.pickupCode)
     }
 
     var body: some View {
@@ -30,6 +34,9 @@ struct AddShipmentSheet: View {
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
                         .fontDesign(.monospaced)
+                        .onChange(of: trackingNumber) { _, newValue in
+                            intelligentlyUpdateCarrier(for: newValue)
+                        }
 
                     Picker("快递公司", selection: $selectedCarrier) {
                         ForEach(CarrierDetector.allCarriers) { carrier in
@@ -37,8 +44,8 @@ struct AddShipmentSheet: View {
                         }
                     }
 
-                    if detection.confidence < 0.8 {
-                        Label("自动识别把握不高，请确认快递公司。", systemImage: "exclamationmark.circle")
+                    if selectedCarrier == CarrierDetector.unknown || initialDraft.confidence < 0.8 {
+                        Label("识别结果可能不准确，保存前确认一下快递公司。", systemImage: "wand.and.stars")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -50,8 +57,8 @@ struct AddShipmentSheet: View {
                     }
                 }
 
-                Section("可选信息") {
-                    TextField("备注，例如：键盘、手机壳", text: $note)
+                Section("智能识别结果") {
+                    TextField("备注，例如：拼多多 · 手机壳", text: $note)
                     TextField("取件码", text: $pickupCode)
                         .keyboardType(.numbersAndPunctuation)
                 }
@@ -70,25 +77,42 @@ struct AddShipmentSheet: View {
             }
             .navigationTitle("添加快递")
             .navigationBarTitleDisplayMode(.inline)
+            .interactiveDismissDisabled(isSaving)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
+                        .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存") { saveShipment() }
-                        .fontWeight(.semibold)
-                        .disabled(CarrierDetector.sanitize(trackingNumber).count < 8)
+                    Button {
+                        saveShipment()
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text("保存").fontWeight(.semibold)
+                        }
+                    }
+                    .disabled(CarrierDetector.sanitize(trackingNumber).count < 8 || isSaving)
                 }
             }
             .alert("这个运单已经保存过了", isPresented: $showingDuplicateAlert) {
                 Button("知道了", role: .cancel) {}
             }
             .alert("没有通知权限", isPresented: $notificationDenied) {
-                Button("继续保存", role: .cancel) { dismiss() }
+                Button("继续", role: .cancel) { dismiss() }
             } message: {
                 Text("快递已经保存，但提醒未创建。可以稍后在设置中开启通知权限。")
             }
         }
+    }
+
+    private func intelligentlyUpdateCarrier(for value: String) {
+        let normalized = CarrierDetector.sanitize(value)
+        guard normalized.count >= 8 else { return }
+        let detection = CarrierDetector.detect(normalized)
+        guard detection.carrier != CarrierDetector.unknown, detection.confidence >= 0.75 else { return }
+        selectedCarrier = detection.carrier
     }
 
     private func saveShipment() {
@@ -113,9 +137,11 @@ struct AddShipmentSheet: View {
             return
         }
 
-        Task {
+        isSaving = true
+        Task { @MainActor in
             let granted = await NotificationManager.shared.requestAuthorization()
             guard granted else {
+                isSaving = false
                 notificationDenied = true
                 return
             }

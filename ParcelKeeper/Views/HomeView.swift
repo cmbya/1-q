@@ -5,9 +5,12 @@ struct HomeView: View {
 
     @State private var searchText = ""
     @State private var selectedFilter: ShipmentFilter = .active
-    @State private var detectedShipment: CarrierDetection?
-    @State private var showingAddSheet = false
-    @State private var showingPasteError = false
+    @State private var importRoute: ImportRoute?
+    @State private var pasteErrorMessage: String?
+    @State private var isProcessingPaste = false
+    @State private var manualInput = ""
+    @State private var showingManualInput = false
+    @State private var successFeedbackTrigger = 0
 
     private var filteredShipments: [Shipment] {
         store.shipments.filter { shipment in
@@ -56,16 +59,42 @@ struct HomeView: View {
             }
             .navigationTitle("快递管家")
             .searchable(text: $searchText, prompt: "搜索运单号、快递或备注")
-            .sheet(isPresented: $showingAddSheet) {
-                if let detectedShipment {
-                    AddShipmentSheet(detection: detectedShipment)
+            .sheet(item: $importRoute) { route in
+                switch route {
+                case .single(let draft):
+                    AddShipmentSheet(draft: draft)
+                        .environmentObject(store)
+                case .batch(_, let drafts):
+                    BatchImportSheet(drafts: drafts)
                         .environmentObject(store)
                 }
             }
-            .alert("没有识别到运单号", isPresented: $showingPasteError) {
+            .alert("没有识别到运单号", isPresented: Binding(
+                get: { pasteErrorMessage != nil },
+                set: { if !$0 { pasteErrorMessage = nil } }
+            )) {
+                Button("手动输入") {
+                    manualInput = ""
+                    showingManualInput = true
+                }
                 Button("知道了", role: .cancel) {}
             } message: {
-                Text("请先复制一段包含运单号的文字，再点击粘贴按钮。")
+                Text(pasteErrorMessage ?? "请复制包含运单号的文字后重试。")
+            }
+            .alert("手动输入运单号", isPresented: $showingManualInput) {
+                TextField("运单号", text: $manualInput)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                Button("识别") {
+                    let value = manualInput
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(180))
+                        processText(value)
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("粘贴按钮偶尔没有返回内容时，可以直接在这里输入。")
             }
             .alert("出现问题", isPresented: Binding(
                 get: { store.lastErrorMessage != nil },
@@ -75,6 +104,7 @@ struct HomeView: View {
             } message: {
                 Text(store.lastErrorMessage ?? "未知错误")
             }
+            .sensoryFeedback(.success, trigger: successFeedbackTrigger)
         }
     }
 
@@ -83,8 +113,9 @@ struct HomeView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("把快递都放在这里")
                     .font(.title2.bold())
-                Text("复制运单号，点一下就能保存")
+                Text("整段物流信息也能识别，取件码和状态会一起带入")
                     .foregroundStyle(.secondary)
+                    .font(.subheadline)
             }
             Spacer()
             Image(systemName: "shippingbox.and.arrow.backward.fill")
@@ -96,22 +127,42 @@ struct HomeView: View {
 
     private var pasteCard: some View {
         GlassCard {
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("粘贴新运单")
-                        .font(.headline)
-                    Text("支持从短信、淘宝、京东或微信复制")
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("智能粘贴")
+                            .font(.headline)
+                        Text("支持单号、短信、淘宝/京东/拼多多物流文字和多个运单")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    if isProcessingPaste {
+                        ProgressView()
+                            .controlSize(.regular)
+                            .frame(width: 44, height: 44)
+                    } else {
+                        PasteButton(payloadType: String.self) { values in
+                            handlePastedValues(values)
+                        }
+                        .labelStyle(.iconOnly)
+                        .buttonBorderShape(.circle)
+                        .tint(.primary)
+                        .accessibilityLabel("粘贴并识别")
+                    }
+                }
+
+                Button {
+                    manualInput = ""
+                    showingManualInput = true
+                } label: {
+                    Label("粘贴没反应？手动输入", systemImage: "keyboard")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
-
-                Spacer()
-
-                PasteButton(payloadType: String.self) { values in
-                    handlePastedText(values.first)
-                }
-                .buttonBorderShape(.capsule)
-                .tint(.primary)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
         }
     }
@@ -155,7 +206,7 @@ struct HomeView: View {
                 ContentUnavailableView(
                     searchText.isEmpty ? "还没有快递" : "没有搜索结果",
                     systemImage: searchText.isEmpty ? "shippingbox" : "magnifyingglass",
-                    description: Text(searchText.isEmpty ? "复制一个运单号，点击上方粘贴按钮。" : "换个关键词试试。")
+                    description: Text(searchText.isEmpty ? "复制运单号或整段物流文字，点击上方粘贴按钮。" : "换个关键词试试。")
                 )
                 .frame(maxWidth: .infinity)
             }
@@ -183,15 +234,53 @@ struct HomeView: View {
         }
     }
 
-    private func handlePastedText(_ text: String?) {
-        guard let text,
-              let number = CarrierDetector.extractTrackingNumber(from: text) else {
-            showingPasteError = true
+    private func handlePastedValues(_ values: [String]) {
+        guard !isProcessingPaste else { return }
+        isProcessingPaste = true
+
+        Task { @MainActor in
+            defer { isProcessingPaste = false }
+            await Task.yield()
+            guard let text = values.first, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                pasteErrorMessage = "系统没有返回可用的文字。可以再点一次，或者使用手动输入。"
+                return
+            }
+            processText(text)
+        }
+    }
+
+    private func processText(_ text: String) {
+        let drafts = SmartShipmentParser.parse(text)
+        guard !drafts.isEmpty else {
+            if let single = SmartShipmentParser.parseSingleNumber(text) {
+                presentImport([single])
+            } else {
+                pasteErrorMessage = "没有找到像运单号的内容。请复制运单号，或复制包含“物流单号/运单号”的整段文字。"
+            }
             return
         }
+        presentImport(drafts)
+    }
 
-        detectedShipment = CarrierDetector.detect(number)
-        showingAddSheet = true
+    private func presentImport(_ drafts: [ShipmentImportDraft]) {
+        successFeedbackTrigger += 1
+        if drafts.count == 1, let first = drafts.first {
+            importRoute = .single(first)
+        } else {
+            importRoute = .batch(UUID(), drafts)
+        }
+    }
+}
+
+private enum ImportRoute: Identifiable {
+    case single(ShipmentImportDraft)
+    case batch(UUID, [ShipmentImportDraft])
+
+    var id: UUID {
+        switch self {
+        case .single(let draft): return draft.id
+        case .batch(let id, _): return id
+        }
     }
 }
 

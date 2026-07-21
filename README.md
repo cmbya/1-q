@@ -1,35 +1,61 @@
-# 快递管家（ParcelKeeper）
+# 快递管家（ParcelKeeper）1.1
 
-一个只给自己用的 iPhone 快递记录 App。核心操作是：**复制运单号 → 打开 App → 点击系统粘贴按钮 → 确认并保存**。
+一个只给自己用的 iPhone 快递记录 App。核心操作是：**复制运单号或整段物流信息 → 打开 App → 点击智能粘贴 → 确认并保存**。
 
-## 已完成
+## 1.1 更新
 
-- 使用 SwiftUI 编写的原生 iPhone App
-- 使用系统 `PasteButton` 读取用户主动粘贴的文字
-- 从整段短信或聊天内容中提取运单号
-- 自动识别顺丰、京东、圆通、极兔、EMS，并对中通、申通、韵达、德邦做规则判断
-- 快递公司识别不确定时允许手动修改
+- 修复点击粘贴后偶尔出现白屏、页面没有内容的问题：改用单一数据驱动的 `sheet(item:)` 路由，不再先打开空 Sheet 再等待数据。
+- 粘贴过程增加忙碌状态，防止连续点击造成重复弹窗或页面竞争。
+- 粘贴失败时可以直接手动输入运单号。
+- 支持一次识别多个运单并批量导入。
+- 支持从整段淘宝、京东、拼多多物流文字中提取：
+  - 运单号
+  - 快递公司
+  - 平台来源
+  - 取件码
+  - 待取件、派送中、已签收、异常等状态
+  - 驿站或快递柜文字
+- 加强手机号、订单号、身份证号等误识别过滤。
+- 手动修改运单号时会重新判断快递公司。
+
+## 已有功能
+
+- SwiftUI 原生 iPhone App
+- 系统 `PasteButton`，只有主动点击时才读取剪贴板
 - 本地保存、搜索、删除、归档及重复运单拦截
 - 运输中、派送中、待取件、已签收、异常等状态管理
 - 备注与取件码
 - 本地定时提醒
 - JSON 备份导出与导入
-- GitHub Actions 自动生成 Xcode 工程并编译无签名 IPA
+- GitHub Actions 编译无签名 IPA
 
 ## 在 GitHub 编译
 
-1. 新建一个 GitHub 仓库。
-2. 将本压缩包里的所有文件上传到仓库根目录，注意 `.github/workflows/build.yml` 不能漏掉。
+1. 新建 GitHub 仓库。
+2. 将压缩包里的所有文件上传到仓库根目录，注意 `.github/workflows/build.yml` 不能漏掉。
 3. 打开仓库的 **Actions** 页面。
 4. 选择 **Build Unsigned IPA**。
 5. 点击 **Run workflow**。
-6. 编译完成后，在本次运行页面底部下载 `ParcelKeeper-unsigned` 构建产物。
+6. 编译完成后，在本次运行页面底部下载 `ParcelKeeper-unsigned`。
+7. GitHub 下载的是一层 Artifact ZIP，解压后里面才是 `ParcelKeeper-unsigned.ipa`。
 
-构建产物中的 IPA 是**无签名版本**，需要使用你自己的 Apple 签名方式重新签名后安装到 iPhone。这样做可以避免把证书和密码写进公开仓库。
+IPA 是无签名版本，需要用自己的 Apple 签名方式重新签名后安装。
+
+## 关于淘宝、京东、拼多多账号直连
+
+这三个平台的开放接口主要面向商家、服务商和经过审核的开放平台应用，需要 App Key、密钥、授权范围和服务端回调。普通个人 App 不能只做一个网页登录，就合法、稳定地读取消费者账号的全部待收货订单。
+
+本项目不保存淘宝、京东、拼多多密码，也不通过 WKWebView 抓取登录 Cookie 或解析私有页面。那种方式容易触发风控、随页面改版失效，也有账号安全风险。
+
+更稳妥的后续路线：
+
+1. 申请平台正式开放权限后通过 OAuth 接入；或
+2. 接入正规快递查询 API，通过运单号自动刷新轨迹；或
+3. 增加订单/物流截图识别，不需要交出账号密码。
 
 ## 本地打开工程
 
-项目使用 XcodeGen 管理工程文件：
+项目使用 XcodeGen 管理工程：
 
 ```bash
 brew install xcodegen
@@ -37,29 +63,8 @@ xcodegen generate
 open ParcelKeeper.xcodeproj
 ```
 
-项目最低系统版本为 iOS 17，产品显示名称为“快递管家”，默认 Bundle ID 为：
+最低系统版本为 iOS 17，Bundle ID 默认为：
 
 ```text
 com.dinghao.ParcelKeeper
-```
-
-要安装到自己的设备时，可以在 Xcode 中把 Bundle ID 改成你自己的唯一标识，并选择自己的 Team。
-
-## 关于实时物流查询
-
-这一版先把最重要的录入、保存和提醒做稳定。实时物流轨迹并不是 iPhone 系统自带的数据，需要接入第三方快递查询 API，并配置对应账号或密钥。当前界面不会伪造物流信息；后续接入 API 时，可以在现有数据模型上增加轨迹时间线和后台更新。
-
-## 目录
-
-```text
-ParcelKeeper/
-├── .github/workflows/build.yml
-├── project.yml
-├── README.md
-└── ParcelKeeper/
-    ├── App/
-    ├── Models/
-    ├── Services/
-    ├── Views/
-    └── Resources/
 ```

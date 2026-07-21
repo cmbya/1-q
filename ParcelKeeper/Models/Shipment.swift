@@ -40,7 +40,7 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     }
 }
 
-enum ShipmentStatus: String, Codable, CaseIterable, Identifiable {
+enum ShipmentStatus: String, Codable, CaseIterable, Identifiable, Sendable {
     case inTransit = "运输中"
     case outForDelivery = "派送中"
     case readyForPickup = "待取件"

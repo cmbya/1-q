@@ -42,9 +42,9 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("关于第一版") {
-                    LabeledContent("版本", value: "1.0.0")
-                    Text("当前版本负责粘贴、识别、保存、搜索、状态管理和本地提醒。实时物流轨迹需要接入快递查询服务的 API，接口位置已经预留给后续版本。")
+                Section("关于 1.1") {
+                    LabeledContent("版本", value: "1.1.0")
+                    Text("当前版本已修复粘贴后偶发空白页的问题，并支持从整段物流文字中识别多个运单、平台来源、取件码和当前状态。实时物流轨迹仍需接入正规的快递查询 API。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
