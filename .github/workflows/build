@@ -1,0 +1,61 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - "ParcelKeeper/**"
+      - "project.yml"
+      - ".github/workflows/build.yml"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build unsigned iPhone app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ParcelKeeper.xcodeproj \
+            -scheme ParcelKeeper \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            clean build | tee build.log
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH=$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          test -n "$APP_PATH"
+          mkdir -p build/Payload
+          cp -R "$APP_PATH" build/Payload/
+          cd build
+          zip -qry ParcelKeeper-unsigned.ipa Payload
+
+      - name: Upload IPA and build log
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParcelKeeper-unsigned
+          path: |
+            build/ParcelKeeper-unsigned.ipa
+            build.log
+          if-no-files-found: error
