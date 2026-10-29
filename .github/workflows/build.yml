@@ -8,6 +8,7 @@ on:
       - "ParcelKeeper/**"
       - "ParcelKeeperWidget/**"
       - "ParcelKeeperTests/**"
+      - "scripts/verify_ipa.py"
       - "project.yml"
       - ".github/workflows/build.yml"
 
@@ -61,6 +62,9 @@ jobs:
           cp -R "$APP_PATH" build/Payload/
           cd build
           zip -qry ParcelKeeper-unsigned.ipa Payload
+
+      - name: Verify packaged icon and widget metadata
+        run: python3 scripts/verify_ipa.py build/ParcelKeeper-unsigned.ipa
 
       - name: Upload IPA and build log
         uses: actions/upload-artifact@v4

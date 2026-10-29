@@ -6,7 +6,7 @@ enum PickupStorageError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .requiresMainApp: return "请先打开主 App，完成共享数据初始化。"
-        case .appGroupUnavailable: return "App Group 不可用；未修改原有数据。请配置共享容器和签名。"
+        case .appGroupUnavailable: return "无法访问共享容器，未修改原有数据。主 App 与小组件的签名均须授权应用 Info.plist 中 ParcelKeeperAppGroup 指定的组（原始构建为 group.com.dinghao.ParcelKeeper）；证书列有其他应用组不代表授权了此组。请核对重签后的组 ID、描述文件与扩展签名，勿卸载或清空数据。"
         case .invalidData(let message): return "数据无效：\(message)"
         case .notFound: return "记录或分组不存在。"
         case .nonEmptyGroup: return "分组非空，请先选择迁移目标。"
