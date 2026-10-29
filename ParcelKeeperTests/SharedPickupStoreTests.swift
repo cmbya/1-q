@@ -171,4 +171,46 @@ final class SharedPickupStoreTests: XCTestCase {
         XCTAssertEqual(try destination.snapshot().expressGroupID, sourceDefault)
     }
 
+    func testExtensionRequiresInitializedDataForReadsAndWrites() throws {
+        let legacyBytes = try JSONEncoder().encode([shipment()])
+        try legacyBytes.write(to: legacy)
+        let extensionStore = try SharedPickupStore(appGroupID: nil, legacyURL: legacy,
+                                                   containerURL: container, accessMode: .existingSharedData)
+        func assertRequiresMainApp(_ action: () throws -> Void) {
+            XCTAssertThrowsError(try action()) { error in
+                guard case PickupStorageError.requiresMainApp = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+        assertRequiresMainApp { _ = try extensionStore.snapshot() }
+        assertRequiresMainApp { try extensionStore.transaction { _ in XCTFail("Mutation must not run") } }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dataURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
+        XCTAssertEqual(try Data(contentsOf: legacy), legacyBytes)
+
+        let app = try store()
+        let initialized = try app.snapshot()
+        XCTAssertEqual(try extensionStore.snapshot(), initialized)
+        try extensionStore.transaction { $0.groups[0].name = "扩展修改" }
+        XCTAssertEqual(try app.snapshot().groups[0].name, "扩展修改")
+        try FileManager.default.removeItem(at: dataURL)
+        assertRequiresMainApp { _ = try extensionStore.snapshot() }
+        assertRequiresMainApp { try extensionStore.transaction { _ in XCTFail("Mutation must not run") } }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dataURL.path))
+    }
+
+    func testExtensionDoesNotRebuildCorruptSharedData() throws {
+        let app = try store()
+        _ = try app.snapshot()
+        let corrupt = Data("{broken".utf8)
+        try corrupt.write(to: dataURL)
+        let extensionStore = try SharedPickupStore(appGroupID: nil, legacyURL: legacy,
+                                                   containerURL: container, accessMode: .existingSharedData)
+        XCTAssertThrowsError(try extensionStore.snapshot())
+        XCTAssertThrowsError(try extensionStore.transaction { _ in XCTFail("Mutation must not run") })
+        XCTAssertThrowsError(try app.snapshot())
+        XCTAssertEqual(try Data(contentsOf: dataURL), corrupt)
+    }
+
 }

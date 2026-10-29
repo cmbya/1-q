@@ -153,4 +153,47 @@ final class PickupIntentTests: XCTestCase {
         XCTAssertThrowsError(try PickupIntentService(store: readOnly).add(code: "123", location: nil, groupID: id, source: nil))
         XCTAssertTrue(try store.snapshot().records.isEmpty)
     }
+    func testWidgetReloadOnlyAfterSuccessfulPersistence() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        var reloads = 0
+        service.reloadWidget = {
+            reloads += 1
+            XCTAssertEqual(try? self.store.snapshot().records.count, reloads)
+        }
+        try service.add(code: "123", location: nil, groupID: id, source: nil)
+        XCTAssertEqual(reloads, 1)
+        XCTAssertThrowsError(try service.add(code: "123", location: nil, groupID: id, source: nil))
+        XCTAssertThrowsError(try service.add(code: "", location: nil, groupID: id, source: nil))
+        do {
+            try await service.recognize(text: "取件码456", groupID: id) { _, _ in throw CancellationError() }
+            XCTFail("confirmation should fail")
+        } catch is CancellationError {}
+        XCTAssertEqual(reloads, 1)
+        try await service.recognize(text: "取件码456", groupID: id) { _, _ in }
+        XCTAssertEqual(reloads, 2)
+
+        let readOnly = try SharedPickupStore(appGroupID: nil, legacyURL: directory.appendingPathComponent("no-legacy.json"), containerURL: directory, readOnly: true)
+        var failing = PickupIntentService(store: readOnly)
+        failing.reloadWidget = { reloads += 1 }
+        XCTAssertThrowsError(try failing.add(code: "789", location: nil, groupID: id, source: nil))
+        XCTAssertEqual(reloads, 2)
+    }
+
+    func testExtensionAccessDoesNotInitializeSharedData() throws {
+        let fresh = directory.appendingPathComponent("fresh")
+        try FileManager.default.createDirectory(at: fresh, withIntermediateDirectories: true)
+        let shared = try SharedPickupStore(appGroupID: nil, legacyURL: directory.appendingPathComponent("no-legacy.json"), containerURL: fresh, accessMode: .existingSharedData)
+        var extensionService = PickupIntentService(store: shared)
+        var reloads = 0
+        extensionService.reloadWidget = { reloads += 1 }
+        XCTAssertThrowsError(try extensionService.groups()) { error in
+            guard case PickupStorageError.requiresMainApp = error else { return XCTFail("unexpected error: \(error)") }
+        }
+        XCTAssertThrowsError(try extensionService.add(code: "123", location: nil, groupID: UUID(), source: nil)) { error in
+            guard case PickupStorageError.requiresMainApp = error else { return XCTFail("unexpected error: \(error)") }
+        }
+        XCTAssertEqual(reloads, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fresh.appendingPathComponent("ParcelKeeper").path))
+    }
+
 }

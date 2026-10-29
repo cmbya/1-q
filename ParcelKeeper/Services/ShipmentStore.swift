@@ -1,4 +1,5 @@
 import Foundation
+import WidgetKit
 
 @MainActor
 final class ShipmentStore: ObservableObject {
@@ -56,6 +57,7 @@ final class ShipmentStore: ObservableObject {
             let result = try action(&data)
             return (result, data)
         }
+        WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         // Preserve the committed snapshot even if a subsequent read fails.
         do { try reload() } catch {
             apply(committed)
@@ -184,6 +186,7 @@ final class ShipmentStore: ObservableObject {
     func confirmBackupImport(_ preview: BackupPreview, policy: BackupConflictPolicy? = nil) throws {
         guard let storage = storage else { throw PickupStorageError.appGroupUnavailable }
         let committed = try storage.importBackup(preview, policy: policy)
+        WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         do { try reload() } catch {
             apply(committed)
             lastErrorMessage = "备份已导入，但刷新失败：\(error.localizedDescription)"

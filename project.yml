@@ -21,6 +21,9 @@ targets:
           - ParcelKeeper.entitlements
     resources:
       - path: ParcelKeeper/Resources
+    dependencies:
+      - target: ParcelKeeperWidget
+        embed: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dinghao.ParcelKeeper
@@ -38,6 +41,37 @@ targets:
         INFOPLIST_KEY_ParcelKeeperAppGroup: group.com.dinghao.ParcelKeeper
         CODE_SIGN_ENTITLEMENTS: ParcelKeeper/ParcelKeeper.entitlements
         CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+  ParcelKeeperWidget:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ParcelKeeperWidget
+        excludes:
+          - ParcelKeeperWidget.entitlements
+          - Info.plist
+          - README.md
+      - path: ParcelKeeper/Models/PickupData.swift
+      - path: ParcelKeeper/Models/Shipment.swift
+      - path: ParcelKeeper/Services/SharedPickupStore.swift
+      - path: ParcelKeeper/Services/CarrierDetector.swift
+    info:
+      path: ParcelKeeperWidget/Info.plist
+      properties:
+        CFBundleDisplayName: 待取件码
+        ParcelKeeperAppGroup: group.com.dinghao.ParcelKeeper
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dinghao.ParcelKeeper.Widget
+        PRODUCT_NAME: ParcelKeeperWidget
+        CODE_SIGN_ENTITLEMENTS: ParcelKeeperWidget/ParcelKeeperWidget.entitlements
+        CODE_SIGN_STYLE: Automatic
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        MARKETING_VERSION: 1.1.0
+        CURRENT_PROJECT_VERSION: 2
         TARGETED_DEVICE_FAMILY: "1"
   ParcelKeeperTests:
     type: bundle.unit-test

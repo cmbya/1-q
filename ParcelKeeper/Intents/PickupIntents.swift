@@ -1,5 +1,6 @@
 import AppIntents
 import Foundation
+import WidgetKit
 
 enum PickupIntentError: LocalizedError {
     case emptyCode, emptyText, invalidGroup, duplicate, confirmationRequired, noCandidate, aiFailed
@@ -20,13 +21,14 @@ enum PickupIntentError: LocalizedError {
 /// All validation that depends on mutable data occurs inside the store transaction.
 struct PickupIntentService {
     let store: SharedPickupStore
+    var reloadWidget: () -> Void = { WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget") }
     var aiEnabled: () -> Bool = { false }
     var aiExtract: (String) async throws -> AIExtraction = { _ in throw AIServiceError.disabled }
 
     static func live() throws -> PickupIntentService {
         let group = Bundle.main.object(forInfoDictionaryKey: "ParcelKeeperAppGroup") as? String
         let ai = AIService()
-        return PickupIntentService(store: try SharedPickupStore(appGroupID: group),
+        return PickupIntentService(store: try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData),
                                    aiEnabled: { ai.loadConfiguration().enabled },
                                    aiExtract: { try await ai.extract($0) })
     }
@@ -50,6 +52,7 @@ struct PickupIntentService {
             data.records.append(PickupRecord(groupID: groupID, code: normalized,
                                              location: location ?? "", source: source ?? ""))
         }
+        reloadWidget()
     }
 
     func recognize(text: String, groupID: UUID,

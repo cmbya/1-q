@@ -2,9 +2,10 @@ import Foundation
 import Darwin
 
 enum PickupStorageError: LocalizedError {
-    case appGroupUnavailable, invalidData(String), notFound, nonEmptyGroup, stalePreview, conflictConfirmationRequired
+    case appGroupUnavailable, requiresMainApp, invalidData(String), notFound, nonEmptyGroup, stalePreview, conflictConfirmationRequired
     var errorDescription: String? {
         switch self {
+        case .requiresMainApp: return "请先打开主 App，完成共享数据初始化。"
         case .appGroupUnavailable: return "App Group 不可用；未修改原有数据。请配置共享容器和签名。"
         case .invalidData(let message): return "数据无效：\(message)"
         case .notFound: return "记录或分组不存在。"
@@ -17,6 +18,12 @@ enum PickupStorageError: LocalizedError {
 
 // All processes must use this service and the same App Group and lock file.
 final class SharedPickupStore {
+    enum AccessMode {
+        case appManaged
+        case existingSharedData
+    }
+
+    private let accessMode: AccessMode
     private let directory: URL
     private let legacyURL: URL
     private let fileManager: FileManager
@@ -43,8 +50,9 @@ final class SharedPickupStore {
     private var dataURL: URL { directory.appendingPathComponent("pickup-data.json") }
     private var lockURL: URL { directory.appendingPathComponent("pickup-data.lock") }
 
-    init(appGroupID: String?, fileManager: FileManager = .default, legacyURL: URL? = nil, containerURL: URL? = nil, readOnly: Bool = false) throws {
+    init(appGroupID: String?, fileManager: FileManager = .default, legacyURL: URL? = nil, containerURL: URL? = nil, readOnly: Bool = false, accessMode: AccessMode = .appManaged) throws {
         self.fileManager = fileManager
+        self.accessMode = accessMode
         self.readOnly = readOnly
         guard let container = containerURL ?? appGroupID.flatMap({ fileManager.containerURL(forSecurityApplicationGroupIdentifier: $0) }) else {
             throw PickupStorageError.appGroupUnavailable
@@ -54,13 +62,16 @@ final class SharedPickupStore {
             throw PickupStorageError.invalidData("无法定位旧数据目录")
         }
         self.legacyURL = legacyURL ?? support.appendingPathComponent("ParcelKeeper/shipments.json")
-        if !readOnly { try fileManager.createDirectory(at: directory, withIntermediateDirectories: true) }
+        if !readOnly && accessMode == .appManaged { try fileManager.createDirectory(at: directory, withIntermediateDirectories: true) }
     }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
-        if readOnly { return try body() }
+        if readOnly && accessMode == .appManaged { return try body() }
         let fd = open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
-        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        guard fd >= 0 else {
+            if accessMode == .existingSharedData && errno == ENOENT { throw PickupStorageError.requiresMainApp }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         defer { close(fd) }
         guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { flock(fd, LOCK_UN) }
@@ -106,6 +117,8 @@ final class SharedPickupStore {
             let data = try decoder.decode(PickupDataset.self, from: Data(contentsOf: dataURL))
             try validate(data); return data
         }
+        // This check is inside flock for every shared-data read and transaction.
+        guard accessMode == .appManaged else { throw PickupStorageError.requiresMainApp }
         let now = Date()
         let express = PickupGroup(name: "快递", sortOrder: 0, createdAt: now, updatedAt: now)
         let food = PickupGroup(name: "餐饮", sortOrder: 1, createdAt: now, updatedAt: now)
