@@ -25,6 +25,10 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("AI") {
+                    NavigationLink("AI 服务设置") { AISettingsView() }
+                }
+
                 Section("数据备份") {
                     if store.isHistoricalSnapshot {
                         Text("当前显示的是只读历史快照，可能已过时，不能代表当前共享数据。")
