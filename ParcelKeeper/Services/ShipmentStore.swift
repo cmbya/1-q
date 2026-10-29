@@ -150,7 +150,19 @@ final class ShipmentStore: ObservableObject {
     } }
     @discardableResult func addPickupRecord(groupID: UUID, code: String, location: String = "", source: String = "") throws -> UUID {
         let record = PickupRecord(groupID: groupID, code: code, location: location, source: source)
-        try change { $0.records.append(record) }; return record.id
+        try change { data in
+            guard !data.records.contains(where: {
+                $0.groupID == groupID && !$0.isCompleted && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines)
+            }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码，未重复添加。") }
+            data.records.append(record)
+        }; return record.id
+    }
+    func deletePickupRecord(id: UUID) throws {
+        try change { data in
+            guard let record = data.records.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+            guard record.shipmentID == nil else { throw PickupStorageError.invalidData("关联快递请从快递页面删除，以保留数据一致性。") }
+            data.records.removeAll { $0.id == id }
+        }
     }
     func updatePickupRecord(id: UUID, code: String, location: String, source: String) throws { try change { d in
         guard let i = d.records.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }

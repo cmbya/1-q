@@ -10,7 +10,7 @@ enum PickupIntentError: LocalizedError {
         case .emptyCode: return "取件码不能为空。"
         case .emptyText: return "输入文本不能为空。"
         case .invalidGroup: return "分组已删除或无效，请重新选择分组。"
-        case .duplicate: return "此分组已有相同取件码，可能是不同订单；请在 App 中确认后手动添加。"
+        case .duplicate: return "此分组已有未完成的相同取件码，未重复添加。已完成的历史取件码可以再次使用。"
         case .confirmationRequired: return "识别结果不明确，请在 App 中编辑；尚未保存。"
         case .noCandidate: return "未识别到取件码；请在 App 中编辑，尚未保存。"
         case .aiFailed: return "AI 识别失败，请检查 AI 配置或在 App 中手动处理；尚未保存。"
@@ -46,7 +46,7 @@ struct PickupIntentService {
             guard let group = data.groups.first(where: { $0.id == groupID }),
                   expectedGroupName == nil || group.name == expectedGroupName else { throw PickupIntentError.invalidGroup }
             // A match is only a possible duplicate, never proof of the same order.
-            guard !data.records.contains(where: { $0.groupID == groupID && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == normalized }) else {
+            guard !data.records.contains(where: { $0.groupID == groupID && !$0.isCompleted && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == normalized }) else {
                 throw PickupIntentError.duplicate
             }
             data.records.append(PickupRecord(groupID: groupID, code: normalized,
@@ -60,13 +60,16 @@ struct PickupIntentService {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupIntentError.emptyText }
         guard let group = try groups().first(where: { $0.id == groupID }) else { throw PickupIntentError.invalidGroup }
         let result = PickupTextParser().parse(text)
+        guard !result.isAmbiguous else { throw PickupIntentError.confirmationRequired }
         let candidate: PickupTextParser.Candidate
-        if result.candidates.count == 1, !result.isAmbiguous, let local = result.candidates.first {
+        if result.candidates.count == 1, !result.isAmbiguous, let local = result.candidates.first,
+           !(aiEnabled() && (local.location ?? "").isEmpty) {
             candidate = local
         } else {
-            // Ambiguous local input requires manual review; do not send text when the result cannot be used.
-            guard !result.isAmbiguous, result.candidates.isEmpty else { throw PickupIntentError.confirmationRequired }
-            guard aiEnabled() else { throw PickupIntentError.noCandidate }
+            guard aiEnabled() else {
+                if !result.candidates.isEmpty || result.isAmbiguous { throw PickupIntentError.confirmationRequired }
+                throw PickupIntentError.noCandidate
+            }
             let extracted: AIExtraction
             do {
                 try Task.checkCancellation()
@@ -75,8 +78,8 @@ struct PickupIntentService {
             } catch is CancellationError { throw CancellationError() }
             catch AIServiceError.cancelled { throw AIServiceError.cancelled }
             catch { throw PickupIntentError.aiFailed }
-            // AI cannot safely associate fields with one of several local occurrences.
-            guard !result.isAmbiguous, result.candidates.isEmpty else { throw PickupIntentError.confirmationRequired }
+            // Multiple local records still require editing rather than accepting one AI choice.
+            guard !result.isAmbiguous, result.candidates.count <= 1 else { throw PickupIntentError.confirmationRequired }
             guard !extracted.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupIntentError.aiFailed }
             candidate = PickupTextParser.Candidate(code: extracted.code, location: extracted.location.isEmpty ? nil : extracted.location, source: nil)
         }

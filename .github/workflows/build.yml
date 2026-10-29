@@ -6,6 +6,8 @@ on:
     branches: [ main, master ]
     paths:
       - "ParcelKeeper/**"
+      - "ParcelKeeperWidget/**"
+      - "ParcelKeeperTests/**"
       - "project.yml"
       - ".github/workflows/build.yml"
 
@@ -26,6 +28,13 @@ jobs:
 
       - name: Show Xcode version
         run: xcodebuild -version
+
+      - name: Test on available iPhone simulator
+        run: |
+          set -o pipefail
+          mkdir -p build
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if x.get("isAvailable") and x["name"].startswith("iPhone")))')
+          xcodebuild -project ParcelKeeper.xcodeproj -scheme ParcelKeeper -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -resultBundlePath build/TestResults.xcresult test | tee test.log
 
       - name: Build unsigned iPhone app
         run: |

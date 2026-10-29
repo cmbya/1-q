@@ -66,6 +66,14 @@ final class AIServiceTests: XCTestCase {
         XCTAssertEqual(network.requests.count, 3)
         XCTAssertEqual(network.requests.first?.url?.path, "/v1/chat/completions")
     }
+    func testMultilineSinglePickupKeepsLocation() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        network.responses = [(200, response("00123", "测试柜"))]
+        let result = try await service.extract("取件码 00123\n地点：测试柜")
+        XCTAssertEqual(result.location, "测试柜")
+    }
+
     func testAuthenticationStops() async throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)

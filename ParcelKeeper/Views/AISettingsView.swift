@@ -9,6 +9,7 @@ struct AISettingsView: View {
     @State private var busy = false
     @State private var message: String?
     @State private var showingConsent = false
+    @State private var showingEndpointChange = false
     @State private var showingReuse = false
     @State private var reuseSource: String?
     @State private var networkTask: Task<Void, Never>?
@@ -125,6 +126,12 @@ struct AISettingsView: View {
         } message: {
             Text("目标地址：\(saved.baseURL)。来源：\(reuseSource ?? "旧版未绑定 Key")。请确认信任目标服务。")
         }
+        .alert("确认更换 AI 服务地址？", isPresented: $showingEndpointChange) {
+            Button("保留原配置", role: .cancel) { config = saved }
+            Button("更换并重新选择模型") { saveConfiguration(privacyConfirmed: false) }
+        } message: {
+            Text("更换后将关闭 AI 并清除当前模型选择，需为新地址配置密钥、刷新模型。旧地址密钥仍保留在钥匙串；取消不会改变已保存配置。")
+        }
         .alert("确认启用 AI？", isPresented: $showingConsent) {
             Button("取消", role: .cancel) { }
             Button("确认并保存") { saveConfiguration(privacyConfirmed: true) }
@@ -139,6 +146,10 @@ struct AISettingsView: View {
     }
 
     private func requestSave() {
+        if !saved.baseURL.isEmpty && config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines) != saved.baseURL {
+            showingEndpointChange = true
+            return
+        }
         if config.enabled && !saved.enabled && config.baseURL.trimmingCharacters(in: .whitespacesAndNewlines) == saved.baseURL { showingConsent = true }
         else { saveConfiguration(privacyConfirmed: false) }
     }

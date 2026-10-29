@@ -298,7 +298,7 @@ final class AIService {
                 // With multiple records, independently grounded fields can belong to different parcels.
                 let labelPattern = try? NSRegularExpression(pattern: "(?:取件|取货|取餐|提货)码")
                 let labelCount = labelPattern?.numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text)) ?? 0
-                let ambiguous = text.contains("\n") || text.contains("\r") || labelCount > 1
+                let ambiguous = labelCount > 1 || PickupTextParser().parse(text).isAmbiguous
                 return AIExtraction(code: code, location: ambiguous ? "" : location, source: ambiguous ? "" : source, model: model, failures: failures)
             } catch let error as AIServiceError {
                 if error == .authentication || error == .configuration || error == .cancelled || error == .keychain || error == .keyBindingRequired || error == .insecureHTTP { throw error }

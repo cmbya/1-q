@@ -43,6 +43,16 @@ final class PickupIntentTests: XCTestCase {
         XCTAssertEqual(Set(records.map(\.groupID)), Set(groups.map(\.id)))
     }
 
+    func testCompletedCodeCanBeUsedAgain() throws {
+        let group = try XCTUnwrap(service.groups().first)
+        try service.add(code: "025", location: "门店", groupID: group.id, source: nil)
+        try store.transaction { $0.records[0].isCompleted = true }
+        try service.add(code: "025", location: "另一门店", groupID: group.id, source: nil)
+        let records = try store.snapshot().records
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records.filter { !$0.isCompleted }.count, 1)
+    }
+
     func testInvalidInputAndDeletedGroupDoNotWrite() throws {
         let group = try XCTUnwrap(service.groups().last)
         XCTAssertThrowsError(try service.add(code: " \n", location: nil, groupID: group.id, source: nil))
@@ -88,7 +98,7 @@ final class PickupIntentTests: XCTestCase {
             XCTAssertEqual(text, "请凭 7788 到东门领取")
             return AIExtraction(code: "7788", location: "东门", source: "私密来源", model: "mock", failures: [])
         }
-        try await service.recognize(text: "取件码00123", groupID: id) { _, _ in }
+        try await service.recognize(text: "取件码00123，到菜鸟驿站取件", groupID: id) { _, _ in }
         XCTAssertEqual(calls, 0)
         try await service.recognize(text: "请凭 7788 到东门领取", groupID: id) { candidate, _ in
             XCTAssertEqual(candidate.code, "7788")
@@ -100,6 +110,15 @@ final class PickupIntentTests: XCTestCase {
         let records = try store.snapshot().records
         XCTAssertEqual(records.count, 2)
         XCTAssertEqual(records[1].source, "")
+    }
+
+    func testAIEnrichesMissingLocalLocation() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        service.aiEnabled = { true }
+        service.aiExtract = { _ in AIExtraction(code: "00123", location: "测试柜", source: "", model: "mock", failures: []) }
+        try await service.recognize(text: "取件码00123\n地点：测试柜", groupID: id) { candidate, _ in
+            XCTAssertEqual(candidate.location, "测试柜")
+        }
     }
 
     func testAIFailureAmbiguityAndCancelledConfirmationNeverSave() async throws {

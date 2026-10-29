@@ -5,6 +5,9 @@ struct PickupView: View {
     @State private var showingAdd = false
     @State private var showingGroups = false
     @State private var showingImport = false
+    @State private var searchText = ""
+    @State private var filter = 0
+    @State private var deleting: PickupRecord?
     @State private var editing: PickupRecord?
     @State private var error: String?
 
@@ -14,9 +17,17 @@ struct PickupView: View {
                 Section {
                     Button("粘贴文字识别取码", systemImage: "doc.on.clipboard") { showingImport = true }
                 }
+                Picker("状态", selection: $filter) {
+                    Text("未完成").tag(0)
+                    Text("已完成").tag(1)
+                    Text("全部").tag(2)
+                }.pickerStyle(.segmented)
                 ForEach(store.groups) { group in
                     Section(group.name) {
-                        let records = store.pickupRecords.filter { $0.groupID == group.id }
+                        let records = store.pickupRecords.filter {
+                            $0.groupID == group.id && (filter == 2 || $0.isCompleted == (filter == 1)) &&
+                            (searchText.isEmpty || [$0.code, $0.location, $0.source].contains { $0.localizedCaseInsensitiveContains(searchText) })
+                        }
                             .sorted { $0.createdAt > $1.createdAt }
                         if records.isEmpty { Text("暂无取码记录").foregroundStyle(.secondary) }
                         ForEach(records) { record in
@@ -36,6 +47,9 @@ struct PickupView: View {
                                 Spacer()
                                 Button("编辑") { editing = record }
                                     .buttonStyle(.borderless)
+                                if record.shipmentID == nil {
+                                    Button("删除", role: .destructive) { deleting = record }.buttonStyle(.borderless)
+                                }
                                 Menu("移动") {
                                     ForEach(store.groups.filter { $0.id != group.id }) { destination in
                                         Button(destination.name) { run { try store.movePickupRecord(id: record.id, to: destination.id) } }
@@ -45,6 +59,14 @@ struct PickupView: View {
                         }
                     }
                 }
+            }
+            .searchable(text: $searchText, prompt: "搜索取件码、地点或备注")
+            .confirmationDialog("删除这条取码记录？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+                Button("删除", role: .destructive) {
+                    if let record = deleting { run { try store.deletePickupRecord(id: record.id) } }
+                    deleting = nil
+                }
+                Button("取消", role: .cancel) { deleting = nil }
             }
             .navigationTitle("取码")
             .toolbar {
@@ -127,22 +149,21 @@ private struct AddPickupView: View {
                     Text("请选择").tag(Optional<UUID>.none)
                     ForEach(store.groups) { Text($0.name).tag(Optional($0.id)) }
                 }
-                Text("相同取码可作为不同记录保存。") .font(.footnote)
+                Text("同组未完成的相同取码不重复添加，已完成的历史取码可以再次使用。") .font(.footnote)
             }
             .navigationTitle("添加取码")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        if store.pickupRecords.contains(where: { $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) }) { duplicate = true }
+                        if store.pickupRecords.contains(where: { $0.groupID == groupID && !$0.isCompleted && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) }) { duplicate = true }
                         else { save() }
                     }.disabled(groupID == nil || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .alert("发现重复取码", isPresented: $duplicate) {
-                Button("仍然保存") { save() }
-                Button("取消", role: .cancel) { }
-            } message: { Text("已有相同取码，仍可作为新记录保存，不会覆盖原记录。") }
+                Button("知道了", role: .cancel) { }
+            } message: { Text("此分组已有未完成的相同取码，本次不重复添加。已完成的历史取码可再次使用。") }
             .alert("保存失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
                 Button("知道了", role: .cancel) { error = nil }
             } message: { Text(error ?? "") }
@@ -306,15 +327,14 @@ private struct PickupImportView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { task?.cancel(); dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
-                        if store.pickupRecords.contains(where: { $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) }) { duplicate = true }
+                        if store.pickupRecords.contains(where: { $0.groupID == groupID && !$0.isCompleted && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) }) { duplicate = true }
                         else { save() }
                     }.disabled(processing || needsChoice || groupID == nil || code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
             .alert("发现重复取码", isPresented: $duplicate) {
-                Button("仍然保存") { save() }
-                Button("取消", role: .cancel) { }
-            } message: { Text("已有相同取码，仍可作为新记录保存，不会覆盖原记录。") }
+                Button("知道了", role: .cancel) { }
+            } message: { Text("此分组已有未完成的相同取码，本次不重复添加。已完成的历史取码可再次使用。") }
             .alert("保存失败", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
                 Button("知道了", role: .cancel) { error = nil }
             } message: { Text(error ?? "") }
@@ -338,7 +358,7 @@ private struct PickupImportView: View {
         if !result.isAmbiguous, result.candidates.count == 1, let candidate = result.candidates.first {
             code = candidate.code; location = candidate.location ?? ""; source = candidate.source ?? ""
         }
-        let needsAI = result.isAmbiguous || result.candidates.isEmpty
+        let needsAI = result.isAmbiguous || result.candidates.isEmpty || result.candidates.contains { ($0.location ?? "").isEmpty }
         guard needsAI else { status = "本地识别完成，请核对并编辑后保存。"; return }
         guard AIService().loadConfiguration().enabled else {
             status = "本地结果不确定或未识别；AI 未开启，请选择候选或手动填写。"
