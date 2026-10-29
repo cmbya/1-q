@@ -28,7 +28,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dinghao.ParcelKeeper
         PRODUCT_MODULE_NAME: ParcelKeeper
-        PRODUCT_NAME: 快递管家
+        PRODUCT_NAME: ParcelKeeper
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: 快递管家
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
