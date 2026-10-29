@@ -16,6 +16,8 @@ jobs:
   build:
     runs-on: macos-15-intel
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -74,3 +76,17 @@ jobs:
             build/ParcelKeeper-unsigned.ipa
             build.log
           if-no-files-found: error
+
+      - name: Publish verified unsigned IPA
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Payload/ParcelKeeper.app/Info.plist)
+          TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          (cd build && shasum -a 256 ParcelKeeper-unsigned.ipa > SHA256SUMS.txt)
+          NOTES="自动构建预发布版；来源提交 ${GITHUB_SHA}。测试、Release 编译及 IPA 图标/组件配置校验均成功。无签名 IPA，最低 iOS 17，需自行签名；主 App 和组件必须获得相同 App Group 授权。编译通过不等于真机/重签/CPA 验收通过。安装前请备份数据。构建：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          gh release create "$TAG" build/ParcelKeeper-unsigned.ipa build/SHA256SUMS.txt --target "$GITHUB_SHA" --title "快递管家 ${VERSION} · Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}（无签名）" --prerelease --notes "$NOTES"
+          gh release view "$TAG" --json url,targetCommitish,assets
