@@ -14,7 +14,8 @@ struct AddShipmentSheet: View {
     @State private var reminderEnabled = false
     @State private var reminderDate = Date().addingTimeInterval(8 * 60 * 60)
     @State private var showingDuplicateAlert = false
-    @State private var notificationDenied = false
+    @State private var saveError: String?
+    @State private var reminderError: String?
     @State private var isSaving = false
 
     init(draft: ShipmentImportDraft) {
@@ -99,10 +100,21 @@ struct AddShipmentSheet: View {
             .alert("这个运单已经保存过了", isPresented: $showingDuplicateAlert) {
                 Button("知道了", role: .cancel) {}
             }
-            .alert("没有通知权限", isPresented: $notificationDenied) {
+            .alert("保存失败", isPresented: Binding(
+                get: { saveError != nil },
+                set: { if !$0 { saveError = nil } }
+            )) {
+                Button("知道了", role: .cancel) {}
+            } message: {
+                Text(saveError ?? "")
+            }
+            .alert("提醒未创建", isPresented: Binding(
+                get: { reminderError != nil },
+                set: { if !$0 { reminderError = nil } }
+            )) {
                 Button("继续", role: .cancel) { dismiss() }
             } message: {
-                Text("快递已经保存，但提醒未创建。可以稍后在设置中开启通知权限。")
+                Text(reminderError ?? "")
             }
         }
     }
@@ -124,29 +136,44 @@ struct AddShipmentSheet: View {
             status: status,
             note: note.trimmingCharacters(in: .whitespacesAndNewlines),
             pickupCode: pickupCode.trimmingCharacters(in: .whitespacesAndNewlines),
-            reminderDate: reminderEnabled ? reminderDate : nil
+            reminderDate: nil
         )
 
-        guard store.add(shipment) else {
-            showingDuplicateAlert = true
-            return
-        }
+        guard store.beginReminderOperation() else { saveError = "提醒操作正在进行，请稍后重试。"; return }
+        do { try store.addThrowing(shipment) }
+        catch ShipmentStore.ShipmentWriteError.duplicateTrackingNumber { store.endReminderOperation(); showingDuplicateAlert = true; return }
+        catch { store.endReminderOperation(); saveError = error.localizedDescription; return }
 
         guard reminderEnabled else {
+            store.endReminderOperation()
             dismiss()
             return
         }
 
         isSaving = true
         Task { @MainActor in
+            defer { store.endReminderOperation() }
             let granted = await NotificationManager.shared.requestAuthorization()
             guard granted else {
                 isSaving = false
-                notificationDenied = true
+                reminderError = "快递已保存，但没有通知权限，提醒未创建。"
                 return
             }
-            try? await NotificationManager.shared.scheduleReminder(for: shipment, at: reminderDate)
-            dismiss()
+            do {
+                try await NotificationManager.shared.scheduleReminder(for: shipment, at: reminderDate)
+                do {
+                    try store.updateReminderThrowing(id: shipment.id, date: reminderDate)
+                } catch {
+                    NotificationManager.shared.cancelReminder(for: shipment.id)
+                    isSaving = false
+                    reminderError = "快递已保存，但提醒保存失败：\(error.localizedDescription)"
+                    return
+                }
+                dismiss()
+            } catch {
+                isSaving = false
+                reminderError = "快递已保存，但提醒创建失败：\(error.localizedDescription)"
+            }
         }
     }
 }

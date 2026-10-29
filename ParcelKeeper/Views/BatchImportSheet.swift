@@ -6,6 +6,7 @@ struct BatchImportSheet: View {
 
     @State private var drafts: [ShipmentImportDraft]
     @State private var resultMessage: String?
+    @State private var hasImportFailures = false
 
     init(drafts: [ShipmentImportDraft]) {
         _drafts = State(initialValue: drafts)
@@ -77,7 +78,9 @@ struct BatchImportSheet: View {
                 get: { resultMessage != nil },
                 set: { if !$0 { resultMessage = nil } }
             )) {
-                Button("完成") { dismiss() }
+                Button(hasImportFailures ? "继续" : "完成") {
+                    if !hasImportFailures { dismiss() }
+                }
             } message: {
                 Text(resultMessage ?? "")
             }
@@ -87,8 +90,11 @@ struct BatchImportSheet: View {
     private func importSelected() {
         var added = 0
         var duplicates = 0
+        var failures = 0
+        var firstError: String?
 
-        for draft in drafts where draft.isSelected {
+        for index in drafts.indices where drafts[index].isSelected {
+            let draft = drafts[index]
             let shipment = Shipment(
                 trackingNumber: CarrierDetector.sanitize(draft.trackingNumber),
                 carrierName: draft.carrier.name,
@@ -98,17 +104,24 @@ struct BatchImportSheet: View {
                 pickupCode: draft.pickupCode.trimmingCharacters(in: .whitespacesAndNewlines)
             )
 
-            if store.add(shipment) {
+            do {
+                try store.addThrowing(shipment)
                 added += 1
-            } else {
+                drafts[index].isSelected = false
+            } catch ShipmentStore.ShipmentWriteError.duplicateTrackingNumber {
                 duplicates += 1
+                drafts[index].isSelected = false
+            } catch {
+                failures += 1
+                if firstError == nil { firstError = error.localizedDescription }
             }
         }
 
-        if duplicates > 0 {
-            resultMessage = "成功导入 \(added) 条，跳过 \(duplicates) 条重复运单。"
-        } else {
-            resultMessage = "成功导入 \(added) 条快递。"
+        hasImportFailures = failures > 0
+        var message = "成功导入 \(added) 条，跳过 \(duplicates) 条重复运单。"
+        if failures > 0 {
+            message += " \(failures) 条保存失败：\(firstError ?? "未知错误")。失败项仍保持选中，可重试。"
         }
+        resultMessage = message
     }
 }

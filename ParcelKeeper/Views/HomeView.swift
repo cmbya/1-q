@@ -224,7 +224,12 @@ struct HomeView: View {
                     .buttonStyle(.plain)
                     .contextMenu {
                         Button(role: .destructive) {
-                            store.delete(id: shipment.id)
+                            guard store.beginReminderOperation() else { store.lastErrorMessage = "提醒操作正在进行，请稍后重试。"; return }
+                            defer { store.endReminderOperation() }
+                            do {
+                                try store.deleteThrowing(id: shipment.id)
+                                NotificationManager.shared.cancelReminder(for: shipment.id)
+                            } catch { store.lastErrorMessage = error.localizedDescription }
                         } label: {
                             Label("删除", systemImage: "trash")
                         }

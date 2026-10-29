@@ -13,6 +13,9 @@ struct ShipmentDetailView: View {
     @State private var reminderEnabled = false
     @State private var reminderDate = Date().addingTimeInterval(8 * 60 * 60)
     @State private var showingDeleteConfirmation = false
+    @State private var reminderBusy = false
+    @State private var reminderInitialized = false
+    @State private var reminderError: String?
 
     private var shipment: Shipment? {
         store.shipment(id: shipmentID)
@@ -70,7 +73,7 @@ struct ShipmentDetailView: View {
                     Section("提醒") {
                         Toggle("设置提醒", isOn: $reminderEnabled)
                             .onChange(of: reminderEnabled) { _, enabled in
-                                handleReminderToggle(enabled, shipment: shipment)
+                                if reminderInitialized { handleReminderToggle(enabled, shipment: shipment) }
                             }
 
                         if reminderEnabled {
@@ -81,10 +84,12 @@ struct ShipmentDetailView: View {
                                 displayedComponents: [.date, .hourAndMinute]
                             )
                             .onChange(of: reminderDate) { _, newDate in
-                                scheduleReminder(shipment: shipment, date: newDate)
+                                if reminderInitialized && reminderEnabled { scheduleReminder(shipment: shipment, date: newDate) }
                             }
                         }
                     }
+
+                    .disabled(reminderBusy)
 
                     Section("记录") {
                         LabeledContent("添加时间", value: shipment.createdAt.formatted(date: .abbreviated, time: .shortened))
@@ -102,6 +107,7 @@ struct ShipmentDetailView: View {
                         Button("删除这条快递", role: .destructive) {
                             showingDeleteConfirmation = true
                         }
+                        .disabled(reminderBusy)
                     }
                 }
                 .navigationTitle(shipment.carrierName)
@@ -112,15 +118,22 @@ struct ShipmentDetailView: View {
                     pickupCode = shipment.pickupCode
                     reminderEnabled = shipment.reminderDate != nil
                     reminderDate = shipment.reminderDate ?? Date().addingTimeInterval(8 * 60 * 60)
+                    reminderInitialized = true
                 }
                 .onChange(of: selectedCarrier) { _, carrier in
                     store.updateCarrier(id: shipmentID, carrier: carrier)
                 }
                 .confirmationDialog("确定删除这条快递吗？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
                     Button("删除", role: .destructive) {
-                        NotificationManager.shared.cancelReminder(for: shipmentID)
-                        store.delete(id: shipmentID)
-                        dismiss()
+                        guard store.beginReminderOperation() else { reminderError = "提醒操作正在进行，请稍后重试。"; return }
+                        defer { store.endReminderOperation() }
+                        do {
+                            try store.deleteThrowing(id: shipmentID)
+                            NotificationManager.shared.cancelReminder(for: shipmentID)
+                            dismiss()
+                        } catch {
+                            reminderError = "删除失败：\(error.localizedDescription)"
+                        }
                     }
                     Button("取消", role: .cancel) {}
                 }
@@ -128,23 +141,68 @@ struct ShipmentDetailView: View {
                 ContentUnavailableView("快递不存在", systemImage: "shippingbox")
             }
         }
+        .alert("操作未完成", isPresented: Binding(
+            get: { reminderError != nil },
+            set: { if !$0 { reminderError = nil } }
+        )) { Button("知道了", role: .cancel) {} } message: { Text(reminderError ?? "") }
     }
 
     private func handleReminderToggle(_ enabled: Bool, shipment: Shipment) {
         if enabled {
             scheduleReminder(shipment: shipment, date: reminderDate)
         } else {
-            NotificationManager.shared.cancelReminder(for: shipmentID)
-            store.updateReminder(id: shipmentID, date: nil)
+            guard store.beginReminderOperation() else { restoreReminderControls(); reminderError = "提醒操作正在进行，请稍后重试。"; return }
+            defer { store.endReminderOperation() }
+            do {
+                try store.updateReminderThrowing(id: shipmentID, date: nil)
+                NotificationManager.shared.cancelReminder(for: shipmentID)
+            } catch {
+                restoreReminderControls()
+                reminderError = "关闭提醒失败：\(error.localizedDescription)"
+            }
         }
     }
 
+    private func restoreReminderControls() {
+        reminderInitialized = false
+        let saved = store.shipment(id: shipmentID)?.reminderDate
+        reminderEnabled = saved != nil
+        if let saved { reminderDate = saved }
+        // SwiftUI delivers onChange after state updates; suppress restoration callbacks.
+        DispatchQueue.main.async { reminderInitialized = true }
+    }
+
     private func scheduleReminder(shipment: Shipment, date: Date) {
-        Task {
-            let granted = await NotificationManager.shared.requestAuthorization()
-            guard granted else { return }
-            try? await NotificationManager.shared.scheduleReminder(for: shipment, at: date)
-            store.updateReminder(id: shipmentID, date: date)
+        guard !reminderBusy else { return }
+        guard store.beginReminderOperation() else { restoreReminderControls(); reminderError = "提醒操作正在进行，请稍后重试。"; return }
+        reminderBusy = true
+        Task { @MainActor in
+            defer { reminderBusy = false; store.endReminderOperation() }
+            guard await NotificationManager.shared.requestAuthorization() else {
+                restoreReminderControls()
+                reminderError = "没有通知权限，提醒未更改。请在系统设置中开启通知。"
+                return
+            }
+            guard let current = store.shipment(id: shipmentID) else { return }
+            do {
+                try await NotificationManager.shared.scheduleReminder(for: current, at: date)
+                do {
+                    try store.updateReminderThrowing(id: shipmentID, date: date)
+                } catch {
+                    let saveError = error.localizedDescription
+                    // Restore the old request when persistence fails.
+                    if let oldDate = current.reminderDate, oldDate > Date() {
+                        do { try await NotificationManager.shared.scheduleReminder(for: current, at: oldDate) }
+                        catch { reminderError = "提醒保存失败，且旧提醒恢复失败：\(error.localizedDescription)"; restoreReminderControls(); return }
+                    } else { NotificationManager.shared.cancelReminder(for: shipmentID) }
+                    restoreReminderControls()
+                    reminderError = "提醒保存失败：\(saveError)"
+                    return
+                }
+            } catch {
+                restoreReminderControls()
+                reminderError = "提醒创建失败：\(error.localizedDescription)"
+            }
         }
     }
 }
