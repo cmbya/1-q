@@ -3,7 +3,7 @@ import Foundation
 import SwiftUI
 import WidgetKit
 
-// Test-only widgets: no AppIntent configuration, buttons, writes or parcel details.
+// Test-only widgets. D1/D2 are read-only summaries; D3/D4 isolate production paths.
 private struct DiagnosticEntry: TimelineEntry {
     let date: Date
     let status: String
@@ -84,11 +84,62 @@ private struct ReadOnlyDiagnosticWidget: Widget {
     }
 }
 
+// D3 retains the production configuration/provider, replacing only its view.
+private struct ConfiguredTextDiagnosticWidget: Widget {
+    var body: some WidgetConfiguration {
+        AppIntentConfiguration(kind: "ParcelKeeperDiagnosticConfiguredText", intent: PickupWidgetConfiguration.self, provider: PickupProvider()) { entry in
+            DiagnosticView(entry: DiagnosticEntry(date: entry.date,
+                status: "分组时间线已返回", detail: "D3 · \(entry.title) · 记录 \(entry.records.count) · \(entry.message ?? "有数据")"))
+        }
+        .configurationDisplayName("诊断③分组纯文字")
+        .description("选择分组后只显示纯文字，隔离原交互视图。")
+        .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+// D4 keeps the production view but bypasses AppIntent configuration and UserDefaults.
+private struct OriginalViewDiagnosticProvider: TimelineProvider {
+    func placeholder(in context: Context) -> PickupEntry {
+        PickupEntry(date: Date(), groupID: nil, title: "D4 占位", records: [], message: "非运行结果", error: nil)
+    }
+    func getSnapshot(in context: Context, completion: @escaping (PickupEntry) -> Void) { completion(load()) }
+    func getTimeline(in context: Context, completion: @escaping (Timeline<PickupEntry>) -> Void) {
+        completion(Timeline(entries: [load()], policy: .after(Date().addingTimeInterval(60))))
+    }
+    private func load() -> PickupEntry {
+        do {
+            let group = Bundle.main.object(forInfoDictionaryKey: "ParcelKeeperAppGroup") as? String
+            let data = try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData).snapshot()
+            guard let selected = data.groups.sorted(by: { $0.sortOrder < $1.sortOrder }).first else {
+                return PickupEntry(date: Date(), groupID: nil, title: "D4", records: [], message: "没有分组", error: nil)
+            }
+            let records = data.records.filter { $0.groupID == selected.id && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            return PickupEntry(date: Date(), groupID: selected.id, title: "D4 · \(selected.name)", records: records,
+                               message: records.isEmpty ? "暂无待取件码" : nil, error: nil)
+        } catch {
+            return PickupEntry(date: Date(), groupID: nil, title: "D4", records: [], message: "共享数据读取失败", error: nil)
+        }
+    }
+}
+
+private struct OriginalViewDiagnosticWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: "ParcelKeeperDiagnosticOriginalView", provider: OriginalViewDiagnosticProvider()) {
+            PickupWidgetView(entry: $0)
+        }
+        .configurationDisplayName("诊断④原界面")
+        .description("自动读取首个分组，保留原按钮和界面；点击完成会真实修改记录，请只用测试数据。")
+        .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
 @main
 struct ParcelKeeperDiagnosticBundle: WidgetBundle {
     var body: some Widget {
         StaticDiagnosticWidget()
         ReadOnlyDiagnosticWidget()
+        ConfiguredTextDiagnosticWidget()
+        OriginalViewDiagnosticWidget()
         ParcelKeeperWidget()
     }
 }
