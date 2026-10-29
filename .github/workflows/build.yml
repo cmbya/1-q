@@ -3,6 +3,10 @@ name: Build Unsigned IPA
 on:
   workflow_dispatch:
     inputs:
+      build_only:
+        description: Compile an artifact without simulator tests or Release publication
+        type: boolean
+        default: false
       widget_diagnostics:
         description: Build extra static/read-only diagnostic widgets (artifact only)
         type: boolean
@@ -42,6 +46,7 @@ jobs:
           xcodebuild -version
 
       - name: Test on available iPhone simulator
+        if: ${{ !inputs.build_only }}
         run: |
           set -o pipefail
           mkdir -p build
@@ -86,7 +91,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish verified unsigned IPA
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && !inputs.widget_diagnostics
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && !inputs.widget_diagnostics && !inputs.build_only
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

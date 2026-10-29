@@ -25,36 +25,30 @@ private enum WidgetStore {
     }
 }
 
-struct WidgetGroup: AppEntity {
-    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "取件分组")
-    static var defaultQuery = WidgetGroupQuery()
-    // Persist a primitive identifier across the system's configuration boundary.
-    let id: String
-    let name: String
-    var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
-    init(_ group: PickupGroup) { id = group.id.uuidString; name = group.name }
-}
-
-struct WidgetGroupQuery: EntityQuery {
-    func entities(for identifiers: [String]) async throws -> [WidgetGroup] {
-        let groups = try WidgetStore.open().snapshot().groups
-        return identifiers.compactMap { id in
-            guard let uuid = UUID(uuidString: id) else { return nil }
-            return groups.first(where: { $0.id == uuid }).map(WidgetGroup.init)
-        }
-    }
-    func suggestedEntities() async throws -> [WidgetGroup] {
-        try WidgetStore.open().snapshot().groups.sorted {
+// Reference: evcc-io/app, targets/widget/Configuration.swift.
+// A plain String parameter avoids AppEntity registration/rehydration while
+// keeping independent per-widget configuration. Labels may change; IDs do not.
+struct PickupGroupOptions: DynamicOptionsProvider {
+    func results() async throws -> IntentItemCollection<String> {
+        let groups = try WidgetStore.open().snapshot().groups.sorted {
             $0.sortOrder == $1.sortOrder ? $0.id.uuidString < $1.id.uuidString : $0.sortOrder < $1.sortOrder
-        }.map(WidgetGroup.init)
+        }
+        return IntentItemCollection(sections: [
+            IntentItemSection(items: groups.map { group in
+                IntentItem<String>(group.id.uuidString,
+                    title: LocalizedStringResource(stringLiteral: group.name))
+            })
+        ])
     }
 }
 
-struct PickupWidgetConfiguration: WidgetConfigurationIntent {
+// New configuration type: do not reinterpret a previously saved entity as a
+// String. Existing tiles can still be removed without modifying stored records.
+struct PickupGroupSelection: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "选择取件分组"
-    static var description = IntentDescription("显示一个分组的待取件码。")
-    @Parameter(title: "分组") var group: WidgetGroup?
-    static var parameterSummary: some ParameterSummary { Summary { \.$group } }
+    static var description = IntentDescription("每个组件独立选择一个分组。")
+    @Parameter(title: "分组", optionsProvider: PickupGroupOptions()) var groupID: String?
+    static var parameterSummary: some ParameterSummary { Summary { \.$groupID } }
     init() {}
 }
 
@@ -122,19 +116,19 @@ struct PickupProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> PickupEntry {
         PickupEntry(date: Date(), groupID: nil, title: "取件码", records: [], message: "选择分组", error: nil)
     }
-    func snapshot(for configuration: PickupWidgetConfiguration, in context: Context) async -> PickupEntry { load(configuration) }
-    func timeline(for configuration: PickupWidgetConfiguration, in context: Context) async -> Timeline<PickupEntry> {
+    func snapshot(for configuration: PickupGroupSelection, in context: Context) async -> PickupEntry { load(configuration) }
+    func timeline(for configuration: PickupGroupSelection, in context: Context) async -> Timeline<PickupEntry> {
         Timeline(entries: [load(configuration)], policy: .after(Date().addingTimeInterval(900)))
     }
-    private func load(_ configuration: PickupWidgetConfiguration) -> PickupEntry {
-        guard let selected = configuration.group, let selectedID = UUID(uuidString: selected.id) else {
+    private func load(_ configuration: PickupGroupSelection) -> PickupEntry {
+        guard let selected = configuration.groupID, let selectedID = UUID(uuidString: selected) else {
             return PickupEntry(date: Date(), groupID: nil, title: "取件码", records: [], message: "长按组件选择分组", error: nil)
         }
         do {
             let priorError = try WidgetStore.error(selectedID)
             let data = try WidgetStore.open().snapshot()
             guard let group = data.groups.first(where: { $0.id == selectedID }) else {
-                return PickupEntry(date: Date(), groupID: selectedID, title: selected.name, records: [], message: "分组已失效，请重新配置", error: priorError)
+                return PickupEntry(date: Date(), groupID: selectedID, title: "取件码", records: [], message: "分组已失效，请重新配置", error: priorError)
             }
             let records = data.records.filter { $0.groupID == group.id && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.sorted {
                 $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
@@ -142,7 +136,7 @@ struct PickupProvider: AppIntentTimelineProvider {
             return PickupEntry(date: Date(), groupID: group.id, title: group.name, records: records,
                                message: records.isEmpty ? "暂无待取件码" : nil, error: priorError)
         } catch {
-            return PickupEntry(date: Date(), groupID: selectedID, title: selected.name, records: [],
+            return PickupEntry(date: Date(), groupID: selectedID, title: "取件码", records: [],
                                message: "无法读取数据，请打开 App 检查共享容器及初始化状态。", error: "无法读取组件状态或数据，请打开 App 检查")
         }
     }
@@ -202,7 +196,7 @@ struct PickupWidgetView: View {
 #endif
 struct ParcelKeeperWidget: Widget {
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: "ParcelKeeperPickupWidget", intent: PickupWidgetConfiguration.self, provider: PickupProvider()) { entry in
+        AppIntentConfiguration(kind: "ParcelKeeperPickupWidget", intent: PickupGroupSelection.self, provider: PickupProvider()) { entry in
             PickupWidgetView(entry: entry)
         }
         .configurationDisplayName("待取件码")

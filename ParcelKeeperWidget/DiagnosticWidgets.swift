@@ -89,7 +89,7 @@ private struct ReadOnlyDiagnosticWidget: Widget {
 // D3 retains the production configuration/provider, replacing only its view.
 private struct ConfiguredTextDiagnosticWidget: Widget {
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: "ParcelKeeperDiagnosticConfiguredText", intent: PickupWidgetConfiguration.self, provider: PickupProvider()) { entry in
+        AppIntentConfiguration(kind: "ParcelKeeperDiagnosticConfiguredText", intent: PickupGroupSelection.self, provider: PickupProvider()) { entry in
             DiagnosticView(entry: DiagnosticEntry(date: entry.date,
                 status: "分组时间线已返回", detail: "D3 · \(entry.title) · 记录 \(entry.records.count) · \(entry.message ?? "有数据")"))
         }
