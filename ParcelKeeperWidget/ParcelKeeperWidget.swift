@@ -191,7 +191,9 @@ struct PickupWidgetView: View {
     }
 }
 
+#if !WIDGET_DIAGNOSTICS
 @main
+#endif
 struct ParcelKeeperWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "ParcelKeeperPickupWidget", intent: PickupWidgetConfiguration.self, provider: PickupProvider()) { entry in

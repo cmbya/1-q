@@ -2,6 +2,11 @@ name: Build Unsigned IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      widget_diagnostics:
+        description: Build extra static/read-only diagnostic widgets (artifact only)
+        type: boolean
+        default: false
   push:
     branches: [ main, master ]
     paths:
@@ -18,6 +23,8 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      DIAGNOSTIC_CONDITION: ${{ inputs.widget_diagnostics && 'WIDGET_DIAGNOSTICS' || '' }}
 
     steps:
       - name: Checkout
@@ -39,7 +46,7 @@ jobs:
           set -o pipefail
           mkdir -p build
           DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if x.get("isAvailable") and x["name"].startswith("iPhone")))')
-          xcodebuild -project ParcelKeeper.xcodeproj -scheme ParcelKeeper -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -resultBundlePath build/TestResults.xcresult test | tee test.log
+          xcodebuild -project ParcelKeeper.xcodeproj -scheme ParcelKeeper -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -resultBundlePath build/TestResults.xcresult "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG $DIAGNOSTIC_CONDITION" test | tee test.log
 
       - name: Build unsigned iPhone app
         run: |
@@ -54,6 +61,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            "SWIFT_ACTIVE_COMPILATION_CONDITIONS=$DIAGNOSTIC_CONDITION" \
             clean build | tee build.log
 
       - name: Package unsigned IPA
@@ -78,7 +86,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish verified unsigned IPA
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && !inputs.widget_diagnostics
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
