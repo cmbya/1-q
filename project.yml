@@ -18,6 +18,14 @@ targets:
       - path: ParcelKeeper
         excludes:
           - ParcelKeeper.entitlements
+    info:
+      path: ParcelKeeper/Info.plist
+      properties:
+        CFBundleDisplayName: 快递管家
+        ParcelKeeperAppGroup: group.com.dinghao.ParcelKeeper
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
     dependencies:
       - target: ParcelKeeperWidget
         embed: true
@@ -26,7 +34,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.dinghao.ParcelKeeper
         PRODUCT_MODULE_NAME: ParcelKeeper
         PRODUCT_NAME: ParcelKeeper
-        GENERATE_INFOPLIST_FILE: YES
+        GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_KEY_CFBundleDisplayName: 快递管家
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
