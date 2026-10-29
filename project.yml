@@ -91,7 +91,27 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.dinghao.ParcelKeeperTests
         GENERATE_INFOPLIST_FILE: YES
+  ParcelKeeperWidgetUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: ParcelKeeperWidgetUITests
+    dependencies:
+      - target: ParcelKeeper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dinghao.ParcelKeeper.WidgetUITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: ParcelKeeper
 schemes:
+  WidgetProbe:
+    build:
+      targets:
+        ParcelKeeper: all
+        ParcelKeeperWidgetUITests: [test]
+    test:
+      targets:
+        - ParcelKeeperWidgetUITests
   ParcelKeeper:
     build:
       targets:

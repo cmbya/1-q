@@ -1,5 +1,7 @@
 #if WIDGET_DIAGNOSTICS
+import AppIntents
 import Foundation
+import OSLog
 import SwiftUI
 import WidgetKit
 
@@ -133,9 +135,44 @@ private struct OriginalViewDiagnosticWidget: Widget {
     }
 }
 
+private struct MinimalConfiguration: WidgetConfigurationIntent {
+    static var title: LocalizedStringResource = "Minimal configuration"
+    @Parameter(title: "Label", default: "CONFIG-ALPHA") var label: String
+}
+
+private struct MinimalProvider: AppIntentTimelineProvider {
+    func placeholder(in context: Context) -> DiagnosticEntry {
+        DiagnosticEntry(date: Date(), status: "MINIMAL-PLACEHOLDER", detail: "Not a timeline result")
+    }
+    func snapshot(for configuration: MinimalConfiguration, in context: Context) async -> DiagnosticEntry {
+        Logger(subsystem: "com.dinghao.ParcelKeeper", category: "widget-probe").notice("minimal snapshot reached")
+        return DiagnosticEntry(date: Date(), status: "MINIMAL-CONFIG-OK", detail: configuration.label)
+    }
+    func timeline(for configuration: MinimalConfiguration, in context: Context) async -> Timeline<DiagnosticEntry> {
+        Logger(subsystem: "com.dinghao.ParcelKeeper", category: "widget-probe").notice("minimal timeline reached")
+        return Timeline(entries: [DiagnosticEntry(date: Date(), status: "MINIMAL-CONFIG-OK", detail: configuration.label)], policy: .never)
+    }
+}
+
+private struct MinimalConfiguredWidget: Widget {
+    var body: some WidgetConfiguration {
+        AppIntentConfiguration(kind: "ParcelKeeperMinimalConfigured", intent: MinimalConfiguration.self, provider: MinimalProvider()) {
+            DiagnosticView(entry: $0)
+        }
+        .configurationDisplayName("Minimal configuration probe")
+        .description("No entities, shared storage, or buttons")
+        .supportedFamilies([.systemSmall])
+    }
+}
+
 @main
 struct ParcelKeeperDiagnosticBundle: WidgetBundle {
     var body: some Widget {
+        MinimalConfiguredWidget()
+        diagnosisWidgets()
+    }
+    @WidgetBundleBuilder
+    private func diagnosisWidgets() -> some Widget {
         StaticDiagnosticWidget()
         ReadOnlyDiagnosticWidget()
         ConfiguredTextDiagnosticWidget()

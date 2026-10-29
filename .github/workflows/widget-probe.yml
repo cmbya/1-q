@@ -1,0 +1,46 @@
+name: Widget Simulator Probe
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare simulator build
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          brew install xcodegen
+          xcodegen generate
+          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName ParcelKeeper Probe' ParcelKeeper/Info.plist
+          mkdir -p probe
+          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if x.get("isAvailable") and x["name"].startswith("iPhone")))')
+          printf 'DEVICE_ID=%s\n' "$DEVICE_ID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE_ID" || true
+          xcrun simctl bootstatus "$DEVICE_ID" -b
+          xcrun simctl spawn "$DEVICE_ID" defaults write NSGlobalDomain AppleLanguages -array en
+          xcrun simctl spawn "$DEVICE_ID" defaults write NSGlobalDomain AppleLocale en_US
+      - name: Actually place and configure widget on SpringBoard
+        run: |
+          set -o pipefail
+          xcodebuild -project ParcelKeeper.xcodeproj -scheme WidgetProbe -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -derivedDataPath probe/DerivedData -resultBundlePath probe/WidgetProbe.xcresult -parallel-testing-enabled NO SWIFT_ACTIVE_COMPILATION_CONDITIONS='DEBUG WIDGET_DIAGNOSTICS' test | tee probe/ui-test.log
+      - name: Capture system evidence even on UI failure
+        if: always()
+        run: |
+          xcrun simctl io "$DEVICE_ID" screenshot probe/final-screen.png || true
+          xcrun simctl spawn "$DEVICE_ID" log show --last 20m --style compact --predicate 'process == "chronod" OR process == "appintentsd" OR process == "ParcelKeeperWidget" OR subsystem == "com.dinghao.ParcelKeeper"' > probe/system.log 2>&1 || true
+          xcrun xcresulttool export attachments --path probe/WidgetProbe.xcresult --output-path probe/screenshots || true
+          xcrun simctl listapps "$DEVICE_ID" > probe/installed-apps.plist || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: WidgetProbe-evidence
+          path: |
+            probe/*.log
+            probe/*.png
+            probe/*.plist
+            probe/screenshots
+            probe/WidgetProbe.xcresult
+          if-no-files-found: warn
