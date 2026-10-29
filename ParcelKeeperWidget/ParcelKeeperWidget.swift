@@ -28,16 +28,20 @@ private enum WidgetStore {
 struct WidgetGroup: AppEntity {
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "取件分组")
     static var defaultQuery = WidgetGroupQuery()
-    let id: UUID
+    // Persist a primitive identifier across the system's configuration boundary.
+    let id: String
     let name: String
     var displayRepresentation: DisplayRepresentation { DisplayRepresentation(title: "\(name)") }
-    init(_ group: PickupGroup) { id = group.id; name = group.name }
+    init(_ group: PickupGroup) { id = group.id.uuidString; name = group.name }
 }
 
 struct WidgetGroupQuery: EntityQuery {
-    func entities(for identifiers: [UUID]) async throws -> [WidgetGroup] {
+    func entities(for identifiers: [String]) async throws -> [WidgetGroup] {
         let groups = try WidgetStore.open().snapshot().groups
-        return identifiers.compactMap { id in groups.first(where: { $0.id == id }).map(WidgetGroup.init) }
+        return identifiers.compactMap { id in
+            guard let uuid = UUID(uuidString: id) else { return nil }
+            return groups.first(where: { $0.id == uuid }).map(WidgetGroup.init)
+        }
     }
     func suggestedEntities() async throws -> [WidgetGroup] {
         try WidgetStore.open().snapshot().groups.sorted {
@@ -50,6 +54,8 @@ struct PickupWidgetConfiguration: WidgetConfigurationIntent {
     static var title: LocalizedStringResource = "选择取件分组"
     static var description = IntentDescription("显示一个分组的待取件码。")
     @Parameter(title: "分组") var group: WidgetGroup?
+    static var parameterSummary: some ParameterSummary { Summary { \.$group } }
+    init() {}
 }
 
 struct OpenPickupAppIntent: AppIntent {
@@ -121,14 +127,14 @@ struct PickupProvider: AppIntentTimelineProvider {
         Timeline(entries: [load(configuration)], policy: .after(Date().addingTimeInterval(900)))
     }
     private func load(_ configuration: PickupWidgetConfiguration) -> PickupEntry {
-        guard let selected = configuration.group else {
+        guard let selected = configuration.group, let selectedID = UUID(uuidString: selected.id) else {
             return PickupEntry(date: Date(), groupID: nil, title: "取件码", records: [], message: "长按组件选择分组", error: nil)
         }
         do {
-            let priorError = try WidgetStore.error(selected.id)
+            let priorError = try WidgetStore.error(selectedID)
             let data = try WidgetStore.open().snapshot()
-            guard let group = data.groups.first(where: { $0.id == selected.id }) else {
-                return PickupEntry(date: Date(), groupID: selected.id, title: selected.name, records: [], message: "分组已失效，请重新配置", error: priorError)
+            guard let group = data.groups.first(where: { $0.id == selectedID }) else {
+                return PickupEntry(date: Date(), groupID: selectedID, title: selected.name, records: [], message: "分组已失效，请重新配置", error: priorError)
             }
             let records = data.records.filter { $0.groupID == group.id && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.sorted {
                 $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
@@ -136,7 +142,7 @@ struct PickupProvider: AppIntentTimelineProvider {
             return PickupEntry(date: Date(), groupID: group.id, title: group.name, records: records,
                                message: records.isEmpty ? "暂无待取件码" : nil, error: priorError)
         } catch {
-            return PickupEntry(date: Date(), groupID: selected.id, title: selected.name, records: [],
+            return PickupEntry(date: Date(), groupID: selectedID, title: selected.name, records: [],
                                message: "无法读取数据，请打开 App 检查共享容器及初始化状态。", error: "无法读取组件状态或数据，请打开 App 检查")
         }
     }
@@ -145,7 +151,7 @@ struct PickupProvider: AppIntentTimelineProvider {
 struct PickupWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: PickupEntry
-    private var capacity: Int { family == .systemSmall ? 1 : family == .systemMedium ? 2 : 4 }
+    private var capacity: Int { family == .systemSmall ? 3 : family == .systemMedium ? 3 : 7 }
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(entry.title).font(.headline).lineLimit(1)
@@ -168,8 +174,8 @@ struct PickupWidgetView: View {
                         }
                         Button(intent: OpenPickupAppIntent()) {
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(record.code).font(.subheadline.bold()).lineLimit(1)
-                                if !record.location.isEmpty { Text(record.location).font(.caption2).lineLimit(1) }
+                                Text(record.code).font(.system(size: family == .systemSmall ? 12 : 14, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                                if !record.location.isEmpty { Text(record.location).font(.system(size: family == .systemSmall ? 9 : 11)).lineLimit(1) }
                             }
                         }
                         .buttonStyle(.plain)
