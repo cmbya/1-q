@@ -258,6 +258,117 @@ final class SharedPickupStoreTests: XCTestCase {
         XCTAssertEqual(try s.snapshot(), before)
     }
 
+    func testHistoricalDuplicateTrackingNumbersRoundTripIntoEmptyTarget() throws {
+        var first = shipment(code: "A-1")
+        first.logisticsInfo = "已到取件站"
+        first.logisticsTime = Date(timeIntervalSinceReferenceDate: 5000.125)
+        first.queryInfo = "查询成功"
+        first.uapiCarrierCode = "test-carrier"
+        first.lastQueriedAt = Date(timeIntervalSinceReferenceDate: 6000.25)
+        first.lastQueryAttemptAt = Date(timeIntervalSinceReferenceDate: 7000.5)
+        var second = shipment(code: "B-2")
+        second.trackingNumber = " test 123 "
+        second.note = "另一条历史备注"
+        second.status = .archived
+        second.reminderDate = Date(timeIntervalSinceReferenceDate: 8000.75)
+        XCTAssertNotEqual(first.id, second.id)
+        XCTAssertNotEqual(first.trackingNumber, second.trackingNumber)
+        XCTAssertEqual(CarrierDetector.sanitize(first.trackingNumber), CarrierDetector.sanitize(second.trackingNumber))
+        let legacyBytes = try JSONEncoder().encode([first, second])
+        try legacyBytes.write(to: legacy)
+        let source = try store()
+        let migrated = try source.snapshot()
+        XCTAssertEqual(migrated.shipments, [first, second])
+        XCTAssertEqual(try Data(contentsOf: backupURL), legacyBytes)
+        try source.transaction { data in
+            for index in data.records.indices {
+                data.records[index].location = "历史柜位-\(index)"
+                // Modern backups preserve explicit choices, not just status-derived completion.
+                data.records[index].isCompleted.toggle()
+            }
+        }
+        let expected = try source.snapshot()
+        let backup = try source.exportBackup()
+        let policies: [BackupConflictPolicy?] = [nil, .keepExisting, .replaceExisting]
+        for (index, policy) in policies.enumerated() {
+            let targetURL = root.appendingPathComponent("duplicate-restore-\(index)")
+            // Do not let the shared legacy fixture populate this otherwise empty target.
+            let target = try SharedPickupStore(appGroupID: nil, legacyURL: targetURL.appendingPathComponent("absent.json"), containerURL: targetURL)
+            let initial = try target.snapshot()
+            XCTAssertTrue(initial.shipments.isEmpty)
+            XCTAssertTrue(initial.records.isEmpty)
+            let preview = try target.previewBackup(backup)
+            XCTAssertFalse(preview.hasConflicts)
+            XCTAssertEqual(preview.incoming, expected)
+            let restored = try target.importBackup(preview, policy: policy)
+            XCTAssertEqual(restored.shipments, expected.shipments)
+            XCTAssertEqual(restored.records, expected.records)
+            XCTAssertEqual(restored.groups, initial.groups + expected.groups)
+            XCTAssertEqual(restored.expressGroupID, initial.expressGroupID)
+            let reopened = try SharedPickupStore(appGroupID: nil, legacyURL: targetURL.appendingPathComponent("absent.json"), containerURL: targetURL)
+            XCTAssertEqual(try reopened.snapshot(), restored)
+            let reexported = try reopened.previewBackup(reopened.exportBackup())
+            XCTAssertEqual(reexported.incoming, restored)
+        }
+        XCTAssertEqual(try Data(contentsOf: legacy), legacyBytes)
+        XCTAssertEqual(try source.snapshot(), expected)
+    }
+
+    func testDuplicateIncomingTrackingNumbersCannotClaimOneExistingShipmentAndRollBack() throws {
+        let s = try store()
+        let existing = shipment(code: "existing")
+        try s.transaction { data in
+            data.shipments.append(existing)
+            data.records.append(PickupRecord(groupID: data.groups[0].id, code: existing.pickupCode, source: existing.note, shipmentID: existing.id))
+        }
+        let before = try s.snapshot()
+        let diskBefore = try Data(contentsOf: dataURL)
+        var first = shipment(code: "incoming-1")
+        first.trackingNumber = "test 123"
+        let second = shipment(code: "incoming-2")
+        let preview = try s.previewBackup(JSONEncoder().encode([first, second]))
+        XCTAssertTrue(preview.hasConflicts)
+        XCTAssertEqual(preview.incoming.shipments.count, 2)
+        for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
+            XCTAssertThrowsError(try s.importBackup(preview, policy: policy)) { error in
+                guard case PickupStorageError.invalidData(let message) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(message, "多个备份运单匹配同一现有运单，无法安全合并")
+            }
+            XCTAssertEqual(try Data(contentsOf: dataURL), diskBefore)
+            XCTAssertEqual(try s.snapshot(), before)
+        }
+    }
+
+    func testIncomingShipmentCannotChooseBetweenHistoricalDuplicatesAndRollsBack() throws {
+        let s = try store()
+        let first = shipment(code: "existing-1")
+        var second = shipment(code: "existing-2")
+        second.trackingNumber = "test 123"
+        try s.transaction { data in
+            for value in [first, second] {
+                data.shipments.append(value)
+                data.records.append(PickupRecord(groupID: data.groups[0].id, code: value.pickupCode, source: value.note, shipmentID: value.id))
+            }
+        }
+        let before = try s.snapshot()
+        let diskBefore = try Data(contentsOf: dataURL)
+        // Even an exact UUID match must not guess which duplicate to keep or replace.
+        let preview = try s.previewBackup(JSONEncoder().encode([first]))
+        XCTAssertTrue(preview.hasConflicts)
+        for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
+            XCTAssertThrowsError(try s.importBackup(preview, policy: policy)) { error in
+                guard case PickupStorageError.invalidData(let message) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(message, "运单 ID 与运单号发生多重冲突，无法安全合并")
+            }
+            XCTAssertEqual(try Data(contentsOf: dataURL), diskBefore)
+            XCTAssertEqual(try s.snapshot(), before)
+        }
+    }
+
     func testEmptyCodeShipmentAndStandaloneFoodWithSameCode() throws {
         let s = try store()
         let express = shipment(code: "")

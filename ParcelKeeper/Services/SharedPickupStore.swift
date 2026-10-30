@@ -227,9 +227,8 @@ final class SharedPickupStore {
             } else { incoming = try decoder.decode(PickupDataset.self, from: bytes) }
             try validate(incoming)
             let numbers = incoming.shipments.map { CarrierDetector.sanitize($0.trackingNumber) }
-            guard Set(numbers).count == numbers.count else {
-                throw PickupStorageError.invalidData("备份包含重复运单号，无法安全合并")
-            }
+            // Historical shipments may share a normalized number while retaining distinct IDs.
+            // Import resolves matches against the pre-import dataset and rejects ambiguous mappings.
             let conflicts = numbers.filter { number in
                 current.shipments.contains { CarrierDetector.sanitize($0.trackingNumber) == number }
             }

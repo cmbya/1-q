@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import ParcelKeeper
 
 @MainActor
@@ -194,6 +195,24 @@ final class ShipmentStoreTests: XCTestCase {
         XCTAssertEqual(imported.records.filter { $0.groupID == linked.groupID }.count, 2)
     }
 
+    func testInitialReadLockTimeoutRecoversOnReload() throws {
+        let (root, shared, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let initial = try shared.snapshot()
+        let url = root.appendingPathComponent("ParcelKeeper/pickup-data.lock")
+        let fd = open(url.path, O_RDWR)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        let recovering = ShipmentStore(storageProvider: { shared })
+        XCTAssertNotNil(recovering.lastErrorMessage)
+        XCTAssertEqual(flock(fd, LOCK_UN), 0)
+        try recovering.reload()
+        XCTAssertNil(recovering.lastErrorMessage)
+        XCTAssertEqual(Set(recovering.groups.map(\.id)), Set(initial.groups.map(\.id)))
+        XCTAssertFalse(recovering.isHistoricalSnapshot)
+    }
     func testNoAccessLegacyReloadKeepsSelectionIdentitiesAndNeverWritesHistory() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

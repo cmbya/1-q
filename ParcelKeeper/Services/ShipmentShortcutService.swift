@@ -261,8 +261,10 @@ struct ShipmentShortcutService {
             if shipment.logisticsTime != nil && value.logisticsTime == nil && (value.logisticsInfo != nil || value.status != nil) { throw ShipmentShortcutError.statusConflict }
             if [.delivered, .archived].contains(shipment.status), let state = value.status, state != .delivered && state != shipment.status { throw ShipmentShortcutError.statusConflict }
             if let name = value.carrierName {
+                let code = CarrierDetector.carrierMentioned(in: name)?.code ?? CarrierDetector.unknown.code
+                if shipment.carrierCode != code { shipment.uapiCarrierCode = nil }
                 shipment.carrierName = name
-                shipment.carrierCode = CarrierDetector.carrierMentioned(in: name)?.code ?? CarrierDetector.unknown.code
+                shipment.carrierCode = code
             }
             if let info = value.logisticsInfo { shipment.logisticsInfo = info }
             if let query = value.queryInfo { shipment.queryInfo = query }

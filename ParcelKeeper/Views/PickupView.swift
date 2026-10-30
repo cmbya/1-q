@@ -279,7 +279,7 @@ private struct PickupImportView: View {
         NavigationStack {
             Form {
                 Section("主动粘贴") {
-                    Text("仅在点击粘贴后读取文字。本地优先识别；无法识别或结果有歧义时，仅在 AI 已开启的情况下将文字发送到配置的服务，该服务可能转发给上游。原文仅在识别或等待替换确认时临时使用，不会保存为记录。")
+                    Text("仅在点击粘贴后读取文字。本地优先识别；无法识别、结果有歧义，或已识别取件码但缺少地点时，仅在 AI 已开启的情况下将文字发送到配置的服务，该服务可能转发给上游。原文仅在识别或等待替换确认时临时使用，不会保存为记录。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if processing {
                         ProgressView("正在识别")

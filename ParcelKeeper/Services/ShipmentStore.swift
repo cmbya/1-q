@@ -37,7 +37,11 @@ final class ShipmentStore: ObservableObject {
             default:
                 permitsHistory = false
             }
-            storage = nil
+            // Preserve an established connection after a transient dataset-lock timeout.
+            // No historical fallback is permitted for this case; reload can retry it.
+            if !((error as? POSIXError)?.code == .ETIMEDOUT && storage != nil) {
+                storage = nil
+            }
             if permitsHistory {
                 let local = historicalContainerURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
                 if let local,

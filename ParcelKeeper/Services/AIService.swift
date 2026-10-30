@@ -249,6 +249,13 @@ final class AIService {
               let whole = text.range(of: code) else { return false }
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         guard matches.count == 1 else { return false }
+        // A nearby pickup label cannot authorize a value inside a URL or an
+        // identifier field. Check the actual occurrence before label exceptions.
+        let protectedPattern = #"(?:https?://|www\.)[^\s，。；！？]+|(?:订单(?:号码|号)?|訂單(?:號碼|號)?|运单(?:号码|号)?|物流单(?:号码|号)?|快递单(?:号码|号)?|手机(?:号码|号)?|电话(?:号码|号)?)\s*[:：\-－﹣‐‑‒–—−]?\s*(?:取件码|取货码|取餐码|提货码)?\s*[:：\-－﹣‐‑‒–—−]?\s*[A-Za-z0-9+._/#*\-－﹣‐‑‒–—−]+"#
+        guard let protected = try? NSRegularExpression(pattern: protectedPattern, options: [.caseInsensitive]),
+              !protected.matches(in: text, range: NSRange(text.startIndex..., in: text)).contains(where: {
+                  NSIntersectionRange($0.range, matches[0].range).length > 0
+              }) else { return false }
         let start = whole.lowerBound, end = whole.upperBound
         let word = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_/.:@?=&%")
         // A label separator is not part of the code. Allow it only when the

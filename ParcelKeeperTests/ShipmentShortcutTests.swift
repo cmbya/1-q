@@ -40,6 +40,19 @@ final class ShipmentShortcutTests: XCTestCase {
         XCTAssertFalse(try service.upsert(input()))
         XCTAssertEqual(try store.snapshot().shipments[0].logisticsInfo, "本人签收")
     }
+    func testCarrierCorrectionClearsProviderCodeButSameCarrierPreservesIt() throws {
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        var value = input()
+        value.carrierName = "圆通"
+        _ = try service.upsert(value)
+        try store.transaction { $0.shipments[0].uapiCarrierCode = "yuantong" }
+        _ = try service.upsert(value)
+        XCTAssertEqual(try store.snapshot().shipments[0].uapiCarrierCode, "yuantong")
+        value.carrierName = "顺丰"
+        _ = try service.upsert(value)
+        XCTAssertNil(try store.snapshot().shipments[0].uapiCarrierCode)
+        XCTAssertEqual(try store.snapshot().shipments[0].carrierCode, "sf")
+    }
     func testOldOrCompletedRegressionWritesNothing() throws {
         let service = ShipmentShortcutService(store: store, reloadWidgets: {})
         XCTAssertTrue(try service.upsert(input("已签收", time: Date(timeIntervalSinceReferenceDate: 2000))))

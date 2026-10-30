@@ -58,6 +58,35 @@ final class AIServiceTests: XCTestCase {
         catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("Unexpected error") } }
     }
 
+    func testPickupAIRejectsCandidatesInsideProtectedSpans() async throws {
+        try enableShipmentAI()
+        for text in ["https://example.test/取件码1234", "HTTPS://example.test/?取件码=1234",
+                     "www.example.test/取件码-1234", "电话：取件码1234",
+                     "手机号：取件码-1234", "订单号：取件码1234",
+                     "订单号码：取件码1234", "訂單號碼：取件码1234",
+                     "电话：1234", "订单号码：1234", "訂單號碼：1234",
+                     "😀 https://example.test/取件码—1234"] {
+            network.responses = Array(repeating: (200, response("1234")), count: 3)
+            do { _ = try await service.extract(text); XCTFail("Accepted protected candidate: \(text)") }
+            catch let error as AIServiceError {
+                guard case let .allModelsFailed(failures) = error else { return XCTFail("Unexpected error: \(error)") }
+                XCTAssertEqual(failures.map(\.category), [.invalidResponse, .invalidResponse, .invalidResponse], text)
+            }
+        }
+    }
+
+    func testPickupAIKeepsLabelsOutsideProtectedSpans() async throws {
+        try enableShipmentAI()
+        for text in ["https://example.test/other，取件码1234", "电话13800138000，取件码1234",
+                     "订单号码987654，取件码1234", "訂單號碼987654，取件码1234",
+                     "😀 取件码-1234", "取件码－1234", "取件码—1234",
+                     "订单号987654 取件码-1234"] {
+            network.responses = [(200, response("1234"))]
+            let result = try await service.extract(text)
+            XCTAssertEqual(result.code, "1234", text)
+        }
+    }
+
     private func enableShipmentAI() throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)

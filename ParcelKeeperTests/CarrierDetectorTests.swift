@@ -29,6 +29,23 @@ final class CarrierDetectorTests: XCTestCase {
         XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: "AB123456"), ["AB123456"])
         XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: "12345678"), ["12345678"])
     }
+    func testOrderNumberVariantsAreNotTrackingNumbers() {
+        for label in ["订单号", "訂單號", "订单号码", "訂單號碼", "订单编号", "訂單編號"] {
+            for number in ["AB123456", "SF1234567890", "12345678"] {
+                XCTAssertTrue(CarrierDetector.extractTrackingNumbers(from: "\(label)：\(number)").isEmpty, "\(label):\(number)")
+                XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: "\(label)：\(number)，运单号：YT9876543210"), ["YT9876543210"])
+            }
+        }
+    }
+
+    func testOrderNumberLabelsDoNotExcludeSeparateTrackingFields() {
+        for text in ["订单号码待生成，运单号：AB123456", "訂單號碼待生成，運單號：AB123456",
+                     "订单号码：98765432 运单号：AB123456", "訂單號碼：98765432\n運單號：AB123456",
+                     "订单号码：AB123456，运单号：AB123456", "AB123456"] {
+            XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: text), ["AB123456"], text)
+        }
+    }
+
     func testExtractionPrioritizesLabelAndDeduplicates() {
         let text = "手机号 13800138000\n运单号 SF1234567890\n运单号 SF1234567890"
         let numbers = CarrierDetector.extractTrackingNumbers(from: text)
