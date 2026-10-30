@@ -41,6 +41,8 @@ struct SlotProvider: TimelineProvider {
 
 struct SlotWidget: Widget {
     let slot: WidgetSlot
+    init() { self.slot = .a }
+    init(slot: WidgetSlot) { self.slot = slot }
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: slot.kind, provider: SlotProvider(slot: slot)) { PickupWidgetView(entry: $0) }
             .configurationDisplayName(slot == .a ? "取件组件 A" : "取件组件 B")
