@@ -25,6 +25,7 @@ struct PickupView: View {
                 ForEach(store.groups) { group in
                     Section(group.name) {
                         let records = store.pickupRecords.filter {
+                            !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                             $0.groupID == group.id && (filter == 2 || $0.isCompleted == (filter == 1)) &&
                             (searchText.isEmpty || [$0.code, $0.location, $0.source].contains { $0.localizedCaseInsensitiveContains(searchText) })
                         }
