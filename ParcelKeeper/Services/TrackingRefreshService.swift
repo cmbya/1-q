@@ -44,6 +44,8 @@ struct TrackingRefreshService {
     /// Returns whether this update newly completed a shipment.
     func refresh(id: UUID, phone: String? = nil) async throws -> Bool {
         try Task.checkCancellation()
+        let lease = try store.acquireTrackingQuery(id: id)
+        defer { lease.release() }
         guard let before = try store.snapshot().shipments.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
         guard before.status != .archived else { throw ShipmentShortcutError.statusConflict }
         let number = try ShipmentShortcutParser.number(before.trackingNumber)
@@ -54,6 +56,8 @@ struct TrackingRefreshService {
             guard let index = data.shipments.firstIndex(where: { $0.id == id }),
                   CarrierDetector.sanitize(data.shipments[index].trackingNumber) == number else { throw PickupStorageError.notFound }
             var current = data.shipments[index]
+            guard current.carrierCode == before.carrierCode,
+                  current.uapiCarrierCode == before.uapiCarrierCode else { throw PickupStorageError.stalePreview }
             guard current.status != .archived else { throw ShipmentShortcutError.statusConflict }
             if let old = current.logisticsTime {
                 guard let incoming = result.logisticsTime, incoming >= old else { throw ShipmentShortcutError.olderUpdate }
@@ -128,6 +132,8 @@ struct TrackingRefreshService {
                 else if let failure = error as? PickupStorageError {
                     // invalidData may contain user/provider text; do not echo its payload.
                     switch failure {
+                    case .queryInProgress: reason = failure.localizedDescription
+                    case .stalePreview: reason = "查询期间快递信息已更改，未覆盖；请重新查询。"
                     case .notFound: reason = "快递记录已删除或关联记录缺失，未更新。"
                     default: reason = "快递存储或共享访问失败，未更新；请在 App 检查。"
                     }

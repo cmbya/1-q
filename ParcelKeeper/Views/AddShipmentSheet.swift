@@ -92,6 +92,7 @@ struct AddShipmentSheet: View {
                     }
                 }
             }
+            .disabled(isSaving)
             .navigationTitle("添加快递")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(isSaving)
@@ -144,6 +145,11 @@ struct AddShipmentSheet: View {
     }
 
     private func saveShipment() {
+        guard !isSaving else { return }
+        let shouldQuery = queryAfterSaving
+        let phone = queryPhone.isEmpty ? nil : queryPhone
+        let shouldRemind = reminderEnabled
+        let scheduledDate = reminderDate
         let normalized = CarrierDetector.sanitize(trackingNumber)
         let shipment = Shipment(
             trackingNumber: normalized,
@@ -160,7 +166,7 @@ struct AddShipmentSheet: View {
         catch ShipmentStore.ShipmentWriteError.duplicateTrackingNumber { store.endReminderOperation(); showingDuplicateAlert = true; return }
         catch { store.endReminderOperation(); saveError = error.localizedDescription; return }
 
-        guard reminderEnabled || queryAfterSaving else {
+        guard shouldRemind || shouldQuery else {
             store.endReminderOperation()
             dismiss()
             return
@@ -170,14 +176,14 @@ struct AddShipmentSheet: View {
         Task { @MainActor in
             defer { store.endReminderOperation() }
             var queryWarning: String?
-            if queryAfterSaving {
+            if shouldQuery {
                 do {
-                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: queryPhone.isEmpty ? nil : queryPhone)
+                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: phone)
                     try store.reload()
                     queryPhone = ""
                 } catch { queryWarning = "物流查询未完成：\(error.localizedDescription)"; try? store.reload() }
             }
-            guard reminderEnabled else {
+            guard shouldRemind else {
                 if let queryWarning { isSaving = false; reminderError = ShipmentPostSaveWarnings.message(query: queryWarning, reminder: nil) }
                 else { dismiss() }
                 return
@@ -189,9 +195,9 @@ struct AddShipmentSheet: View {
                 return
             }
             do {
-                try await NotificationManager.shared.scheduleReminder(for: shipment, at: reminderDate)
+                try await NotificationManager.shared.scheduleReminder(for: shipment, at: scheduledDate)
                 do {
-                    try store.updateReminderThrowing(id: shipment.id, date: reminderDate)
+                    try store.updateReminderThrowing(id: shipment.id, date: scheduledDate)
                 } catch {
                     NotificationManager.shared.cancelReminder(for: shipment.id)
                     isSaving = false

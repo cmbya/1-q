@@ -174,7 +174,14 @@ final class ShipmentStore: ObservableObject {
     func updateStatus(id: UUID, status: ShipmentStatus) { update(id: id) { $0.status = status; $0.updatedAt = Date() } }
     func updateNote(id: UUID, note: String) { update(id: id) { $0.note = note; $0.updatedAt = Date() } }
     func updatePickupCode(id: UUID, pickupCode: String) { update(id: id) { $0.pickupCode = pickupCode; $0.updatedAt = Date() } }
-    func updateCarrier(id: UUID, carrier: CarrierOption) { update(id: id) { $0.carrierName = carrier.name; $0.carrierCode = carrier.code; $0.updatedAt = Date() } }
+    func updateCarrier(id: UUID, carrier: CarrierOption) {
+        update(id: id) {
+            if $0.carrierCode != carrier.code { $0.uapiCarrierCode = nil }
+            $0.carrierName = carrier.name
+            $0.carrierCode = carrier.code
+            $0.updatedAt = Date()
+        }
+    }
     func markChecked(id: UUID) { update(id: id) { $0.lastCheckedAt = Date(); $0.updatedAt = Date() } }
     func updateReminderThrowing(id: UUID, date: Date?) throws { try updateThrowing(id: id) { $0.reminderDate = date; $0.updatedAt = Date() } }
 

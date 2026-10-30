@@ -165,6 +165,52 @@ final class TrackingRefreshTests: XCTestCase {
         }
         XCTAssertEqual(ShipmentPostSaveWarnings.message(query: nil, reminder: "提醒创建失败"), "快递已保存。\n提醒创建失败")
     }
+    func testQueryLeaseIsSharedAcrossStoresAndReleased() throws {
+        let other = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        let lease = try storage.acquireTrackingQuery(id: shipment.id)
+        XCTAssertThrowsError(try other.acquireTrackingQuery(id: shipment.id))
+        // The query lease must not hold the data lock.
+        _ = try other.snapshot()
+        lease.release()
+        let next = try other.acquireTrackingQuery(id: shipment.id)
+        next.release()
+    }
+    func testRefreshRefusesAlreadyRunningQueryWithoutDispatch() async throws {
+        let lease = try storage.acquireTrackingQuery(id: shipment.id)
+        defer { lease.release() }
+        let client = Client()
+        do {
+            _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id)
+            XCTFail("Concurrent query must be refused")
+        } catch {}
+        XCTAssertEqual(client.calls, 0)
+    }
+    func testFailedRefreshReleasesLeaseForNextAttempt() async throws {
+        let client = Client(); client.failure = UAPIError.noData
+        let service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
+        do { _ = try await service.refresh(id: shipment.id); XCTFail() } catch {}
+        client.failure = nil
+        _ = try await service.refresh(id: shipment.id)
+        XCTAssertEqual(client.calls, 2)
+    }
+    func testChangingCarrierWhileQueryRunsRejectsStaleResponse() async throws {
+        let client = Client()
+        client.onQuery = {
+            try self.storage.transaction {
+                $0.shipments[0].carrierCode = "sf"
+                $0.shipments[0].carrierName = "顺丰"
+                $0.shipments[0].uapiCarrierCode = nil
+            }
+        }
+        do {
+            _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id)
+            XCTFail("Changed carrier must not be overwritten")
+        } catch {}
+        let saved = try XCTUnwrap(storage.snapshot().shipments.first)
+        XCTAssertEqual(saved.carrierCode, "sf")
+        XCTAssertEqual(saved.carrierName, "顺丰")
+        XCTAssertNil(saved.queryInfo)
+    }
     func testBatchStopsOnAuthenticationAndExcludesCompleted() async throws {
         let client = Client(); client.failure = UAPIError.authentication
         try storage.transaction { data in

@@ -14,6 +14,27 @@ final class ShipmentStoreTests: XCTestCase {
         Shipment(trackingNumber: UUID().uuidString, carrierName: "测试", carrierCode: "test", status: status, note: "来源", pickupCode: "42")
     }
 
+    func testManualCarrierCorrectionClearsOnlyStaleProviderCode() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var value = shipment(.inTransit)
+        value.carrierCode = "yto"
+        value.uapiCarrierCode = "yuantong"
+        value.queryInfo = "保留旧查询"
+        try app.addThrowing(value)
+        let same = try XCTUnwrap(CarrierDetector.allCarriers.first { $0.code == "yto" })
+        app.updateCarrier(id: value.id, carrier: same)
+        XCTAssertEqual(try shared.snapshot().shipments[0].uapiCarrierCode, "yuantong")
+        let different = try XCTUnwrap(CarrierDetector.allCarriers.first { $0.code != "yto" })
+        app.updateCarrier(id: value.id, carrier: different)
+        let after = try XCTUnwrap(shared.snapshot().shipments.first)
+        XCTAssertNil(after.uapiCarrierCode)
+        XCTAssertEqual(after.carrierCode, different.code)
+        XCTAssertEqual(after.queryInfo, value.queryInfo)
+        XCTAssertEqual(after.note, value.note)
+        XCTAssertEqual(after.pickupCode, value.pickupCode)
+    }
+
     func testNewShipmentCompletionMatchesInitialStatus() throws {
         let (root, shared, app) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

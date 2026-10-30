@@ -3,9 +3,10 @@ import Darwin
 import CryptoKit
 
 enum PickupStorageError: LocalizedError {
-    case appGroupUnavailable, requiresMainApp, invalidData(String), notFound, nonEmptyGroup, stalePreview, conflictConfirmationRequired
+    case appGroupUnavailable, requiresMainApp, invalidData(String), notFound, nonEmptyGroup, stalePreview, conflictConfirmationRequired, queryInProgress
     var errorDescription: String? {
         switch self {
+        case .queryInProgress: return "这票快递正在查询，请等待本次查询结束，未重复发送请求。"
         case .requiresMainApp: return "请先打开主 App，完成共享数据初始化。"
         case .appGroupUnavailable: return "无法访问共享容器，未修改原有数据。主 App 与小组件的签名均须授权应用 Info.plist 中 ParcelKeeperAppGroup 指定的组（原始构建为 group.com.dinghao.ParcelKeeper）；证书列有其他应用组不代表授权了此组。请核对重签后的组 ID、描述文件与扩展签名，勿卸载或清空数据。"
         case .invalidData(let message): return "数据无效：\(message)"
@@ -64,6 +65,36 @@ final class SharedPickupStore {
         }
         self.legacyURL = legacyURL ?? support.appendingPathComponent("ParcelKeeper/shipments.json")
         if !readOnly && accessMode == .appManaged { try fileManager.createDirectory(at: directory, withIntermediateDirectories: true) }
+    }
+
+    // Separate per-record lock: does not block dataset reads/writes during network awaits.
+    final class TrackingQueryLease {
+        private var descriptor: Int32?
+        private let lock = NSLock()
+        fileprivate init(_ fd: Int32) { descriptor = fd }
+        func release() {
+            lock.lock(); defer { lock.unlock() }
+            guard let fd = descriptor else { return }
+            descriptor = nil
+            flock(fd, LOCK_UN)
+            close(fd)
+        }
+        deinit { release() }
+    }
+    func acquireTrackingQuery(id: UUID) throws -> TrackingQueryLease {
+        guard !readOnly else { throw PickupStorageError.appGroupUnavailable }
+        let url = directory.appendingPathComponent("tracking-query-\(id.uuidString).lock")
+        let fd = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            if code == EINTR { continue }
+            close(fd)
+            if code == EWOULDBLOCK || code == EAGAIN { throw PickupStorageError.queryInProgress }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        // Do not unlink: all processes must keep locking the same inode.
+        return TrackingQueryLease(fd)
     }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
