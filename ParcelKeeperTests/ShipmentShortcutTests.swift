@@ -68,6 +68,51 @@ final class ShipmentShortcutTests: XCTestCase {
         XCTAssertThrowsError(try ShipmentShortcutParser.parse("运单号：YT1234567890123\n已签收\n运输中"))
         XCTAssertThrowsError(try ShipmentShortcutParser.parse("运单号：YT1234567890123\n运单号：SF1234567890123\n已签收"))
     }
+    func testQueryTimestampDoesNotOverrideLatestLogisticsInEitherOrder() throws {
+        let expectedTime = ShipmentShortcutParser.date("2026-10-30 11:00")
+        for metadata in ["查询时间：2026-10-30 12:00", "2026-10-30 12:00 查詢時間"] {
+            let lines = [metadata, "2026-10-30 11:00 本人签收"]
+            for history in [lines, Array(lines.reversed())] {
+                let text = "运单号：YT1234567890123\n" + history.joined(separator: "\n")
+                let parsed = try ShipmentShortcutParser.parse(text)
+                XCTAssertEqual(parsed.logisticsInfo, "本人签收")
+                XCTAssertEqual(parsed.logisticsTime, expectedTime)
+                XCTAssertEqual(parsed.status, .delivered)
+            }
+        }
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        let history = "查询时间：2026-10-30 12:00\n2026-10-30 11:00 本人签收"
+        _ = try service.upsert(ShipmentShortcutParser.parse("运单号：YT1234567890123\n" + history))
+        let saved = try store.snapshot()
+        XCTAssertEqual(saved.shipments[0].logisticsTime, expectedTime)
+        XCTAssertEqual(saved.shipments[0].status, .delivered)
+        XCTAssertTrue(saved.records[0].isCompleted)
+        // A later real event is not older than the saved query timestamp.
+        XCTAssertFalse(try service.upsert(input("已领取", time: ShipmentShortcutParser.date("2026-10-30 11:30"))))
+        let json = try JSONSerialization.data(withJSONObject: ["trackingNumber": "YT1234567890123", "logisticsInfo": history])
+        let parsedJSON = try ShipmentShortcutParser.parse(try XCTUnwrap(String(data: json, encoding: .utf8)))
+        XCTAssertEqual(parsedJSON.logisticsInfo, "本人签收")
+        XCTAssertEqual(parsedJSON.logisticsTime, expectedTime)
+        let direct = try service.validate(input(history))
+        XCTAssertEqual(direct.logisticsInfo, "本人签收")
+        XCTAssertEqual(direct.logisticsTime, expectedTime)
+    }
+    func testQueryTimestampAloneNeverBecomesLogistics() throws {
+        let parsed = try ShipmentShortcutParser.parse("运单号：YT1234567890123\n查询时间：2026-10-30 12:00")
+        XCTAssertNil(parsed.logisticsInfo)
+        XCTAssertNil(parsed.logisticsTime)
+        XCTAssertNil(parsed.status)
+        let undated = try ShipmentShortcutParser.parse("运单号：YT1234567890123\n查询时间：2026-10-30 12:00\n本人签收")
+        XCTAssertEqual(undated.logisticsInfo, "本人签收")
+        XCTAssertEqual(undated.status, .delivered)
+        XCTAssertNil(undated.logisticsTime)
+    }
+    func testRealEventMentioningQueryTimeIsNotDiscarded() throws {
+        let parsed = try ShipmentShortcutParser.parse("运单号：YT1234567890123\n2026-10-30 11:00 本人签收（查询时间见页面）")
+        XCTAssertEqual(parsed.logisticsInfo, "本人签收（查询时间见页面）")
+        XCTAssertEqual(parsed.status, .delivered)
+        XCTAssertEqual(parsed.logisticsTime, ShipmentShortcutParser.date("2026-10-30 11:00"))
+    }
     func testMinisJSONAndInvalidNumber() throws {
         let json = #"{"trackingNumber":"YT1234567890123","carrierName":"圆通速递","logisticsInfo":"已签收","logisticsTime":"2026-10-30T11:00:00+08:00"}"#
         let parsed = try ShipmentShortcutParser.parse(json)

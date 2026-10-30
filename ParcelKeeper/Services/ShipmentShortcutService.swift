@@ -129,6 +129,10 @@ enum ShipmentShortcutParser {
                 // both sides; dropping the prefix could resurrect an old receipt.
                 let description = (String(line[..<range.lowerBound]) + " " + String(line[range.upperBound...]))
                     .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "：:|-")))
+                // A standalone query timestamp is page metadata, not a parcel
+                // event. Match only its complete label so real event descriptions
+                // mentioning query time are preserved, regardless of row order.
+                if description.range(of: #"^查[询詢][时時][间間][\s：:|\-]*$"#, options: .regularExpression) != nil { continue }
                 guard !description.isEmpty else { throw ShipmentShortcutError.ambiguous }
                 events.append((time, description))
             } else {
