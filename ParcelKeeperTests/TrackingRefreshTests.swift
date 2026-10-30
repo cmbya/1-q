@@ -113,8 +113,9 @@ final class TrackingRefreshTests: XCTestCase {
                 var other = self.shipment!
                 other.id = UUID()
                 other.trackingNumber = "YT22345678901\(index)"
+                other.pickupCode = "extra-\(index)"
                 data.shipments.append(other)
-                data.records.append(PickupRecord(groupID: data.groups[0].id, code: "extra-\(index)", shipmentID: other.id))
+                data.records.append(PickupRecord(groupID: data.groups[0].id, code: other.pickupCode, source: other.note, shipmentID: other.id))
             }
         }
     }
