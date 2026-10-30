@@ -30,6 +30,10 @@ struct SettingsView: View {
                     NavigationLink("组件 A–J 分组设置") { WidgetSettingsView() }
                 }
 
+                Section("物流查询") {
+                    NavigationLink("UAPI物流查询") { UAPISettingsView() }
+                }
+
                 Section("AI") {
                     NavigationLink("AI 服务设置") { AISettingsView() }
                 }
@@ -62,7 +66,7 @@ struct SettingsView: View {
 
                 Section("关于") {
                     LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知")
-                    Text("当前版本已修复粘贴后偶发空白页的问题，并支持从整段物流文字中识别多个运单、平台来源、取件码和当前状态。实时物流轨迹仍需接入正规的快递查询 API。")
+                    Text("支持文本识别、取件码管理、桌面组件以及UAPI物流查询。UAPI需在设置中配置密钥并启用，查询可能消耗账户积分。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

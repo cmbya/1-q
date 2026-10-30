@@ -16,6 +16,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var logisticsInfo: String?
     var logisticsTime: Date?
     var queryInfo: String?
+    var uapiCarrierCode: String?
+    var lastQueriedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -31,7 +33,9 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         reminderDate: Date? = nil,
         logisticsInfo: String? = nil,
         logisticsTime: Date? = nil,
-        queryInfo: String? = nil
+        queryInfo: String? = nil,
+        uapiCarrierCode: String? = nil,
+        lastQueriedAt: Date? = nil
     ) {
         self.id = id
         self.trackingNumber = trackingNumber
@@ -47,6 +51,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         self.logisticsInfo = logisticsInfo
         self.logisticsTime = logisticsTime
         self.queryInfo = queryInfo
+        self.uapiCarrierCode = uapiCarrierCode
+        self.lastQueriedAt = lastQueriedAt
     }
 }
 

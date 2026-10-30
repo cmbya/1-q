@@ -11,6 +11,8 @@ struct HomeView: View {
     @State private var manualInput = ""
     @State private var showingManualInput = false
     @State private var successFeedbackTrigger = 0
+    @State private var refreshingLogistics = false
+    @State private var refreshMessage: String?
 
     private var filteredShipments: [Shipment] {
         store.shipments.filter { shipment in
@@ -58,6 +60,24 @@ struct HomeView: View {
                 }
             }
             .navigationTitle("快递管家")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(refreshingLogistics ? "正在刷新" : "刷新未签收") {
+                        refreshingLogistics = true
+                        Task { @MainActor in
+                            defer { refreshingLogistics = false }
+                            do {
+                                let report = try await TrackingRefreshService.live().refreshPending()
+                                try store.reload()
+                                refreshMessage = report.message
+                            } catch { refreshMessage = error.localizedDescription; try? store.reload() }
+                        }
+                    }.disabled(refreshingLogistics || store.isHistoricalSnapshot)
+                }
+            }
+            .alert("物流刷新", isPresented: Binding(get: { refreshMessage != nil }, set: { if !$0 { refreshMessage = nil } })) {
+                Button("知道了", role: .cancel) { refreshMessage = nil }
+            } message: { Text(refreshMessage ?? "") }
             .searchable(text: $searchText, prompt: "搜索运单号、快递或备注")
             .sheet(item: $importRoute) { route in
                 switch route {

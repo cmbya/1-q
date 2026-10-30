@@ -17,6 +17,8 @@ struct AddShipmentSheet: View {
     @State private var saveError: String?
     @State private var reminderError: String?
     @State private var isSaving = false
+    @State private var queryAfterSaving = false
+    @State private var queryPhone = ""
 
     init(draft: ShipmentImportDraft) {
         initialDraft = draft
@@ -64,6 +66,14 @@ struct AddShipmentSheet: View {
                         .keyboardType(.numbersAndPunctuation)
                 }
 
+                Section("UAPI查询") {
+                    Toggle("保存后查询物流", isOn: $queryAfterSaving)
+                    if queryAfterSaving {
+                        TextField("收件人手机尾号（可选）", text: $queryPhone).keyboardType(.numberPad)
+                        Text("需先在设置配置UAPI，可能消耗积分。查询失败仍保留已保存的快递。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
                 Section("提醒") {
                     Toggle("设置查看/取件提醒", isOn: $reminderEnabled)
                     if reminderEnabled {
@@ -108,7 +118,7 @@ struct AddShipmentSheet: View {
             } message: {
                 Text(saveError ?? "")
             }
-            .alert("提醒未创建", isPresented: Binding(
+            .alert("保存后的操作未全部完成", isPresented: Binding(
                 get: { reminderError != nil },
                 set: { if !$0 { reminderError = nil } }
             )) {
@@ -144,7 +154,7 @@ struct AddShipmentSheet: View {
         catch ShipmentStore.ShipmentWriteError.duplicateTrackingNumber { store.endReminderOperation(); showingDuplicateAlert = true; return }
         catch { store.endReminderOperation(); saveError = error.localizedDescription; return }
 
-        guard reminderEnabled else {
+        guard reminderEnabled || queryAfterSaving else {
             store.endReminderOperation()
             dismiss()
             return
@@ -153,6 +163,19 @@ struct AddShipmentSheet: View {
         isSaving = true
         Task { @MainActor in
             defer { store.endReminderOperation() }
+            var queryWarning: String?
+            if queryAfterSaving {
+                do {
+                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: queryPhone.isEmpty ? nil : queryPhone)
+                    try store.reload()
+                    queryPhone = ""
+                } catch { queryWarning = "快递已保存，但物流查询未完成：\(error.localizedDescription)"; try? store.reload() }
+            }
+            guard reminderEnabled else {
+                if let queryWarning { isSaving = false; reminderError = queryWarning }
+                else { dismiss() }
+                return
+            }
             let granted = await NotificationManager.shared.requestAuthorization()
             guard granted else {
                 isSaving = false
@@ -169,7 +192,8 @@ struct AddShipmentSheet: View {
                     reminderError = "快递已保存，但提醒保存失败：\(error.localizedDescription)"
                     return
                 }
-                dismiss()
+                if let queryWarning { isSaving = false; reminderError = queryWarning }
+                else { dismiss() }
             } catch {
                 isSaving = false
                 reminderError = "快递已保存，但提醒创建失败：\(error.localizedDescription)"

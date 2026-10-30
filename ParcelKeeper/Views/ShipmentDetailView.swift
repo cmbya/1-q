@@ -16,6 +16,9 @@ struct ShipmentDetailView: View {
     @State private var reminderBusy = false
     @State private var reminderInitialized = false
     @State private var reminderError: String?
+    @State private var queryPhone = ""
+    @State private var querying = false
+    @State private var queryMessage: String?
 
     private var shipment: Shipment? {
         store.shipment(id: shipmentID)
@@ -52,6 +55,27 @@ struct ShipmentDetailView: View {
                         } label: {
                             Label("复制运单号", systemImage: "doc.on.doc")
                         }
+                    }
+
+                    Section("UAPI查询") {
+                        TextField("收件人手机尾号（可选，仅本次使用）", text: $queryPhone)
+                            .keyboardType(.numberPad)
+                        Button(querying ? "正在查询" : "刷新物流") {
+                            querying = true
+                            Task { @MainActor in
+                                defer { querying = false }
+                                do {
+                                    _ = try await TrackingRefreshService.live().refresh(id: shipmentID, phone: queryPhone.isEmpty ? nil : queryPhone)
+                                    try store.reload()
+                                    queryPhone = ""
+                                    queryMessage = "物流已更新。"
+                                } catch { queryMessage = error.localizedDescription; try? store.reload() }
+                            }
+                        }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        if let time = shipment.lastQueriedAt {
+                            LabeledContent("最后查询", value: time.formatted(date: .abbreviated, time: .shortened))
+                        }
+                        if let queryMessage { Text(queryMessage).font(.footnote) }
                     }
 
                     Section("状态") {
