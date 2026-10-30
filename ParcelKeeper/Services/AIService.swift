@@ -251,11 +251,8 @@ final class AIService {
         guard matches.count == 1 else { return false }
         // A nearby pickup label cannot authorize a value inside a URL or an
         // identifier field. Check the actual occurrence before label exceptions.
-        let protectedPattern = #"(?:https?://|www\.)[^\s，。；！？]+|(?:订单(?:号码|号)?|訂單(?:號碼|號)?|运单(?:号码|号)?|物流单(?:号码|号)?|快递单(?:号码|号)?|手机(?:号码|号)?|电话(?:号码|号)?)\s*[:：\-－﹣‐‑‒–—−]?\s*(?:取件码|取货码|取餐码|提货码)?\s*[:：\-－﹣‐‑‒–—−]?\s*[A-Za-z0-9+._/#*\-－﹣‐‑‒–—−]+"#
-        guard let protected = try? NSRegularExpression(pattern: protectedPattern, options: [.caseInsensitive]),
-              !protected.matches(in: text, range: NSRange(text.startIndex..., in: text)).contains(where: {
-                  NSIntersectionRange($0.range, matches[0].range).length > 0
-              }) else { return false }
+        guard PickupFieldProtection.allows(code, range: matches[0].range,
+                                           protected: PickupFieldProtection.ranges(in: text)) else { return false }
         let start = whole.lowerBound, end = whole.upperBound
         let word = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_/.:@?=&%")
         // A label separator is not part of the code. Allow it only when the
@@ -268,10 +265,8 @@ final class AIService {
         // Only the label immediately preceding this occurrence describes the candidate;
         // unrelated phone/order fields elsewhere on the line must not reject it.
         let prefix = String(text[..<start])
-        let pickupLabel = "(?:取件|取货|取餐|提货)码\\s*(?:是|为)?\\s*[:：\\-－—]?\\s*$"
-        let otherLabel = "(?:手机(?:号码|号)?|电话(?:号码|号)?|订单(?:号码|号)?|运单(?:号码|号)?|单号)\\s*[:：]?\\s*$"
+        let pickupLabel = #"(?:取件|取货|取餐|提货)码\s*(?:是|为)?\s*[:：\-－—]?\s*$"#
         let explicitlyLabeled = prefix.range(of: pickupLabel, options: .regularExpression) != nil
-        if prefix.range(of: otherLabel, options: .regularExpression) != nil { return false }
         if code.allSatisfy({ $0.isNumber }) && code.count >= 7 {
             // Long numbers are easily confused with phones and tracking numbers.
             guard code.count == 8 && explicitlyLabeled else { return false }

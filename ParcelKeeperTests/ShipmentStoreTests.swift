@@ -36,6 +36,76 @@ final class ShipmentStoreTests: XCTestCase {
         XCTAssertEqual(after.pickupCode, value.pickupCode)
     }
 
+    func testUnknownCarrierRenameClearsProviderCodeButTrimmedNamePreservesIt() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var value = shipment(.readyForPickup)
+        value.carrierCode = "unknown"
+        value.carrierName = "自定义甲"
+        value.uapiCarrierCode = "old-provider"
+        value.reminderDate = Date(timeIntervalSinceReferenceDate: 123)
+        value.logisticsInfo = "保留物流"
+        value.queryInfo = "保留查询"
+        try app.addThrowing(value)
+        app.updateCarrier(id: value.id, carrier: CarrierOption(id: "custom", name: " 自定义甲\n", code: "unknown"))
+        XCTAssertEqual(try shared.snapshot().shipments[0].uapiCarrierCode, "old-provider")
+        try app.updateCarrierThrowing(id: value.id, carrier: CarrierOption(id: "custom", name: "自定义乙", code: "unknown"))
+        let after = try XCTUnwrap(shared.snapshot().shipments.first)
+        XCTAssertNil(after.uapiCarrierCode)
+        XCTAssertEqual(after.carrierName, "自定义乙")
+        XCTAssertEqual(after.carrierCode, "unknown")
+        XCTAssertEqual(after.id, value.id)
+        XCTAssertEqual(after.createdAt, value.createdAt)
+        XCTAssertEqual(after.note, value.note)
+        XCTAssertEqual(after.pickupCode, value.pickupCode)
+        XCTAssertEqual(after.reminderDate, value.reminderDate)
+        XCTAssertEqual(after.logisticsInfo, value.logisticsInfo)
+        XCTAssertEqual(after.queryInfo, value.queryInfo)
+    }
+
+    func testThrowingShipmentEditsReportMissingRecords() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missing = UUID()
+        let before = try shared.snapshot()
+        XCTAssertThrowsError(try app.updateNoteThrowing(id: missing, note: "note"))
+        XCTAssertThrowsError(try app.updatePickupCodeThrowing(id: missing, pickupCode: "code"))
+        XCTAssertThrowsError(try app.updateCarrierThrowing(id: missing, carrier: CarrierDetector.unknown))
+        XCTAssertThrowsError(try app.updateStatusThrowing(id: missing, status: .delivered))
+        XCTAssertThrowsError(try app.markCheckedThrowing(id: missing))
+        XCTAssertEqual(try shared.snapshot(), before)
+    }
+
+    func testThrowingShipmentEditsRollBackDuplicateCodeAndReopening() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var value = shipment(.readyForPickup)
+        value.pickupCode = "original"
+        try app.addThrowing(value)
+        let linked = try XCTUnwrap(app.pickupRecords.first { $0.shipmentID == value.id })
+        _ = try app.addPickupRecord(groupID: linked.groupID, code: "42")
+        let before = try shared.snapshot()
+        let beforeShipments = app.shipments
+        let beforeRecords = app.pickupRecords
+        XCTAssertThrowsError(try app.updatePickupCodeThrowing(id: value.id, pickupCode: " 42 "))
+        XCTAssertEqual(try shared.snapshot(), before)
+        XCTAssertEqual(app.shipments, beforeShipments)
+        XCTAssertEqual(app.pickupRecords, beforeRecords)
+        try app.updateStatusThrowing(id: value.id, status: .delivered)
+        try app.updatePickupCodeThrowing(id: value.id, pickupCode: "42")
+        let completed = try shared.snapshot()
+        let completedShipments = app.shipments
+        let completedRecords = app.pickupRecords
+        XCTAssertThrowsError(try app.updateStatusThrowing(id: value.id, status: .readyForPickup))
+        XCTAssertEqual(try shared.snapshot(), completed)
+        XCTAssertEqual(app.shipments, completedShipments)
+        XCTAssertEqual(app.pickupRecords, completedRecords)
+        try app.updateNoteThrowing(id: value.id, note: "saved")
+        try app.markCheckedThrowing(id: value.id)
+        XCTAssertEqual(app.shipment(id: value.id)?.note, "saved")
+        XCTAssertNotNil(app.shipment(id: value.id)?.lastCheckedAt)
+    }
+
     func testNewShipmentCompletionMatchesInitialStatus() throws {
         let (root, shared, app) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

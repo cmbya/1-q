@@ -53,6 +53,57 @@ final class ShipmentShortcutTests: XCTestCase {
         XCTAssertNil(try store.snapshot().shipments[0].uapiCarrierCode)
         XCTAssertEqual(try store.snapshot().shipments[0].carrierCode, "sf")
     }
+    func testUnknownCarrierRenameInvalidatesProviderCodeWithoutLosingExistingData() throws {
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        var update = input()
+        update.carrierName = "自定义甲"
+        _ = try service.upsert(update)
+        let reminder = Date(timeIntervalSinceReferenceDate: 123)
+        try store.transaction { data in
+            data.shipments[0].uapiCarrierCode = "old-provider"
+            data.shipments[0].note = "保留备注"
+            data.shipments[0].pickupCode = "42"
+            data.shipments[0].reminderDate = reminder
+            data.shipments[0].logisticsInfo = "保留物流"
+            data.shipments[0].queryInfo = "保留查询"
+            data.records[0].code = "42"
+            data.records[0].source = "保留备注"
+        }
+        let original = try XCTUnwrap(store.snapshot().shipments.first)
+        update.carrierName = nil
+        XCTAssertFalse(try service.upsert(update))
+        XCTAssertEqual(try store.snapshot().shipments[0].uapiCarrierCode, "old-provider")
+        XCTAssertEqual(try store.snapshot().shipments[0].carrierName, "自定义甲")
+        update.carrierName = " 自定义甲\n"
+        XCTAssertFalse(try service.upsert(update))
+        XCTAssertEqual(try store.snapshot().shipments[0].uapiCarrierCode, "old-provider")
+        update.carrierName = "自定义乙"
+        XCTAssertFalse(try service.upsert(update))
+        let after = try XCTUnwrap(store.snapshot().shipments.first)
+        XCTAssertNil(after.uapiCarrierCode)
+        XCTAssertEqual(after.carrierName, "自定义乙")
+        XCTAssertEqual(after.carrierCode, "unknown")
+        XCTAssertEqual(after.id, original.id)
+        XCTAssertEqual(after.createdAt, original.createdAt)
+        XCTAssertEqual(after.note, original.note)
+        XCTAssertEqual(after.pickupCode, original.pickupCode)
+        XCTAssertEqual(after.reminderDate, original.reminderDate)
+        XCTAssertEqual(after.logisticsInfo, original.logisticsInfo)
+        XCTAssertEqual(after.queryInfo, original.queryInfo)
+    }
+
+    func testKnownCarrierAliasPreservesProviderCode() throws {
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        var update = input()
+        update.carrierName = "圆通"
+        _ = try service.upsert(update)
+        try store.transaction { $0.shipments[0].uapiCarrierCode = "yuantong" }
+        update.carrierName = "圆通速递"
+        XCTAssertFalse(try service.upsert(update))
+        XCTAssertEqual(try store.snapshot().shipments[0].carrierCode, "yto")
+        XCTAssertEqual(try store.snapshot().shipments[0].uapiCarrierCode, "yuantong")
+    }
+
     func testOldOrCompletedRegressionWritesNothing() throws {
         let service = ShipmentShortcutService(store: store, reloadWidgets: {})
         XCTAssertTrue(try service.upsert(input("已签收", time: Date(timeIntervalSinceReferenceDate: 2000))))

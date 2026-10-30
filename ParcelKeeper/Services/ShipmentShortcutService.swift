@@ -203,6 +203,18 @@ enum ShipmentShortcutParser {
     }
 }
 
+extension Shipment {
+    /// Known carrier aliases share an identity; unknown names only match after trimming.
+    /// Keep this rule shared by manual edits and shortcut updates.
+    mutating func updateCarrierSelection(name: String, code: String) {
+        let unknownNameChanged = code == CarrierDetector.unknown.code &&
+            carrierName.trimmingCharacters(in: .whitespacesAndNewlines) != name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if carrierCode != code || unknownNameChanged { uapiCarrierCode = nil }
+        carrierName = name
+        carrierCode = code
+    }
+}
+
 struct ShipmentShortcutService {
     let store: SharedPickupStore
     var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
@@ -262,9 +274,7 @@ struct ShipmentShortcutService {
             if [.delivered, .archived].contains(shipment.status), let state = value.status, state != .delivered && state != shipment.status { throw ShipmentShortcutError.statusConflict }
             if let name = value.carrierName {
                 let code = CarrierDetector.carrierMentioned(in: name)?.code ?? CarrierDetector.unknown.code
-                if shipment.carrierCode != code { shipment.uapiCarrierCode = nil }
-                shipment.carrierName = name
-                shipment.carrierCode = code
+                shipment.updateCarrierSelection(name: name, code: code)
             }
             if let info = value.logisticsInfo { shipment.logisticsInfo = info }
             if let query = value.queryInfo { shipment.queryInfo = query }

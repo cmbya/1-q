@@ -1,5 +1,21 @@
 import Foundation
 
+/// Shared provenance protection only; each entry point retains its own code grammar.
+/// Ranges always refer to the exact text supplied by the caller (UTF-16 for Foundation).
+enum PickupFieldProtection {
+    private static let pattern = #"(?:https?://|www\.)[^\s，。；！？]+|(?:(?:订单|訂單|运单|運單|物流单|物流單|快递单|快遞單|手机|手機|电话|電話)(?:号码|號碼|编号|編號|号|號)?|单(?:号码|號碼|编号|編號|号|號)|單(?:号码|號碼|编号|編號|号|號))\s*[:：\-－﹣‐‑‒–—−]?\s*(?:取件码|取件碼|取货码|取貨碼|取餐码|取餐碼|提货码|提貨碼|凭证码|憑證碼|核销码|核銷碼)?\s*(?:是|为|為)?\s*[:：\-－﹣‐‑‒–—−]?\s*[A-Za-z0-9+._/#*\-－﹣‐‑‒–—−]+"#
+
+    static func ranges(in text: String) -> [NSRange] {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).map(\.range)
+    }
+
+    static func allows(_ code: String, range: NSRange, protected: [NSRange]) -> Bool {
+        !protected.contains { NSIntersectionRange($0, range).length > 0 }
+            && code.range(of: #"^1[3-9][0-9]{9}$"#, options: .regularExpression) == nil
+    }
+}
+
 /// Rule-based extraction only. Results are never authorization to save a record.
 struct PickupTextParser {
     struct Candidate: Equatable {
@@ -31,15 +47,14 @@ struct PickupTextParser {
             return String(text[range])
         }
         // Do not parse labels embedded in links or contact/order identifiers.
-        let protected = matches(#"(?:https?://|www\.)[^\s，。；！？]+|(?:订单(?:号)?|运单(?:号)?|物流单(?:号)?|快递单(?:号)?|手机(?:号)?|电话(?:号)?)\s*[:：\-－—]?\s*(?:取件码|取货码|取餐码|提货码)?\s*[:：\-－—]?\s*[A-Za-z0-9+._/#*\-]+"#).map(\.range)
+        let protected = PickupFieldProtection.ranges(in: text)
         let codeMatches = matches(#"(?:取件码|取货码|取餐码|提货码)\s*(?:是|为)?\s*[:：\-－—]?\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-])"#)
         let continuation = try? NSRegularExpression(pattern: #"\G\s*[,，、/;；]\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-\p{Han}])"#)
         var codes: [String] = []
         var codeOccurrences = 0
         for match in codeMatches {
-            guard !protected.contains(where: { NSIntersectionRange($0, match.range).length > 0 }),
-                  let code = value(match, 1), code.count <= 32,
-                  code.range(of: #"^1[3-9][0-9]{9}$"#, options: .regularExpression) == nil else { continue }
+            guard let code = value(match, 1), code.count <= 32,
+                  PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected) else { continue }
             codeOccurrences += 1
             if !codes.contains(code) { codes.append(code) }
             // Only consume a list item when it is a standalone token, never a
@@ -48,9 +63,8 @@ struct PickupTextParser {
             while position < full.length,
                   let next = continuation?.firstMatch(in: text, options: [.anchored],
                                                       range: NSRange(location: position, length: full.length - position)),
-                  !protected.contains(where: { NSIntersectionRange($0, next.range).length > 0 }),
                   let extra = value(next, 1), extra.count <= 32,
-                  extra.range(of: #"^1[3-9][0-9]{9}$"#, options: .regularExpression) == nil {
+                  PickupFieldProtection.allows(extra, range: next.range(at: 1), protected: protected) {
                 codeOccurrences += 1
                 if !codes.contains(extra) { codes.append(extra) }
                 position = NSMaxRange(next.range)

@@ -87,6 +87,30 @@ final class AIServiceTests: XCTestCase {
         }
     }
 
+    func testSharedFieldProtectionVariantsAndEightDigitLabel() async throws {
+        try enableShipmentAI()
+        for field in ["订单", "訂單", "运单", "運單", "物流单", "物流單", "快递单", "快遞單", "手机", "手機", "电话", "電話", "单", "單"] {
+            for suffix in ["号", "號", "号码", "號碼", "编号", "編號"] {
+                for value in ["1234", "取件码1234", "取件码为1234", "憑證碼為1234", "核銷碼1234"] {
+                    let text = "😀 " + field + suffix + "：" + value
+                    network.responses = Array(repeating: (200, response("1234")), count: 3)
+                    do { _ = try await service.extract(text); XCTFail("Accepted protected candidate: \(text)") }
+                    catch let error as AIServiceError {
+                        guard case let .allModelsFailed(failures) = error else { return XCTFail("Unexpected error: \(error)") }
+                        XCTAssertEqual(failures.map(\.category), [.invalidResponse, .invalidResponse, .invalidResponse], text)
+                    }
+                }
+            }
+        }
+        for label in ["取件码", "取货码", "取餐码", "提货码"] {
+            for code in ["001", "12345678", "A-1", String(repeating: "A", count: 20)] {
+                network.responses = [(200, response(code))]
+                let result = try await service.extract("電話號碼13800138000，\(label)：\(code)")
+                XCTAssertEqual(result.code, code)
+            }
+        }
+    }
+
     private func enableShipmentAI() throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)

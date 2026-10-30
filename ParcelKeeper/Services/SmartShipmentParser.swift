@@ -54,10 +54,14 @@ enum SmartShipmentParser {
         let pattern = #"(?:取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼)\s*[：:为為是]?\s*([A-Z0-9]{1,5}(?:[-－][A-Z0-9]{1,6}){1,2}|[A-Z0-9]{3,12})(?![A-Z0-9－-])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return "" }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
-              match.numberOfRanges > 1,
-              let swiftRange = Range(match.range(at: 1), in: text) else { return "" }
-        return String(text[swiftRange]).replacingOccurrences(of: "－", with: "-")
+        let protected = PickupFieldProtection.ranges(in: text)
+        for match in regex.matches(in: text, range: range) {
+            guard let swiftRange = Range(match.range(at: 1), in: text) else { continue }
+            let code = String(text[swiftRange])
+            guard PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected) else { continue }
+            return code.replacingOccurrences(of: "－", with: "-")
+        }
+        return ""
     }
 
     private static func inferNote(from text: String) -> String {

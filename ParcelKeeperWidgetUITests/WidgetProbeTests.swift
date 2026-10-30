@@ -21,9 +21,11 @@ final class WidgetProbeTests: XCTestCase {
         }
         element.tap()
     }
-    @MainActor func testMinimalConfiguredWidget() throws {
-        continueAfterFailure = false
+    // Each test prepares its own app launch and gallery; neither requires
+    // the other test to execute or pass.
+    @MainActor private func openProbeGallery() throws {
         let app = XCUIApplication()
+        app.terminate()
         app.launch()
         sleep(3)
         XCUIDevice.shared.press(.home)
@@ -45,6 +47,24 @@ final class WidgetProbeTests: XCTestCase {
         let result = home.cells.matching(NSPredicate(format: "label CONTAINS %@", "ParcelKeeper Probe")).firstMatch
         try tap(result)
         sleep(3)
+    }
+
+    @MainActor private func selectGalleryWidget(named name: String) throws {
+        let title = home.staticTexts[name].firstMatch
+        // Bound the gallery search; missing registration must fail.
+        for _ in 0..<40 {
+            if title.waitForExistence(timeout: 1) { return }
+            home.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.45))
+                .press(forDuration: 0.05, thenDragTo: home.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.45)))
+        }
+        capture("gallery-widget-missing")
+        throw NSError(domain: "WidgetProbe", code: 2, userInfo: [NSLocalizedDescriptionKey: "Widget absent from diagnostic gallery: \(name)"])
+    }
+
+    @MainActor func testMinimalConfiguredWidget() throws {
+        continueAfterFailure = false
+        try openProbeGallery()
+        try selectGalleryWidget(named: "Minimal configuration probe")
         capture("minimal-gallery")
         try tap(home.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Add Widget")).firstMatch)
         sleep(3)
@@ -52,7 +72,9 @@ final class WidgetProbeTests: XCTestCase {
         sleep(10)
         capture("minimal-placed")
         let ok = home.staticTexts["MINIMAL-CONFIG-OK"].firstMatch
-        XCTAssertTrue(ok.waitForExistence(timeout: 30), "Minimal widget did not deliver its timeline; inspect screenshot and chronod log")
+        // MinimalProvider.snapshot and .timeline return the same output.
+        // This checks rendering only, not which callback ran.
+        XCTAssertTrue(ok.waitForExistence(timeout: 30), "Minimal widget did not render its provider output; inspect screenshot")
         let tile = home.icons.matching(NSPredicate(format: "label == %@ AND value == 'Widget'", "ParcelKeeper Probe")).firstMatch
         guard tile.waitForExistence(timeout: 15) else {
             capture("tile-AX-unavailable")
@@ -73,46 +95,25 @@ final class WidgetProbeTests: XCTestCase {
         sleep(10)
         capture("configured-beta")
         XCTAssertTrue(home.staticTexts["CONFIG-BETA"].firstMatch.waitForExistence(timeout: 30), "Configured value did not reach the tile")
-        // Separate smoke check of a real A–J slot. D3 is a legacy AppIntent
-        // diagnostic and is NOT evidence that production SlotProvider runs.
-        try probeProductionSlotA()
     }
 
-    @MainActor private func probeProductionSlotA() throws {
-        home.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.87)).press(forDuration: 2)
-        if home.buttons["Edit"].exists {
-            try tap(home.buttons["Edit"])
-            try tap(home.buttons["Add Widget"])
-        } else {
-            try tap(home.buttons["Add"])
-        }
-        let search = home.searchFields.firstMatch
-        try tap(search)
-        search.typeText("ParcelKeeper Probe")
-        try tap(home.cells.matching(NSPredicate(format: "label CONTAINS %@", "ParcelKeeper Probe")).firstMatch)
-        let title = home.staticTexts["取件组件 A"].firstMatch
-        // Bound the gallery search; missing production registration must fail.
-        for _ in 0..<40 {
-            if title.waitForExistence(timeout: 1) { break }
-            home.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.45))
-                .press(forDuration: 0.05, thenDragTo: home.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.45)))
-        }
-        guard title.exists else {
-            capture("production-slot-A-missing")
-            XCTFail("Production SlotWidget A is absent from diagnostic gallery")
-            return
-        }
+    // Independent production load smoke, not a legacy AppIntent prerequisite.
+    @MainActor func testProductionSlotALoadSmoke() throws {
+        continueAfterFailure = false
+        try openProbeGallery()
+        try selectGalleryWidget(named: "取件组件 A")
         capture("production-slot-A-gallery")
         try tap(home.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Add Widget")).firstMatch)
         if home.buttons["Done"].waitForExistence(timeout: 5) { home.buttons["Done"].tap() }
         // Fresh CI may have no selected/authorized shared group. Both messages
-        // originate in SlotProvider.load(), unlike the gallery placeholder.
-        // This proves a production timeline, NOT successful shared-data access.
+        // originate in SlotProvider.load(), unlike placeholder(in:).
+        // BOTH getSnapshot and getTimeline call load(): the labels prove only
+        // rendered load output, NOT which callback ran or shared-data success.
         let unbound = home.staticTexts["请打开 App → 设置 → 桌面组件，绑定此组件的分组"].firstMatch
         let unavailable = home.staticTexts["读取失败，请打开 App 检查共享数据或重新绑定分组"].firstMatch
-        let delivered = unbound.waitForExistence(timeout: 30) || unavailable.waitForExistence(timeout: 5)
-        XCTAssertTrue(delivered, "Production slot A did not deliver its load result on the fresh simulator")
-        if unavailable.exists { print("PROBE slot A timeline returned storage-unavailable; shared-data success NOT verified") }
+        let loaded = unbound.waitForExistence(timeout: 30) || unavailable.waitForExistence(timeout: 5)
+        XCTAssertTrue(loaded, "Production slot A did not render an expected load result on the fresh simulator (snapshot/timeline not distinguished)")
+        if unavailable.exists { print("PROBE slot A load returned storage-unavailable; callback origin and shared-data success NOT verified") }
         capture("production-slot-A-placed")
     }
 }

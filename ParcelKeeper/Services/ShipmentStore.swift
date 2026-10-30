@@ -172,21 +172,40 @@ final class ShipmentStore: ObservableObject {
             }
         }
     }
-    private func update(id: UUID, mutation: (inout Shipment) -> Void) {
-        do { try updateThrowing(id: id, mutation: mutation) } catch { lastErrorMessage = error.localizedDescription }
+    private func reportWriteError(_ action: () throws -> Void) {
+        do { try action() } catch { lastErrorMessage = error.localizedDescription }
     }
-    func updateStatus(id: UUID, status: ShipmentStatus) { update(id: id) { $0.status = status; $0.updatedAt = Date() } }
-    func updateNote(id: UUID, note: String) { update(id: id) { $0.note = note; $0.updatedAt = Date() } }
-    func updatePickupCode(id: UUID, pickupCode: String) { update(id: id) { $0.pickupCode = pickupCode; $0.updatedAt = Date() } }
-    func updateCarrier(id: UUID, carrier: CarrierOption) {
-        update(id: id) {
-            if $0.carrierCode != carrier.code { $0.uapiCarrierCode = nil }
-            $0.carrierName = carrier.name
-            $0.carrierCode = carrier.code
+    func updateStatusThrowing(id: UUID, status: ShipmentStatus) throws {
+        try updateThrowing(id: id) { $0.status = status; $0.updatedAt = Date() }
+    }
+    func updateStatus(id: UUID, status: ShipmentStatus) {
+        reportWriteError { try updateStatusThrowing(id: id, status: status) }
+    }
+    func updateNoteThrowing(id: UUID, note: String) throws {
+        try updateThrowing(id: id) { $0.note = note; $0.updatedAt = Date() }
+    }
+    func updateNote(id: UUID, note: String) {
+        reportWriteError { try updateNoteThrowing(id: id, note: note) }
+    }
+    func updatePickupCodeThrowing(id: UUID, pickupCode: String) throws {
+        try updateThrowing(id: id) { $0.pickupCode = pickupCode; $0.updatedAt = Date() }
+    }
+    func updatePickupCode(id: UUID, pickupCode: String) {
+        reportWriteError { try updatePickupCodeThrowing(id: id, pickupCode: pickupCode) }
+    }
+    func updateCarrierThrowing(id: UUID, carrier: CarrierOption) throws {
+        try updateThrowing(id: id) {
+            $0.updateCarrierSelection(name: carrier.name, code: carrier.code)
             $0.updatedAt = Date()
         }
     }
-    func markChecked(id: UUID) { update(id: id) { $0.lastCheckedAt = Date(); $0.updatedAt = Date() } }
+    func updateCarrier(id: UUID, carrier: CarrierOption) {
+        reportWriteError { try updateCarrierThrowing(id: id, carrier: carrier) }
+    }
+    func markCheckedThrowing(id: UUID) throws {
+        try updateThrowing(id: id) { $0.lastCheckedAt = Date(); $0.updatedAt = Date() }
+    }
+    func markChecked(id: UUID) { reportWriteError { try markCheckedThrowing(id: id) } }
     func updateReminderThrowing(id: UUID, date: Date?) throws { try updateThrowing(id: id) { $0.reminderDate = date; $0.updatedAt = Date() } }
 
     @discardableResult func createGroup(name: String) throws -> UUID {

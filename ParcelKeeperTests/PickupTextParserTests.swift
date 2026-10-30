@@ -142,6 +142,25 @@ final class PickupTextParserTests: XCTestCase {
         XCTAssertTrue(result.isAmbiguous)
     }
 
+    func testSharedFieldProtectionVariantsAndIndependentCodes() {
+        let fields = ["订单", "訂單", "运单", "運單", "物流单", "物流單", "快递单", "快遞單", "手机", "手機", "电话", "電話", "单", "單"]
+        for field in fields {
+            for suffix in ["号", "號", "号码", "號碼", "编号", "編號"] {
+                let prefix = field + suffix
+                XCTAssertTrue(parser.parse("😀 \(prefix)：取件码1234").candidates.isEmpty, prefix)
+                XCTAssertEqual(parser.parse("\(prefix)：987654，取件码1234").candidates.map(\.code), ["1234"], prefix)
+            }
+        }
+        for text in ["HTTPS://example.test/取件码1234", "www.example.test/取件码1234", "订单号码：取件码为1234", "取件码13800138000"] {
+            XCTAssertTrue(parser.parse(text).candidates.isEmpty, text)
+        }
+        for label in ["取件码", "取货码", "取餐码", "提货码"] {
+            for code in ["001", "12345678", "00A-1#", String(repeating: "0", count: 32)] {
+                XCTAssertEqual(parser.parse("\(label)：\(code)").candidates.map(\.code), [code])
+            }
+        }
+    }
+
     func testPickupLabelInProtectedIdentifier() {
         XCTAssertTrue(parser.parse("订单号提货码123456").candidates.isEmpty)
     }

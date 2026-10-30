@@ -36,3 +36,5 @@
 
 ## 桌面组件绑定
 在 App → 设置 → 桌面组件中，将 A–J 槽位绑定到所需分组，再添加对应字母的组件；无需也不应长按生产组件选组。重新绑定或分组删除后回到 App 修改。诊断③仍是旧 AppIntent 分组链路，不代表生产 A–J 通过；UI 探针仅包含 Minimal 和槽位 A 的有限烟测，不覆盖全部槽位、成功共享读写、改绑/删除和错误恢复，且本地未启动。
+
+UI 探针分为独立的 `testMinimalConfiguredWidget`（旧配置链路）和 `testProductionSlotALoadSmoke`（生产 A 槽），各自启动 App、打开图库并选择目标，不依赖另一项先执行或通过。仍要求英文 SpringBoard 和干净模拟器；不会清理已有组件或绑定，不能视为任意残留环境下的隔离测试。Minimal 的状态及配置文案在 snapshot/timeline 中相同；A 槽断言的未绑定/读取失败文案来自 `SlotProvider.load()`，而 `getSnapshot` 和 `getTimeline` 都调用它。因此两项只验证对应输出可见，A 槽仅为 load smoke，不能证明 timeline 回调或成功共享数据访问。此次只做静态检查，未编译、运行 UI 测试或触发 CI。

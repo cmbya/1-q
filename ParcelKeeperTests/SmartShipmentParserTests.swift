@@ -58,6 +58,28 @@ final class SmartShipmentParserTests: XCTestCase {
         let draft = try XCTUnwrap(SmartShipmentParser.parse(noise).first)
         XCTAssertEqual(draft.pickupCode, "12345678")
     }
+    func testSharedFieldProtectionAndOriginalLabelLengths() throws {
+        let header = "运单号：YT1234567890123 待取件，"
+        let labels = ["取件码", "取件碼", "提货码", "提貨碼", "取货码", "取貨碼", "凭证码", "憑證碼", "核销码", "核銷碼"]
+        for label in labels {
+            for field in ["订单", "訂單", "运单", "運單", "物流单", "物流單", "快递单", "快遞單", "手机", "手機", "电话", "電話", "单", "單"] {
+                for suffix in ["号", "號", "号码", "號碼", "编号", "編號"] {
+                    let text = header + field + suffix + "：" + label + "1234"
+                    XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(text).first).pickupCode, "", text)
+                }
+            }
+            for code in ["001", "12345678", "ABCDEFGHIJKL", "A-1", "ABCDE-123456-ABCDEF"] {
+                let text = header + "電話號碼13800138000，" + label + "：" + code
+                XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(text).first).pickupCode, code, text)
+            }
+        }
+        for text in ["HTTPS://example.test/取件碼1234", "www.example.test/憑證碼1234", "訂單號碼：憑證碼為1234", "取件码13800138000"] {
+            XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + text).first).pickupCode, "", text)
+        }
+        let mixed = header + "https://example.test/取件码1111，取件码2222"
+        XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(mixed).first).pickupCode, "2222")
+    }
+
     func testJSONAndUniqueRepeatedTrackingNumber() throws {
         let json = #"{"trackingNumber":"YT1234567890123","logisticsInfo":"驿站已签收，取件码12345678"}"#
         let draft = try XCTUnwrap(SmartShipmentParser.parse(json).first)

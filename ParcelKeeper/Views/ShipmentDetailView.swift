@@ -7,9 +7,6 @@ struct ShipmentDetailView: View {
 
     let shipmentID: UUID
 
-    @State private var selectedCarrier = CarrierDetector.unknown
-    @State private var note = ""
-    @State private var pickupCode = ""
     @State private var reminderEnabled = false
     @State private var reminderDate = Date().addingTimeInterval(8 * 60 * 60)
     @State private var showingDeleteConfirmation = false
@@ -31,10 +28,9 @@ struct ShipmentDetailView: View {
                     Section("运单") {
                         LabeledContent("快递公司") {
                             Picker("快递公司", selection: Binding(
-                                get: { selectedCarrier },
+                                get: { CarrierDetector.allCarriers.first(where: { $0.code == shipment.carrierCode }) ?? .init(id: shipment.carrierCode, name: shipment.carrierName, code: shipment.carrierCode) },
                                 set: { carrier in
-                                    selectedCarrier = carrier
-                                    store.updateCarrier(id: shipmentID, carrier: carrier)
+                                    saveEdit { try store.updateCarrierThrowing(id: shipmentID, carrier: carrier) }
                                 }
                             )) {
                                 ForEach(CarrierDetector.allCarriers) { carrier in
@@ -81,7 +77,7 @@ struct ShipmentDetailView: View {
                     Section("状态") {
                         Picker("物流状态", selection: Binding(
                             get: { shipment.status },
-                            set: { store.updateStatus(id: shipmentID, status: $0) }
+                            set: { value in saveEdit { try store.updateStatusThrowing(id: shipmentID, status: value) } }
                         )) {
                             ForEach(ShipmentStatus.allCases) { status in
                                 Text(status.rawValue).tag(status)
@@ -105,14 +101,14 @@ struct ShipmentDetailView: View {
                     }
 
                     Section("备注与取件码") {
-                        TextField("备注", text: $note)
-                            .onChange(of: note) { _, newValue in
-                                store.updateNote(id: shipmentID, note: newValue)
-                            }
-                        TextField("取件码", text: $pickupCode)
-                            .onChange(of: pickupCode) { _, newValue in
-                                store.updatePickupCode(id: shipmentID, pickupCode: newValue)
-                            }
+                        TextField("备注", text: Binding(
+                            get: { shipment.note },
+                            set: { value in saveEdit { try store.updateNoteThrowing(id: shipmentID, note: value) } }
+                        ))
+                        TextField("取件码", text: Binding(
+                            get: { shipment.pickupCode },
+                            set: { value in saveEdit { try store.updatePickupCodeThrowing(id: shipmentID, pickupCode: value) } }
+                        ))
                     }
 
                     Section("提醒") {
@@ -142,7 +138,7 @@ struct ShipmentDetailView: View {
                             LabeledContent("最后查看", value: lastCheckedAt.formatted(date: .abbreviated, time: .shortened))
                         }
                         Button {
-                            store.markChecked(id: shipmentID)
+                            saveEdit { try store.markCheckedThrowing(id: shipmentID) }
                         } label: {
                             Label("标记为刚刚查看", systemImage: "arrow.clockwise")
                         }
@@ -158,9 +154,6 @@ struct ShipmentDetailView: View {
                 .navigationTitle(shipment.carrierName)
                 .navigationBarTitleDisplayMode(.inline)
                 .onAppear {
-                    selectedCarrier = CarrierDetector.allCarriers.first(where: { $0.code == shipment.carrierCode }) ?? .init(id: shipment.carrierCode, name: shipment.carrierName, code: shipment.carrierCode)
-                    note = shipment.note
-                    pickupCode = shipment.pickupCode
                     reminderEnabled = shipment.reminderDate != nil
                     reminderDate = shipment.reminderDate ?? Date().addingTimeInterval(8 * 60 * 60)
                     reminderInitialized = true
@@ -187,6 +180,15 @@ struct ShipmentDetailView: View {
             get: { reminderError != nil },
             set: { if !$0 { reminderError = nil } }
         )) { Button("知道了", role: .cancel) {} } message: { Text(reminderError ?? "") }
+    }
+
+    private func saveEdit(_ operation: () throws -> Void) {
+        do { try operation() }
+        catch {
+            // Inputs read only committed values; force a refresh after a rejected edit.
+            try? store.reload()
+            reminderError = "修改未保存，已恢复实际记录：\(error.localizedDescription)"
+        }
     }
 
     private func handleReminderToggle(_ enabled: Bool, shipment: Shipment) {
