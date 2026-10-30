@@ -7,6 +7,7 @@ struct ShipmentShortcutInput: Equatable {
     var logisticsInfo: String?
     var status: ShipmentStatus?
     var logisticsTime: Date?
+    var queryInfo: String? = nil
 }
 
 enum ShipmentShortcutError: LocalizedError {
@@ -42,7 +43,7 @@ enum ShipmentShortcutParser {
         if ["未取件", "未完成", "未收货"].contains(where: text.contains) {
             return ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) ? .readyForPickup : nil
         }
-        if ["本人签收", "收件人签收", "已领取", "已取件", "已收货"].contains(where: text.contains) { return .delivered }
+        if ["本人签收", "收件人签收", "已领取", "已取件", "已收货", "完成取件"].contains(where: text.contains) { return .delivered }
         if ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) { return .readyForPickup }
         if ["已签收", "签收成功", "已完成"].contains(where: text.contains) { return .delivered }
         if ["派送中", "配送中", "正在派送", "正在配送", "快递员派送"].contains(where: text.contains) { return .outForDelivery }
@@ -109,12 +110,47 @@ enum ShipmentShortcutParser {
             return ShipmentShortcutInput(trackingNumber: id, carrierName: field(["carrierName", "快递服务商", "快递公司"]), logisticsInfo: info,
                 status: stateText.flatMap(status) ?? info.flatMap(status), logisticsTime: time)
         }
+        if let labeled = try labeledResult(in: text, trackingNumber: id) { return labeled }
         let event = try latestEvent(in: text)
         return .init(trackingNumber: id, carrierName: CarrierDetector.carrierMentioned(in: text)?.name,
                      logisticsInfo: event.info, status: event.state, logisticsTime: event.time)
     }
 
-    /// Shared by text import and AI grounding. Refuses unorderable histories.
+    /// Split labeled query output before interpreting its event. Labels, emoji,
+    /// and source metadata are not part of the persisted event description.
+    private static func labeledResult(in text: String, trackingNumber: String) throws -> ShipmentShortcutInput? {
+        let regex = try NSRegularExpression(pattern: #"(快递单号|快递公司|当前状态|最新时间|最新进展|查询来源)\s*[：:]"#)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard matches.contains(where: { match in
+            Range(match.range(at: 1), in: text).map { text[$0] == "最新进展" || text[$0] == "当前状态" } ?? false
+        }) else { return nil }
+        var fields: [String: String] = [:]
+        let decorations = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "📦🚚📍🕒🔍\u{FE0F}"))
+        for (index, match) in matches.enumerated() {
+            guard let keyRange = Range(match.range(at: 1), in: text) else { throw ShipmentShortcutError.invalidText }
+            let key = String(text[keyRange])
+            guard fields[key] == nil else { throw ShipmentShortcutError.ambiguous }
+            let end = index + 1 < matches.count ? matches[index + 1].range.location : (text as NSString).length
+            let range = NSRange(location: NSMaxRange(match.range), length: end - NSMaxRange(match.range))
+            guard let valueRange = Range(range, in: text) else { throw ShipmentShortcutError.invalidText }
+            fields[key] = String(text[valueRange]).trimmingCharacters(in: decorations)
+        }
+        func value(_ key: String) -> String? { fields[key].flatMap { $0.isEmpty ? nil : $0 } }
+        let info = value("最新进展")
+        let event = try info.map { try latestEvent(in: $0) }
+        let state = value("当前状态").flatMap(status)
+        let observed = event?.state
+        if state == .delivered, let info, deniesCompletion(info) { throw ShipmentShortcutError.statusConflict }
+        if let state, let observed, state != observed { throw ShipmentShortcutError.statusConflict }
+        let suppliedTime = value("最新时间")
+        let time = suppliedTime.flatMap(date)
+        if suppliedTime != nil && time == nil { throw ShipmentShortcutError.invalidText }
+        if let time, let eventTime = event?.time, time != eventTime { throw ShipmentShortcutError.ambiguous }
+        return .init(trackingNumber: trackingNumber, carrierName: value("快递公司"),
+                     logisticsInfo: event?.info ?? info, status: observed ?? state, logisticsTime: event?.time ?? time)
+    }
+
+    /// Local text import only. Refuses unorderable histories.
     static func latestEvent(in text: String) throws -> (info: String?, state: ShipmentStatus?, time: Date?) {
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         let timeRegex = try NSRegularExpression(pattern: #"(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)"#)
@@ -169,16 +205,19 @@ struct ShipmentShortcutService {
     static func live() throws -> ShipmentShortcutService {
         return try ShipmentShortcutService(store: SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData))
     }
-    func validate(_ input: ShipmentShortcutInput) throws -> ShipmentShortcutInput {
+    func validate(_ input: ShipmentShortcutInput, inferLogistics: Bool = true) throws -> ShipmentShortcutInput {
         var value = input
         value.trackingNumber = try ShipmentShortcutParser.number(input.trackingNumber)
         func nonempty(_ text: String?) -> String? { text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? text?.trimmingCharacters(in: .whitespacesAndNewlines) : nil }
         value.carrierName = nonempty(value.carrierName)
         value.logisticsInfo = nonempty(value.logisticsInfo)
+        guard (value.queryInfo?.count ?? 0) <= 10000 else { throw ShipmentShortcutError.invalidText }
+        if value.queryInfo?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true { value.queryInfo = nil }
         guard (value.carrierName?.count ?? 0) <= 100, (value.logisticsInfo?.count ?? 0) <= 10000 else { throw ShipmentShortcutError.invalidText }
         if let info = value.logisticsInfo {
             let others = ShipmentShortcutParser.numbers(in: info).filter { $0 != value.trackingNumber }
             guard others.isEmpty else { throw ShipmentShortcutError.ambiguous }
+            guard inferLogistics else { return value }
             let event = try ShipmentShortcutParser.latestEvent(in: info)
             if let time = event.time {
                 if let supplied = value.logisticsTime, supplied != time { throw ShipmentShortcutError.ambiguous }
@@ -194,8 +233,8 @@ struct ShipmentShortcutService {
         return value
     }
     /// The match and all writes occur under the existing store transaction.
-    @discardableResult func upsert(_ input: ShipmentShortcutInput) throws -> Bool {
-        let value = try validate(input)
+    @discardableResult func upsert(_ input: ShipmentShortcutInput, inferLogistics: Bool = true) throws -> Bool {
+        let value = try validate(input, inferLogistics: inferLogistics)
         let inserted = try store.transaction { data -> Bool in
             let matches = data.shipments.indices.filter { CarrierDetector.sanitize(data.shipments[$0].trackingNumber) == value.trackingNumber }
             guard matches.count <= 1 else { throw ShipmentShortcutError.ambiguous }
@@ -204,8 +243,8 @@ struct ShipmentShortcutService {
             let isNew = matches.isEmpty
             if let match = matches.first { index = match }
             else {
-                let detection = CarrierDetector.detect(value.trackingNumber)
-                let carrier = detection.confidence >= 0.9 ? detection.carrier : CarrierDetector.unknown
+                let detection = inferLogistics ? CarrierDetector.detect(value.trackingNumber) : nil
+                let carrier = detection.map { $0.confidence >= 0.9 ? $0.carrier : CarrierDetector.unknown } ?? CarrierDetector.unknown
                 data.shipments.append(Shipment(trackingNumber: value.trackingNumber, carrierName: carrier.name, carrierCode: carrier.code))
                 index = data.shipments.count - 1
             }
@@ -220,6 +259,7 @@ struct ShipmentShortcutService {
                 shipment.carrierCode = CarrierDetector.carrierMentioned(in: name)?.code ?? CarrierDetector.unknown.code
             }
             if let info = value.logisticsInfo { shipment.logisticsInfo = info }
+            if let query = value.queryInfo { shipment.queryInfo = query }
             if let time = value.logisticsTime { shipment.logisticsTime = time }
             if let state = value.status, shipment.status != .archived { shipment.status = state }
             shipment.updatedAt = now

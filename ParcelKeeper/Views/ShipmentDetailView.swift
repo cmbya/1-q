@@ -74,6 +74,12 @@ struct ShipmentDetailView: View {
                         }
                     }
 
+                    if let query = shipment.queryInfo, !query.isEmpty {
+                        Section("本次查询完整信息") {
+                            Text(query).textSelection(.enabled)
+                        }
+                    }
+
                     Section("备注与取件码") {
                         TextField("备注", text: $note)
                             .onChange(of: note) { _, newValue in

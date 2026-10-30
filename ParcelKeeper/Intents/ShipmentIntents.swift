@@ -54,39 +54,19 @@ struct RecognizeShipmentIntent: AppIntent {
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let service = try ShipmentShortcutService.live()
-        var input = try ShipmentShortcutParser.parse(text)
         let ai = AIService()
-        // AI only fills missing fields. It never chooses among multiple parcels
-        // or replaces an already selected latest event with an older one.
-        if ai.loadConfiguration().enabled && (input.logisticsInfo == nil || input.carrierName == nil) {
-            do {
-                let extra = try await ai.extractShipment(text)
-                guard extra.trackingNumber == input.trackingNumber else { throw AIServiceError.invalidResponse }
-                if input.carrierName == nil { input.carrierName = extra.carrierName }
-                // Never attach an AI event to a different locally supplied
-                // timestamp/status (including structured JSON with missing info).
-                if input.logisticsInfo == nil,
-                   input.logisticsTime == nil || input.logisticsTime == extra.logisticsTime,
-                   input.status == nil || input.status == extra.status {
-                    input.logisticsInfo = extra.logisticsInfo
-                    if input.logisticsTime == nil { input.logisticsTime = extra.logisticsTime }
-                    if input.status == nil { input.status = extra.status }
-                }
-            } catch is CancellationError { throw CancellationError() }
-            catch AIServiceError.cancelled { throw AIServiceError.cancelled }
-            catch {
-                // A local tracking number remains usable if enrichment fails.
-                // With no local logistics, do not pretend AI produced a status.
-            }
+        let recognition = try await ShipmentRecognition.recognize(text, useAI: ai.loadConfiguration().enabled) {
+            try await ai.extractShipment($0)
         }
-        input = try service.validate(input)
+        let inferLogistics = !recognition.usesAI
+        let input = try service.validate(recognition.input, inferLogistics: inferLogistics)
         if confirmBeforeSaving {
             let dialog: IntentDialog = "保存快递：\(input.trackingNumber)，服务商：\(input.carrierName ?? "未识别")，状态：\(input.status?.rawValue ?? "未识别，保留原值")，物流：\(input.logisticsInfo ?? "未识别")。同单号将更新。"
             if #available(iOS 18.0, *) { try await requestConfirmation(dialog: dialog) }
             else { try await requestConfirmation(result: .result(dialog: dialog), showPrompt: true) }
         }
         try Task.checkCancellation()
-        let inserted = try service.upsert(input)
+        let inserted = try service.upsert(input, inferLogistics: inferLogistics)
         if inserted { return .result(dialog: "快递已识别并新增。") }
         return .result(dialog: "快递已识别并更新。")
     }

@@ -58,69 +58,202 @@ final class AIServiceTests: XCTestCase {
         catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("Unexpected error") } }
     }
 
-    func testShipmentAIUsesConfiguredModelsAndGroundedFields() async throws {
+    private func enableShipmentAI() throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
-        func envelope(_ fields: [String: String]) throws -> String {
-            let content = String(data: try JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
-            return String(data: try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]]), encoding: .utf8)!
-        }
-        network.responses = [(200, try envelope(["trackingNumber": "YT1234567890123", "carrierName": "圆通速递", "logisticsInfo": "虚构签收", "logisticsTime": ""])),
-                             (200, try envelope(["trackingNumber": "YT1234567890123", "carrierName": "圆通速递", "logisticsInfo": "已签收", "logisticsTime": ""]))]
-        let result = try await service.extractShipment("圆通速递 运单号：YT1234567890123 最新物流：已签收")
-        XCTAssertEqual(result.trackingNumber, "YT1234567890123")
-        XCTAssertEqual(result.status, .delivered)
-        XCTAssertEqual(network.requests.count, 2)
     }
-
-    private func shipmentResponse(info: String, time: String) throws -> String {
-        let fields = ["trackingNumber": "YT1234567890123", "carrierName": "", "logisticsInfo": info, "logisticsTime": time]
+    private func shipmentEnvelope(_ fields: [String: Any]) throws -> String {
         let content = String(data: try JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
         return String(data: try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]]), encoding: .utf8)!
     }
-    func testShipmentAIRejectsHistoricalReceiptAndCrossEventTimePairing() async throws {
-        try service.saveConfiguration(config(), privacyConfirmed: true)
-        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+    private func shipmentFields(info: String, status: String, time: String = "", carrier: String = "") -> [String: String] {
+        ["trackingNumber": "YT1234567890123", "carrierName": carrier, "logisticsInfo": info, "status": status, "logisticsTime": time]
+    }
+    private func shipmentResponse(info: String, status: String, time: String = "", carrier: String = "") throws -> String {
+        try shipmentEnvelope(shipmentFields(info: info, status: status, time: time, carrier: carrier))
+    }
+    private func assertShipmentRejected(_ fields: [String: Any], text: String) async throws {
+        network.responses = Array(repeating: (200, try shipmentEnvelope(fields)), count: 3)
+        do { _ = try await service.extractShipment(text); XCTFail("Must reject invalid fields") }
+        catch let error as AIServiceError {
+            guard case let .allModelsFailed(failures) = error else { return XCTFail("wrong error: \(error)") }
+            XCTAssertEqual(failures.map(\.category), [.invalidResponse, .invalidResponse, .invalidResponse])
+        }
+    }
+    func testShipmentAIUsesConfiguredModelsAndGroundedFields() async throws {
+        try enableShipmentAI()
+        network.responses = [(200, try shipmentResponse(info: "虚构签收", status: "已签收", carrier: "圆通速递")),
+                             (200, try shipmentResponse(info: "已签收", status: "已签收", carrier: "圆通速递"))]
+        let result = try await service.extractShipment("圆通速递 运单号：YT1234567890123 最新物流：已签收")
+        XCTAssertEqual(result.trackingNumber, "YT1234567890123")
+        XCTAssertEqual(result.carrierName, "圆通速递")
+        XCTAssertEqual(result.logisticsInfo, "已签收")
+        XCTAssertEqual(result.status, .delivered)
+        XCTAssertNil(result.logisticsTime)
+        XCTAssertEqual(network.requests.count, 2)
+        let models = try network.requests.map { request -> String in
+            let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as! [String: Any]
+            return body["model"] as! String
+        }
+        XCTAssertEqual(models, ["a", "b"])
+    }
+    func testShipmentAITrustsSemanticCompletionAndExactEventExcerpt() async throws {
+        try enableShipmentAI()
+        let info = "收件人凭取件码完成取件"
+        network.responses = [(200, try shipmentResponse(info: info, status: "已签收", time: "2026-10-30 10:00", carrier: "圆通速递"))]
+        let result = try await service.extractShipment("圆通速递 运单号：YT1234567890123\n最新进展：2026-10-30 10:00 \(info)")
+        XCTAssertEqual(result.logisticsInfo, info)
+        XCTAssertEqual(result.status, .delivered)
+        XCTAssertEqual(result.logisticsTime, ShipmentShortcutParser.date("2026-10-30 10:00"))
+        XCTAssertEqual(network.requests.count, 1)
+    }
+    func testShipmentAIStationReceiptIsNotPersonalCompletion() async throws {
+        try enableShipmentAI()
+        let info = "已签收，驿站代收"
+        network.responses = [(200, try shipmentResponse(info: info, status: "待取件"))]
+        let result = try await service.extractShipment("运单号：YT1234567890123 \(info)")
+        XCTAssertEqual(result.logisticsInfo, info)
+        XCTAssertEqual(result.status, .readyForPickup)
+    }
+    func testShipmentAISelectsLatestEventWithoutLocalHistoryAdjudication() async throws {
+        try enableShipmentAI()
+        let text = "运单号：YT1234567890123\n此前：已签收\n最新进展：包裹正在返回始发仓"
+        network.responses = [(200, try shipmentResponse(info: "包裹正在返回始发仓", status: "异常"))]
+        let result = try await service.extractShipment(text)
+        XCTAssertEqual(result.logisticsInfo, "包裹正在返回始发仓")
+        XCTAssertEqual(result.status, .exception)
+        XCTAssertNil(result.logisticsTime)
+    }
+    func testShipmentAIOnlyChecksFieldProvenanceNotCrossEventSemantics() async throws {
+        try enableShipmentAI()
+        // Semantic event/time selection belongs to the model. Substring validation
+        // alone intentionally cannot prove that these two excerpts form a pair.
         let text = "运单号：YT1234567890123\n2026-10-29 09:00 已签收\n2026-10-30 10:00 退回寄件人"
-        for (info, time) in [("已签收", "2026-10-30 10:00"), ("已签收", "2026-10-29 09:00"),
-                             ("已签收", ""), ("退回寄件人", "2026-10-29 09:00"), ("退回寄件人", "")] {
-            network.responses = Array(repeating: (200, try shipmentResponse(info: info, time: time)), count: 3)
-            do { _ = try await service.extractShipment(text); XCTFail("accepted historical/mismatched pair") }
-            catch let error as AIServiceError {
-                guard case let .allModelsFailed(failures) = error else { return XCTFail("wrong error: \(error)") }
-                XCTAssertEqual(failures.map(\.category), [.invalidResponse, .invalidResponse, .invalidResponse])
-            }
-        }
-        network.responses = [(200, try shipmentResponse(info: "退回寄件人", time: "2026-10-30 10:00"))]
-        let latest = try await service.extractShipment(text)
-        XCTAssertEqual(latest.status, .exception)
-        XCTAssertEqual(latest.logisticsTime, ShipmentShortcutParser.date("2026-10-30 10:00"))
+        network.responses = [(200, try shipmentResponse(info: "已签收", status: "已签收", time: "2026-10-30 10:00"))]
+        let result = try await service.extractShipment(text)
+        XCTAssertEqual(result.logisticsInfo, "已签收")
+        XCTAssertEqual(result.status, .delivered)
+        XCTAssertEqual(result.logisticsTime, ShipmentShortcutParser.date("2026-10-30 10:00"))
     }
-    func testShipmentAICannotRemoveStationQualifierOrFillAmbiguousHistory() async throws {
-        try service.saveConfiguration(config(), privacyConfirmed: true)
-        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
-        for text in ["运单号：YT1234567890123 已签收，驿站代收", "运单号：YT1234567890123\n已签收\n退回"] {
-            network.responses = Array(repeating: (200, try shipmentResponse(info: "已签收", time: "")), count: 3)
-            do { _ = try await service.extractShipment(text); XCTFail("must reject completion") }
-            catch let error as AIServiceError {
-                guard case .allModelsFailed = error else { return XCTFail("wrong error: \(error)") }
-            }
-        }
-        network.responses = [(200, try shipmentResponse(info: "已签收，驿站代收", time: ""))]
-        let pickup = try await service.extractShipment("运单号：YT1234567890123 已签收，驿站代收")
-        XCTAssertEqual(pickup.status, .readyForPickup)
+    func testShipmentAIRejectsWholeQueryEnvelopeAsEventBody() async throws {
+        try enableShipmentAI()
+        let progress = "快件已按约定投递，取件人凭取件码完成取件。"
+        let text = "快递单号：YT1234567890123 快递公司：圆通速递 当前状态：已签收 最新时间： 最新进展：\(progress) 查询来源：百度搜索"
+        try await assertShipmentRejected(shipmentFields(info: text, status: "已签收"), text: text)
+        network.responses = [(200, try shipmentResponse(info: progress, status: "已签收", carrier: "圆通速递"))]
+        let result = try await service.extractShipment(text)
+        XCTAssertEqual(result.logisticsInfo, progress)
+        XCTAssertEqual(result.status, .delivered)
+        XCTAssertNil(result.logisticsTime)
     }
-    func testShipmentAIHandlesStructuredLatestEventAndTimestampPrefix() async throws {
-        try service.saveConfiguration(config(), privacyConfirmed: true)
-        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+    func testShipmentAIRequiresEveryFieldAsStringAndLegalNonArchivedStatus() async throws {
+        try enableShipmentAI()
+        let text = "运单号：YT1234567890123 最新物流：已签收"
+        let valid = shipmentFields(info: "已签收", status: "已签收")
+        for field in ["trackingNumber", "carrierName", "logisticsInfo", "status", "logisticsTime"] {
+            var missing: [String: Any] = valid
+            missing.removeValue(forKey: field)
+            try await assertShipmentRejected(missing, text: text)
+            var wrongType: [String: Any] = valid
+            wrongType[field] = 42
+            try await assertShipmentRejected(wrongType, text: text)
+        }
+        for status in ["delivered", "已归档", "不存在", ""] {
+            try await assertShipmentRejected(shipmentFields(info: "已签收", status: status), text: text)
+        }
+    }
+    func testShipmentAIRejectsFabricatedExcerptsAndInvalidDatesOrNumbers() async throws {
+        try enableShipmentAI()
+        let text = "圆通速递 运单号：YT1234567890123\n2026-10-30 10:00 已签收\n时间：昨天\n联系电话13800138000"
+        let valid = shipmentFields(info: "已签收", status: "已签收", time: "2026-10-30 10:00", carrier: "圆通速递")
+        for (field, value) in [("trackingNumber", "SF1234567890123"), ("trackingNumber", "13800138000"),
+                               ("carrierName", "顺丰速运"), ("logisticsInfo", "收件人已取件"),
+                               ("logisticsTime", "2026-10-31 10:00"), ("logisticsTime", "昨天")] {
+            var invalid = valid
+            invalid[field] = value
+            try await assertShipmentRejected(invalid, text: text)
+        }
+    }
+    func testShipmentAIAllowsEmptyLogisticsOnlyWithEmptyStatusAndTime() async throws {
+        try enableShipmentAI()
+        let text = "运单号：YT1234567890123 查询时间：2026-10-30 10:00"
+        network.responses = [(200, try shipmentResponse(info: "", status: ""))]
+        let result = try await service.extractShipment(text)
+        XCTAssertNil(result.logisticsInfo)
+        XCTAssertNil(result.status)
+        XCTAssertNil(result.logisticsTime)
+        try await assertShipmentRejected(shipmentFields(info: "", status: "已签收"), text: text)
+        try await assertShipmentRejected(shipmentFields(info: "", status: "", time: "2026-10-30 10:00"), text: text)
+    }
+    func testShipmentAIEmptyEventTimeDoesNotUseQueryTime() async throws {
+        try enableShipmentAI()
+        network.responses = [(200, try shipmentResponse(info: "收件人凭取件码完成取件", status: "已签收"))]
+        let result = try await service.extractShipment("运单号：YT1234567890123 查询时间：2026-10-30 10:00\n收件人凭取件码完成取件")
+        XCTAssertNil(result.logisticsTime)
+        XCTAssertEqual(result.status, .delivered)
+    }
+    func testShipmentAIPromptDefinesIndependentSemanticContract() async throws {
+        try enableShipmentAI()
+        network.responses = [(200, try shipmentResponse(info: "已签收", status: "已签收"))]
+        _ = try await service.extractShipment("运单号：YT1234567890123 已签收")
+        let request = try XCTUnwrap(network.requests.first)
+        let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as! [String: Any]
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let prompt = try XCTUnwrap(messages.first?["content"])
+        for requirement in ["status", "运输中", "派送中", "待取件", "已签收", "异常", "驿站代收", "凭取件码完成取件", "查询时间", "逐字", "最新事件正文"] {
+            XCTAssertTrue(prompt.contains(requirement), "Missing prompt contract: \(requirement)")
+        }
+        XCTAssertEqual(messages.last?["content"], "运单号：YT1234567890123 已签收")
+    }
+    func testShipmentAIAllModelsFailInsteadOfReturningLocalParse() async throws {
+        try enableShipmentAI()
+        network.responses = [(429, ""), (503, ""), (200, "not JSON")]
+        do { _ = try await service.extractShipment("运单号：YT1234567890123 最新物流：已签收"); XCTFail("No local fallback") }
+        catch let error as AIServiceError {
+            guard case let .allModelsFailed(failures) = error else { return XCTFail("wrong error: \(error)") }
+            XCTAssertEqual(failures.map(\.model), ["a", "b", "c"])
+            XCTAssertEqual(failures.map(\.category), [.unavailable, .unavailable, .invalidResponse])
+        }
+        XCTAssertEqual(network.requests.count, 3)
+    }
+    func testShipmentAIAuthenticationStopsWithoutFallback() async throws {
+        try enableShipmentAI()
+        network.responses = [(401, "")]
+        do { _ = try await service.extractShipment("运单号：YT1234567890123 已签收"); XCTFail() }
+        catch { XCTAssertEqual(error as? AIServiceError, .authentication) }
+        XCTAssertEqual(network.requests.count, 1)
+    }
+    func testShipmentAIHandlesStructuredLatestEventAndTimestampSuffix() async throws {
+        try enableShipmentAI()
         let fields = ["trackingNumber": "YT1234567890123", "logisticsInfo": "退回寄件人", "logisticsTime": "2026-10-30 10:00"]
         let structured = String(data: try JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
         for text in [structured, "运单号：YT1234567890123\n2026-10-29 09:00 已签收\n退回寄件人 2026-10-30 10:00"] {
-            network.responses = [(200, try shipmentResponse(info: "退回寄件人", time: "2026-10-30 10:00"))]
+            network.responses = [(200, try shipmentResponse(info: "退回寄件人", status: "异常", time: "2026-10-30 10:00"))]
             let result = try await service.extractShipment(text)
             XCTAssertEqual(result.logisticsInfo, "退回寄件人")
             XCTAssertEqual(result.status, .exception)
+            XCTAssertEqual(result.logisticsTime, ShipmentShortcutParser.date("2026-10-30 10:00"))
         }
+    }
+    func testShipmentAIStatusIsAnEnumNotAnExcerptOrLocalKeywordClassification() async throws {
+        try enableShipmentAI()
+        let text = "运单号：YT1234567890123 最新物流：已进入下一处理环节"
+        for status in ShipmentStatus.allCases where status != .archived {
+            network.responses = [(200, try shipmentResponse(info: "已进入下一处理环节", status: status.rawValue))]
+            let result = try await service.extractShipment(text)
+            XCTAssertEqual(result.status, status)
+            XCTAssertEqual(result.logisticsInfo, "已进入下一处理环节")
+        }
+    }
+    func testShipmentAITrackingNumberMustBeVerbatimBeforeNormalization() async throws {
+        try enableShipmentAI()
+        let text = "运单号：yt1234567890123 已签收"
+        try await assertShipmentRejected(shipmentFields(info: "已签收", status: "已签收"), text: text)
+        var fields = shipmentFields(info: "已签收", status: "已签收")
+        fields["trackingNumber"] = "yt1234567890123"
+        network.responses = [(200, try shipmentEnvelope(fields))]
+        let result = try await service.extractShipment(text)
+        XCTAssertEqual(result.trackingNumber, "YT1234567890123")
     }
     func testShipmentAIMultipleParcelsNeverSent() async throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
