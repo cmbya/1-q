@@ -118,7 +118,7 @@ private struct EditPickupView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") {
                         do {
-                            try store.updatePickupRecord(id: record.id, code: code, location: location, source: source)
+                            try store.updatePickupRecord(id: record.id, code: code, location: location, source: source, expected: record)
                             dismiss()
                         } catch { self.error = error.localizedDescription }
                     }.disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

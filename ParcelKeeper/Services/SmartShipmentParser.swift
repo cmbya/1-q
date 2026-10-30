@@ -5,31 +5,43 @@ enum SmartShipmentParser {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return [] }
 
-        let numbers = CarrierDetector.extractTrackingNumbers(from: text)
+        let numbers = ShipmentShortcutParser.numbers(in: text)
         guard !numbers.isEmpty else { return [] }
-
-        let sharedPickupCode = extractPickupCode(from: text)
-        let sharedStatus = inferStatus(from: text)
-        let sharedNote = inferNote(from: text)
-
-        return numbers.map { number in
-            let localContext = context(around: number, in: text)
-            let detection = CarrierDetector.detect(number, context: localContext.isEmpty ? text : localContext)
-
+        let contexts: [String]
+        if numbers.count == 1 {
+            contexts = [text]
+        } else {
+            // Only explicit blank-line blocks or self-contained single lines
+            // establish parcel ownership. Never use overlapping character windows.
+            let blocks = text.components(separatedBy: "\n\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            let lines = text.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            func isolated(_ parts: [String]) -> Bool {
+                let ids = parts.map { ShipmentShortcutParser.numbers(in: $0) }
+                return ids.allSatisfy { $0.count == 1 } && ids.count == numbers.count && Set(ids.flatMap { $0 }) == Set(numbers)
+            }
+            if isolated(blocks) { contexts = blocks }
+            else if isolated(lines) { contexts = lines }
+            else { return [] }
+        }
+        return contexts.compactMap { context in
+            guard let parsed = try? ShipmentShortcutParser.parse(context) else { return nil }
+            let detection = CarrierDetector.detect(parsed.trackingNumber, context: context)
+            // Pickup codes in historical events must not be reused on a newer
+            // return/delivery. For dated histories inspect only the selected event.
+            let codeContext = parsed.logisticsInfo ?? context
             return ShipmentImportDraft(
-                trackingNumber: detection.trackingNumber,
+                trackingNumber: parsed.trackingNumber,
                 carrier: detection.carrier,
                 confidence: detection.confidence,
-                status: sharedStatus,
-                note: sharedNote,
-                pickupCode: sharedPickupCode
+                status: parsed.status ?? .inTransit,
+                note: inferNote(from: context),
+                pickupCode: parsed.status == .readyForPickup ? extractPickupCode(from: codeContext) : ""
             )
         }
     }
 
     static func parseSingleNumber(_ value: String) -> ShipmentImportDraft? {
-        let normalized = CarrierDetector.sanitize(value)
-        guard normalized.count >= 8 else { return nil }
+        guard let normalized = try? ShipmentShortcutParser.number(value) else { return nil }
         let detection = CarrierDetector.detect(normalized)
         return ShipmentImportDraft(
             trackingNumber: detection.trackingNumber,
@@ -39,29 +51,13 @@ enum SmartShipmentParser {
     }
 
     private static func extractPickupCode(from text: String) -> String {
-        let pattern = #"(?:取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼)\s*[：:为為是]?\s*([A-Z0-9]{2,5}(?:[-－][A-Z0-9]{2,6}){0,2}|[A-Z0-9]{3,12})"#
+        let pattern = #"(?:取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼)\s*[：:为為是]?\s*([A-Z0-9]{1,5}(?:[-－][A-Z0-9]{1,6}){1,2}|[A-Z0-9]{3,12})(?![A-Z0-9－-])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return "" }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         guard let match = regex.firstMatch(in: text, range: range),
               match.numberOfRanges > 1,
               let swiftRange = Range(match.range(at: 1), in: text) else { return "" }
         return String(text[swiftRange]).replacingOccurrences(of: "－", with: "-")
-    }
-
-    private static func inferStatus(from text: String) -> ShipmentStatus {
-        if containsAny(text, ["已签收", "已簽收", "签收成功", "簽收成功", "已收货", "已收貨"]) {
-            return .delivered
-        }
-        if containsAny(text, ["待取件", "请取件", "請取件", "已到驿站", "已到快递柜", "已到快遞櫃", "取件码", "取件碼"]) {
-            return .readyForPickup
-        }
-        if containsAny(text, ["派送中", "配送中", "正在派送", "正在配送", "快递员派送", "快遞員派送"]) {
-            return .outForDelivery
-        }
-        if containsAny(text, ["物流异常", "物流異常", "运输异常", "運輸異常", "退回", "滞留", "滯留", "拒收"]) {
-            return .exception
-        }
-        return .inTransit
     }
 
     private static func inferNote(from text: String) -> String {
@@ -93,14 +89,6 @@ enum SmartShipmentParser {
         }
 
         return parts.prefix(3).joined(separator: " · ")
-    }
-
-    private static func context(around number: String, in text: String) -> String {
-        let upperText = text.uppercased()
-        guard let range = upperText.range(of: number.uppercased()) else { return "" }
-        let start = upperText.index(range.lowerBound, offsetBy: -80, limitedBy: upperText.startIndex) ?? upperText.startIndex
-        let end = upperText.index(range.upperBound, offsetBy: 80, limitedBy: upperText.endIndex) ?? upperText.endIndex
-        return String(upperText[start..<end])
     }
 
     private static func containsAny(_ text: String, _ values: [String]) -> Bool {

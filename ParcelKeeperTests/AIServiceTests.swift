@@ -73,6 +73,63 @@ final class AIServiceTests: XCTestCase {
         XCTAssertEqual(network.requests.count, 2)
     }
 
+    private func shipmentResponse(info: String, time: String) throws -> String {
+        let fields = ["trackingNumber": "YT1234567890123", "carrierName": "", "logisticsInfo": info, "logisticsTime": time]
+        let content = String(data: try JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
+        return String(data: try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]]), encoding: .utf8)!
+    }
+    func testShipmentAIRejectsHistoricalReceiptAndCrossEventTimePairing() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        let text = "运单号：YT1234567890123\n2026-10-29 09:00 已签收\n2026-10-30 10:00 退回寄件人"
+        for (info, time) in [("已签收", "2026-10-30 10:00"), ("已签收", "2026-10-29 09:00"),
+                             ("已签收", ""), ("退回寄件人", "2026-10-29 09:00"), ("退回寄件人", "")] {
+            network.responses = Array(repeating: (200, try shipmentResponse(info: info, time: time)), count: 3)
+            do { _ = try await service.extractShipment(text); XCTFail("accepted historical/mismatched pair") }
+            catch let error as AIServiceError {
+                guard case let .allModelsFailed(failures) = error else { return XCTFail("wrong error: \(error)") }
+                XCTAssertEqual(failures.map(\.category), [.invalidResponse, .invalidResponse, .invalidResponse])
+            }
+        }
+        network.responses = [(200, try shipmentResponse(info: "退回寄件人", time: "2026-10-30 10:00"))]
+        let latest = try await service.extractShipment(text)
+        XCTAssertEqual(latest.status, .exception)
+        XCTAssertEqual(latest.logisticsTime, ShipmentShortcutParser.date("2026-10-30 10:00"))
+    }
+    func testShipmentAICannotRemoveStationQualifierOrFillAmbiguousHistory() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        for text in ["运单号：YT1234567890123 已签收，驿站代收", "运单号：YT1234567890123\n已签收\n退回"] {
+            network.responses = Array(repeating: (200, try shipmentResponse(info: "已签收", time: "")), count: 3)
+            do { _ = try await service.extractShipment(text); XCTFail("must reject completion") }
+            catch let error as AIServiceError {
+                guard case .allModelsFailed = error else { return XCTFail("wrong error: \(error)") }
+            }
+        }
+        network.responses = [(200, try shipmentResponse(info: "已签收，驿站代收", time: ""))]
+        let pickup = try await service.extractShipment("运单号：YT1234567890123 已签收，驿站代收")
+        XCTAssertEqual(pickup.status, .readyForPickup)
+    }
+    func testShipmentAIHandlesStructuredLatestEventAndTimestampPrefix() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        let fields = ["trackingNumber": "YT1234567890123", "logisticsInfo": "退回寄件人", "logisticsTime": "2026-10-30 10:00"]
+        let structured = String(data: try JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
+        for text in [structured, "运单号：YT1234567890123\n2026-10-29 09:00 已签收\n退回寄件人 2026-10-30 10:00"] {
+            network.responses = [(200, try shipmentResponse(info: "退回寄件人", time: "2026-10-30 10:00"))]
+            let result = try await service.extractShipment(text)
+            XCTAssertEqual(result.logisticsInfo, "退回寄件人")
+            XCTAssertEqual(result.status, .exception)
+        }
+    }
+    func testShipmentAIMultipleParcelsNeverSent() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        do { _ = try await service.extractShipment("运单号：YT1234567890123 SF1234567890123 已签收"); XCTFail() }
+        catch { XCTAssertTrue(error is ShipmentShortcutError) }
+        XCTAssertTrue(network.requests.isEmpty)
+    }
+
     func testConsentAndPersistence() throws {
         XCTAssertThrowsError(try service.saveConfiguration(config()))
         try service.saveConfiguration(config(), privacyConfirmed: true)

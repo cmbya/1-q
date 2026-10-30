@@ -18,6 +18,28 @@ final class PickupTextParserTests: XCTestCase {
         XCTAssertTrue(parser.parse("https://example.test/取件码-3-4-1366").candidates.isEmpty)
     }
 
+    func testUnicodeHyphensAreNormalizedAcrossWholeTokens() {
+        for separator in ["－", "﹣", "‐", "‑", "‒", "–", "—", "−"] {
+            let code = "3\(separator)4\(separator)1366"
+            let result = parser.parse("【菜鸟】取件码：\(code)")
+            XCTAssertEqual(result.candidates.map(\.code), ["3-4-1366"], separator)
+            XCTAssertFalse(result.isAmbiguous, separator)
+            XCTAssertTrue(result.requiresConfirmation)
+            XCTAssertTrue(parser.parse("订单号取件码\(code)").candidates.isEmpty, separator)
+            XCTAssertTrue(parser.parse("https://example.test/取件码\(code)").candidates.isEmpty, separator)
+        }
+        XCTAssertEqual(parser.parse("取件码3－4-1366，00A—1#").candidates.map(\.code), ["3-4-1366", "00A-1#"])
+    }
+
+    func testOverlongTokensAreRejectedWithoutPrefixTruncation() {
+        for code in [String(repeating: "1", count: 33), "3－4－" + String(repeating: "6", count: 33)] {
+            XCTAssertTrue(parser.parse("取件码：\(code)").candidates.isEmpty, code)
+            XCTAssertEqual(parser.parse("取件码001、\(code)").candidates.map(\.code), ["001"], code)
+        }
+        let boundary = String(repeating: "0", count: 32)
+        XCTAssertEqual(parser.parse("取件码\(boundary)").candidates.map(\.code), [boundary])
+    }
+
     func testLockerExample() throws {
         let result = parser.parse("【丰巢】凭取件码88772092至新港西路214号宿舍大院值班室旁丰巢柜取件。")
         let candidate = try XCTUnwrap(result.candidates.first)

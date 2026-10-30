@@ -27,7 +27,13 @@ struct ShipmentDetailView: View {
                 Form {
                     Section("运单") {
                         LabeledContent("快递公司") {
-                            Picker("快递公司", selection: $selectedCarrier) {
+                            Picker("快递公司", selection: Binding(
+                                get: { selectedCarrier },
+                                set: { carrier in
+                                    selectedCarrier = carrier
+                                    store.updateCarrier(id: shipmentID, carrier: carrier)
+                                }
+                            )) {
                                 ForEach(CarrierDetector.allCarriers) { carrier in
                                     Text(carrier.name).tag(carrier)
                                 }
@@ -128,9 +134,6 @@ struct ShipmentDetailView: View {
                     reminderEnabled = shipment.reminderDate != nil
                     reminderDate = shipment.reminderDate ?? Date().addingTimeInterval(8 * 60 * 60)
                     reminderInitialized = true
-                }
-                .onChange(of: selectedCarrier) { _, carrier in
-                    store.updateCarrier(id: shipmentID, carrier: carrier)
                 }
                 .confirmationDialog("确定删除这条快递吗？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
                     Button("删除", role: .destructive) {

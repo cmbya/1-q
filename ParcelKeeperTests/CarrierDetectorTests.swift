@@ -20,6 +20,15 @@ final class CarrierDetectorTests: XCTestCase {
         XCTAssertEqual(CarrierDetector.detect("unrecognized", context: "韻達").carrier.id, "yunda")
     }
 
+    func testExtractionUsesLocalFieldOwnershipAndStrictTokenBoundaries() {
+        let text = "运单号 SF1234567890 order:12345678 手机号13800138000 日期20261030 取件码12345678 code:87654321 AB123456"
+        XCTAssertEqual(Set(CarrierDetector.extractTrackingNumbers(from: text)), Set(["SF1234567890", "AB123456"]))
+        for text in ["ordertrackingNumber:AB123456", "订单号 AB123456", "_AB123456", "AB123456_", "A-AB123456", "AB123456-Z"] {
+            XCTAssertTrue(CarrierDetector.extractTrackingNumbers(from: text).isEmpty, text)
+        }
+        XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: "AB123456"), ["AB123456"])
+        XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: "12345678"), ["12345678"])
+    }
     func testExtractionPrioritizesLabelAndDeduplicates() {
         let text = "手机号 13800138000\n运单号 SF1234567890\n运单号 SF1234567890"
         let numbers = CarrierDetector.extractTrackingNumbers(from: text)

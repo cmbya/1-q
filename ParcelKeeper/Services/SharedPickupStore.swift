@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 enum PickupStorageError: LocalizedError {
     case appGroupUnavailable, requiresMainApp, invalidData(String), notFound, nonEmptyGroup, stalePreview, conflictConfirmationRequired
@@ -131,9 +132,11 @@ final class SharedPickupStore {
         }
         // This check is inside flock for every shared-data read and transaction.
         guard accessMode == .appManaged else { throw PickupStorageError.requiresMainApp }
-        let now = Date()
-        let express = PickupGroup(name: "快递", sortOrder: 0, createdAt: now, updatedAt: now)
-        let food = PickupGroup(name: "餐饮", sortOrder: 1, createdAt: now, updatedAt: now)
+        // Read-only historical projections must remain stable across instances.
+        // Real migration still generates and persists ordinary UUIDs and dates.
+        let now = readOnly ? Date(timeIntervalSinceReferenceDate: 0) : Date()
+        let express = PickupGroup(id: readOnly ? historicalID("group:express") : UUID(), name: "快递", sortOrder: 0, createdAt: now, updatedAt: now)
+        let food = PickupGroup(id: readOnly ? historicalID("group:food") : UUID(), name: "餐饮", sortOrder: 1, createdAt: now, updatedAt: now)
         var shipments: [Shipment] = []
         if fileManager.fileExists(atPath: legacyURL.path) {
             let bytes = try Data(contentsOf: legacyURL)
@@ -149,7 +152,7 @@ final class SharedPickupStore {
             }
         }
         let records = shipments.map {
-            PickupRecord(groupID: express.id, code: $0.pickupCode, source: $0.note, createdAt: $0.createdAt, updatedAt: $0.updatedAt, shipmentID: $0.id)
+            PickupRecord(id: readOnly ? historicalID("record:\($0.id.uuidString)") : UUID(), groupID: express.id, code: $0.pickupCode, source: $0.note, isCompleted: $0.status == .delivered || $0.status == .archived, createdAt: $0.createdAt, updatedAt: $0.updatedAt, shipmentID: $0.id)
         }
         let result = PickupDataset(groups: [express, food], records: records, shipments: shipments, expressGroupID: express.id)
         try validate(result)
@@ -157,6 +160,15 @@ final class SharedPickupStore {
         guard check == result else { throw PickupStorageError.invalidData("迁移校验失败") }
         if !readOnly { try write(result) }
         return result
+    }
+
+    private func historicalID(_ key: String) -> UUID {
+        // Domain separation and SHA-256 avoid Swift Hasher's process randomization.
+        // This source belongs to both app and widget; no extra source membership.
+        var bytes = Array(SHA256.hash(data: Data(("ParcelKeeper.history.v1:" + key).utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x80 // RFC 9562 custom UUID (version 8)
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 
     func snapshot() throws -> PickupDataset { try locked { try readOrMigrate() } }
@@ -178,7 +190,7 @@ final class SharedPickupStore {
                 let express = current.groups.first(where: { $0.id == current.expressGroupID })
                 guard let group = express else { throw PickupStorageError.invalidData("没有可用于导入的分组") }
                 let records = legacy.map {
-                    PickupRecord(id: $0.id, groupID: group.id, code: $0.pickupCode, source: $0.note, createdAt: $0.createdAt, updatedAt: $0.updatedAt, shipmentID: $0.id)
+                    PickupRecord(id: $0.id, groupID: group.id, code: $0.pickupCode, source: $0.note, isCompleted: $0.status == .delivered || $0.status == .archived, createdAt: $0.createdAt, updatedAt: $0.updatedAt, shipmentID: $0.id)
                 }
                 incoming = PickupDataset(groups: [group], records: records, shipments: legacy)
             } else { incoming = try decoder.decode(PickupDataset.self, from: bytes) }

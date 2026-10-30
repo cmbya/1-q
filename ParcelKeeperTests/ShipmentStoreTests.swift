@@ -1,0 +1,223 @@
+import XCTest
+@testable import ParcelKeeper
+
+@MainActor
+final class ShipmentStoreTests: XCTestCase {
+    private func fixture() throws -> (URL, SharedPickupStore, ShipmentStore) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let shared = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("absent.json"), containerURL: root)
+        let app = ShipmentStore(storageProvider: { shared })
+        return (root, shared, app)
+    }
+
+    private func shipment(_ status: ShipmentStatus) -> Shipment {
+        Shipment(trackingNumber: UUID().uuidString, carrierName: "测试", carrierCode: "test", status: status, note: "来源", pickupCode: "42")
+    }
+
+    func testNewShipmentCompletionMatchesInitialStatus() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for status in ShipmentStatus.allCases {
+            var value = shipment(status)
+            value.pickupCode = status.rawValue
+            try app.addThrowing(value)
+            let data = try shared.snapshot()
+            let record = try XCTUnwrap(data.records.first { $0.shipmentID == value.id })
+            XCTAssertEqual(record.isCompleted, status == .delivered || status == .archived)
+        }
+    }
+
+    func testStatusChangesOnlySynchronizeLinkedRecordAndPreserveExplicitRestoreOnOtherEdits() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let value = shipment(.readyForPickup)
+        try app.addThrowing(value)
+        let group = try XCTUnwrap(app.groups.last?.id)
+        let standalone = try app.addPickupRecord(groupID: group, code: "42")
+        try app.setPickupCompleted(id: standalone, completed: true)
+        let linked = try XCTUnwrap(app.pickupRecords.first { $0.shipmentID == value.id }?.id)
+        app.updateStatus(id: value.id, status: .delivered)
+        XCTAssertTrue(try XCTUnwrap(app.pickupRecords.first { $0.id == linked }).isCompleted)
+        try app.setPickupCompleted(id: linked, completed: false)
+        app.updateNote(id: value.id, note: "新来源")
+        try app.updateReminderThrowing(id: value.id, date: Date())
+        app.updateStatus(id: value.id, status: .delivered) // no actual status change
+        XCTAssertFalse(try XCTUnwrap(app.pickupRecords.first { $0.id == linked }).isCompleted)
+        app.updateStatus(id: value.id, status: .archived)
+        XCTAssertTrue(try XCTUnwrap(app.pickupRecords.first { $0.id == linked }).isCompleted)
+        app.updateStatus(id: value.id, status: .readyForPickup)
+        XCTAssertFalse(try XCTUnwrap(app.pickupRecords.first { $0.id == linked }).isCompleted)
+        XCTAssertTrue(try XCTUnwrap(shared.snapshot().records.first { $0.id == standalone }).isCompleted)
+        try app.setPickupCompleted(id: standalone, completed: false)
+        app.updateNote(id: value.id, note: "再次编辑")
+        XCTAssertFalse(try XCTUnwrap(shared.snapshot().records.first { $0.id == standalone }).isCompleted)
+        XCTAssertEqual(app.shipment(id: value.id)?.status, .readyForPickup)
+    }
+
+    func testStaleEditorPreservesConcurrentUneditedFieldsAndRejectsSameFieldConflict() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let value = shipment(.readyForPickup)
+        try app.addThrowing(value)
+        let original = try XCTUnwrap(app.pickupRecords.first)
+        let other = ShipmentStore(storageProvider: { shared })
+        other.updatePickupCode(id: value.id, pickupCode: "NEW")
+        try other.setPickupCompleted(id: original.id, completed: true)
+        try app.updatePickupRecord(id: original.id, code: original.code, location: "新位置", source: original.source, expected: original)
+        let latest = try XCTUnwrap(shared.snapshot().records.first)
+        XCTAssertEqual(latest.code, "NEW")
+        XCTAssertEqual(latest.location, "新位置")
+        XCTAssertTrue(latest.isCompleted)
+        let before = try shared.snapshot()
+        XCTAssertThrowsError(try app.updatePickupRecord(id: original.id, code: "MY-EDIT", location: "不得部分提交", expected: original))
+        XCTAssertEqual(try shared.snapshot(), before)
+        try app.updatePickupRecord(id: original.id, source: "仅来源", expected: latest)
+        XCTAssertEqual(try shared.snapshot().shipments.first?.pickupCode, "NEW")
+        XCTAssertEqual(try shared.snapshot().shipments.first?.note, "仅来源")
+        let saved = try shared.snapshot()
+        XCTAssertThrowsError(try app.updatePickupRecord(id: original.id, code: "  "))
+        XCTAssertEqual(try shared.snapshot(), saved)
+    }
+
+    func testNewShipmentsRejectPendingCodeButAllowCompletedReuseAndEmptyCodes() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pending = shipment(.readyForPickup)
+        try app.addThrowing(pending)
+        let before = try shared.snapshot()
+        XCTAssertThrowsError(try app.addThrowing(shipment(.readyForPickup)))
+        XCTAssertEqual(try shared.snapshot(), before)
+        try app.addThrowing(shipment(.delivered))
+        try app.addThrowing(shipment(.archived))
+        for _ in 0..<2 {
+            var empty = shipment(.readyForPickup)
+            empty.pickupCode = ""
+            try app.addThrowing(empty)
+        }
+        XCTAssertEqual(try shared.snapshot().shipments.count, 5)
+    }
+
+    func testPendingDuplicateEditsMovesRestoresAndGroupMergeRollBack() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try XCTUnwrap(app.groups.first?.id)
+        let second = try XCTUnwrap(app.groups.last?.id)
+        let occupied = try app.addPickupRecord(groupID: first, code: "42")
+        let editable = try app.addPickupRecord(groupID: first, code: "other")
+        let moving = try app.addPickupRecord(groupID: second, code: " 42\n")
+        let before = try shared.snapshot()
+        XCTAssertThrowsError(try app.updatePickupRecord(id: editable, code: "42", location: "must roll back"))
+        XCTAssertThrowsError(try app.movePickupRecord(id: moving, to: first))
+        XCTAssertThrowsError(try app.deleteGroup(id: second, moveTo: first))
+        XCTAssertEqual(try shared.snapshot(), before)
+        try app.setPickupCompleted(id: moving, completed: true)
+        try app.movePickupRecord(id: moving, to: first) // completed codes can coexist
+        try app.updatePickupRecord(id: moving, code: "42")
+        let completed = try shared.snapshot()
+        XCTAssertThrowsError(try app.setPickupCompleted(id: moving, completed: false))
+        XCTAssertEqual(try shared.snapshot(), completed)
+        try app.setPickupCompleted(id: occupied, completed: true)
+        try app.setPickupCompleted(id: moving, completed: false)
+        try app.updatePickupRecord(id: editable, code: "free")
+        try app.movePickupRecord(id: editable, to: second)
+        try app.deleteGroup(id: second, moveTo: first)
+        XCTAssertFalse(try shared.snapshot().groups.contains { $0.id == second })
+    }
+
+    func testLinkedEditsAndStatusRestoreUseLatestTransactionalDuplicates() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var value = shipment(.readyForPickup)
+        value.pickupCode = "original"
+        try app.addThrowing(value)
+        let linked = try XCTUnwrap(app.pickupRecords.first { $0.shipmentID == value.id })
+        let other = ShipmentStore(storageProvider: { shared })
+        let occupied = try other.addPickupRecord(groupID: linked.groupID, code: "42")
+        let before = try shared.snapshot()
+        app.updatePickupCode(id: value.id, pickupCode: " 42 ")
+        XCTAssertNotNil(app.lastErrorMessage)
+        XCTAssertEqual(try shared.snapshot(), before)
+        XCTAssertThrowsError(try app.updatePickupRecord(id: linked.id, code: "42", source: "rollback"))
+        XCTAssertEqual(try shared.snapshot(), before)
+        app.updateStatus(id: value.id, status: .delivered)
+        app.updatePickupCode(id: value.id, pickupCode: "42") // completed code reuse
+        let completed = try shared.snapshot()
+        app.updateStatus(id: value.id, status: .readyForPickup)
+        XCTAssertEqual(try shared.snapshot(), completed)
+        XCTAssertThrowsError(try app.setPickupCompleted(id: linked.id, completed: false))
+        try other.setPickupCompleted(id: occupied, completed: true)
+        app.updateStatus(id: value.id, status: .readyForPickup)
+        XCTAssertFalse(try XCTUnwrap(shared.snapshot().records.first { $0.id == linked.id }).isCompleted)
+    }
+
+    func testHistoricalDuplicatesAllowUnrelatedEditsAndNoOpIdentityChanges() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let value = shipment(.readyForPickup)
+        try app.addThrowing(value)
+        let linked = try XCTUnwrap(app.pickupRecords.first)
+        let duplicate = PickupRecord(groupID: linked.groupID, code: "42")
+        try shared.transaction { $0.records.append(duplicate) } // legacy/backup data is valid
+        try app.reload()
+        try app.updatePickupRecord(id: duplicate.id, code: " 42 ", location: "new", source: "edited")
+        try app.movePickupRecord(id: duplicate.id, to: linked.groupID)
+        try app.setPickupCompleted(id: duplicate.id, completed: false)
+        app.updateNote(id: value.id, note: "unrelated")
+        try app.updateReminderThrowing(id: value.id, date: Date(timeIntervalSinceReferenceDate: 123))
+        XCTAssertEqual(app.shipment(id: value.id)?.note, "unrelated")
+        XCTAssertEqual(app.pickupRecords.first { $0.id == duplicate.id }?.location, "new")
+        let incoming = try shared.exportBackup()
+        let freshRoot = root.appendingPathComponent("import")
+        let fresh = try SharedPickupStore(appGroupID: nil, legacyURL: freshRoot.appendingPathComponent("absent"), containerURL: freshRoot)
+        let imported = try fresh.importBackup(fresh.previewBackup(incoming), policy: nil)
+        XCTAssertEqual(imported.records.filter { $0.groupID == linked.groupID }.count, 2)
+    }
+
+    func testNoAccessLegacyReloadKeepsSelectionIdentitiesAndNeverWritesHistory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("ParcelKeeper")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = directory.appendingPathComponent("shipments.json")
+        let bytes = try JSONEncoder().encode([shipment(.delivered)])
+        try bytes.write(to: legacy)
+        let history = ShipmentStore(storageProvider: { throw AppGroupResolver.ResolutionError.noAccess }, historicalContainerURL: root)
+        XCTAssertTrue(history.isHistoricalSnapshot)
+        let groups = history.groups
+        let records = history.pickupRecords
+        try history.reload()
+        history.refreshOnForeground()
+        XCTAssertEqual(history.groups, groups)
+        XCTAssertEqual(history.pickupRecords, records)
+        let reopened = ShipmentStore(storageProvider: { throw AppGroupResolver.ResolutionError.noAccess }, historicalContainerURL: root)
+        XCTAssertEqual(reopened.groups, groups)
+        XCTAssertEqual(reopened.pickupRecords, records)
+        XCTAssertThrowsError(try history.createGroup(name: "forbidden"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), ["shipments.json"])
+        XCTAssertEqual(try Data(contentsOf: legacy), bytes)
+    }
+
+    func testNoAccessShowsReadOnlyHistoryButChooseAndConflictNeverFallback() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try app.addThrowing(shipment(.delivered))
+        let initial = try shared.snapshot()
+        let dataURL = root.appendingPathComponent("ParcelKeeper/pickup-data.json")
+        let bytes = try Data(contentsOf: dataURL)
+        let history = ShipmentStore(storageProvider: { throw AppGroupResolver.ResolutionError.noAccess }, historicalContainerURL: root)
+        XCTAssertTrue(history.isHistoricalSnapshot)
+        XCTAssertEqual(history.shipments, app.shipments)
+        XCTAssertTrue(history.lastErrorMessage?.contains("历史快照") == true)
+        XCTAssertThrowsError(try history.createGroup(name: "禁止写入"))
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        XCTAssertEqual(try shared.snapshot(), initial)
+        for failure in [AppGroupResolver.ResolutionError.chooseGroup, .conflict] {
+            let blocked = ShipmentStore(storageProvider: { throw failure }, historicalContainerURL: root)
+            XCTAssertFalse(blocked.isHistoricalSnapshot)
+            XCTAssertTrue(blocked.shipments.isEmpty)
+            XCTAssertEqual(blocked.lastErrorMessage, failure.localizedDescription)
+            XCTAssertThrowsError(try blocked.createGroup(name: "禁止本地写入"))
+        }
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+    }
+}

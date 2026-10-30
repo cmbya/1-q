@@ -4,6 +4,8 @@ import WidgetKit
 struct WidgetSettingsView: View {
     @EnvironmentObject private var store: ShipmentStore
     @State private var selections: [WidgetSlot: String] = [:]
+    @State private var unreadable: Set<WidgetSlot> = []
+    private let unreadableSelection = "unreadable-slot"
     @State private var message: String?
     @State private var ready = false
     var body: some View {
@@ -25,7 +27,7 @@ struct WidgetSettingsView: View {
         Picker(slot.title, selection: Binding(
             get: { selections[slot] ?? "" },
             set: { value in
-                guard ready, !store.isHistoricalSnapshot else { return }
+                guard ready, !store.isHistoricalSnapshot, value != unreadableSelection else { return }
                 do {
                     let id: UUID?
                     if value.isEmpty { id = nil }
@@ -35,14 +37,18 @@ struct WidgetSettingsView: View {
                     }
                     try WidgetSlotBinding().save(id, for: slot)
                     selections[slot] = value
+                    unreadable.remove(slot)
                     WidgetCenter.shared.reloadTimelines(ofKind: slot.kind)
-                    message = nil
-                } catch { message = "保存失败：\(error.localizedDescription)" }
+                    message = unreadable.isEmpty ? nil : "部分槽位读取失败，原文件已保留，请逐槽重选。"
+                } catch { message = "保存失败，原选择未更新，请检查共享存储后重试。" }
             }
         )) {
+            if unreadable.contains(slot) {
+                Text("读取失败，请重选（原文件保留）").tag(unreadableSelection)
+            }
             Text("未绑定").tag("")
             let selected = selections[slot] ?? ""
-            if !selected.isEmpty, !store.groups.contains(where: { $0.id.uuidString == selected }) {
+            if !selected.isEmpty, selected != unreadableSelection, !store.groups.contains(where: { $0.id.uuidString == selected }) {
                 Text("原分组已删除，请重选").tag(selected)
             }
             ForEach(store.groups) { group in Text(group.name).tag(group.id.uuidString) }
@@ -53,10 +59,19 @@ struct WidgetSettingsView: View {
         do {
             let bindings = try WidgetSlotBinding()
             var loaded: [WidgetSlot: String] = [:]
-            for slot in WidgetSlot.allCases { loaded[slot] = try bindings.groupID(for: slot)?.uuidString ?? "" }
+            var failed: Set<WidgetSlot> = []
+            for (slot, result) in bindings.loadAll() {
+                switch result {
+                case .success(let id): loaded[slot] = id?.uuidString ?? ""
+                case .failure:
+                    loaded[slot] = unreadableSelection
+                    failed.insert(slot)
+                }
+            }
             selections = loaded
-            message = nil
+            unreadable = failed
+            message = failed.isEmpty ? nil : "部分槽位读取失败，原文件已保留，请逐槽重选。"
             ready = true
-        } catch { message = "无法读取组件设置：\(error.localizedDescription)" }
+        } catch { message = "无法访问组件共享设置，请先检查共享存储适配。" }
     }
 }

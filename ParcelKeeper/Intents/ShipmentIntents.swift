@@ -63,10 +63,14 @@ struct RecognizeShipmentIntent: AppIntent {
                 let extra = try await ai.extractShipment(text)
                 guard extra.trackingNumber == input.trackingNumber else { throw AIServiceError.invalidResponse }
                 if input.carrierName == nil { input.carrierName = extra.carrierName }
-                if input.logisticsInfo == nil {
+                // Never attach an AI event to a different locally supplied
+                // timestamp/status (including structured JSON with missing info).
+                if input.logisticsInfo == nil,
+                   input.logisticsTime == nil || input.logisticsTime == extra.logisticsTime,
+                   input.status == nil || input.status == extra.status {
                     input.logisticsInfo = extra.logisticsInfo
-                    input.logisticsTime = extra.logisticsTime
-                    input.status = extra.status
+                    if input.logisticsTime == nil { input.logisticsTime = extra.logisticsTime }
+                    if input.status == nil { input.status = extra.status }
                 }
             } catch is CancellationError { throw CancellationError() }
             catch AIServiceError.cancelled { throw AIServiceError.cancelled }

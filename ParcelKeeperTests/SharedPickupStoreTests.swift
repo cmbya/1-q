@@ -78,6 +78,135 @@ final class SharedPickupStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: backupURL), bytes)
     }
 
+    func testMigrationInitializesCompletionFromEveryLegacyShipmentStatus() throws {
+        let originals = ShipmentStatus.allCases.map { status -> Shipment in
+            var value = shipment()
+            value.id = UUID()
+            value.trackingNumber = value.id.uuidString
+            value.status = status
+            return value
+        }
+        let bytes = try JSONEncoder().encode(originals)
+        try bytes.write(to: legacy)
+        let data = try store().snapshot()
+        XCTAssertEqual(data.shipments, originals)
+        for value in originals {
+            let record = try XCTUnwrap(data.records.first { $0.shipmentID == value.id })
+            XCTAssertEqual(record.isCompleted, value.status == .delivered || value.status == .archived)
+        }
+        XCTAssertEqual(try Data(contentsOf: legacy), bytes)
+        XCTAssertEqual(try Data(contentsOf: backupURL), bytes)
+        XCTAssertEqual(try store().snapshot(), data)
+    }
+
+    func testLegacyBackupImportInitializesCompletionAndPreservesStandaloneHistory() throws {
+        let s = try store()
+        let original = try s.snapshot()
+        let group = try XCTUnwrap(original.expressGroupID)
+        let standalone = PickupRecord(groupID: group, code: "A-1", isCompleted: true)
+        try s.transaction { $0.records.append(standalone) }
+        let shipments = ShipmentStatus.allCases.map { status -> Shipment in
+            var value = shipment()
+            value.id = UUID()
+            value.trackingNumber = value.id.uuidString
+            value.status = status
+            return value
+        }
+        let preview = try s.previewBackup(JSONEncoder().encode(shipments))
+        let imported = try s.importBackup(preview, policy: nil)
+        for value in shipments {
+            let record = try XCTUnwrap(imported.records.first { $0.shipmentID == value.id })
+            XCTAssertEqual(record.isCompleted, value.status == .delivered || value.status == .archived)
+        }
+        XCTAssertEqual(imported.records.first { $0.id == standalone.id }, standalone)
+        XCTAssertEqual(try s.snapshot(), imported)
+    }
+
+    func testReadOnlyLegacyHistoryDoesNotCreateDirectoryLockBackupOrDataset() throws {
+        var value = shipment()
+        value.status = .delivered
+        let bytes = try JSONEncoder().encode([value])
+        try bytes.write(to: legacy)
+        let history = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
+        let snapshot = try history.snapshot()
+        XCTAssertEqual(snapshot.shipments, [value])
+        XCTAssertEqual(try history.snapshot(), snapshot)
+        let reopened = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
+        XCTAssertEqual(try reopened.snapshot(), snapshot)
+        XCTAssertEqual(try reopened.exportBackup(), history.exportBackup())
+        XCTAssertTrue(try XCTUnwrap(snapshot.records.first).isCompleted)
+        XCTAssertThrowsError(try history.transaction { $0.groups.removeAll() })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: container.path))
+        XCTAssertEqual(try Data(contentsOf: legacy), bytes)
+    }
+
+    func testReadOnlyEmptyHistoryIsStableAndDoesNotCreateFiles() throws {
+        let history = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
+        let first = try history.snapshot()
+        let reopened = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
+        XCTAssertEqual(try reopened.snapshot(), first)
+        XCTAssertEqual(try history.snapshot(), first)
+        XCTAssertEqual(Set(first.groups.map(\.id)).count, 2)
+        XCTAssertTrue(first.records.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: container.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
+    func testReadOnlyLegacyIdentityFollowsShipmentIDNotArrayPositionOrCode() throws {
+        var first = shipment()
+        var second = shipment(code: "same")
+        second.trackingNumber = "SECOND"
+        try JSONEncoder().encode([first, second]).write(to: legacy)
+        let history = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
+        let initial = try history.snapshot()
+        first.pickupCode = "edited"
+        second.note = "changed source"
+        let bytes = try JSONEncoder().encode([second, first])
+        try bytes.write(to: legacy)
+        let reordered = try history.snapshot()
+        XCTAssertEqual(reordered.groups, initial.groups)
+        for shipment in [first, second] {
+            let old = try XCTUnwrap(initial.records.first { $0.shipmentID == shipment.id })
+            let new = try XCTUnwrap(reordered.records.first { $0.shipmentID == shipment.id })
+            XCTAssertEqual(new.id, old.id)
+            XCTAssertEqual(new.code, shipment.pickupCode)
+            XCTAssertEqual(new.source, shipment.note)
+        }
+        XCTAssertEqual(Set(reordered.records.map(\.id)).count, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: container.path))
+        XCTAssertEqual(try Data(contentsOf: legacy), bytes)
+        // A real migration is still persisted and backed up, not a read-only projection.
+        let migrated = try store().snapshot()
+        XCTAssertEqual(migrated.shipments, [second, first])
+        XCTAssertEqual(try Data(contentsOf: backupURL), bytes)
+        XCTAssertEqual(try store().snapshot(), migrated)
+        XCTAssertEqual(try history.snapshot(), migrated) // modern IDs are never rewritten
+    }
+
+    func testModernBackupAndReadOnlySnapshotPreserveExplicitCompletionChoices() throws {
+        let s = try store()
+        var value = shipment()
+        value.status = .delivered
+        let initial = try s.snapshot()
+        let group = try XCTUnwrap(initial.expressGroupID)
+        let restoredLinked = PickupRecord(groupID: group, code: value.pickupCode, source: value.note, isCompleted: false, shipmentID: value.id)
+        let completedStandalone = PickupRecord(groupID: group, code: "history", isCompleted: true)
+        try s.transaction {
+            $0.shipments.append(value)
+            $0.records += [restoredLinked, completedStandalone]
+        }
+        let expected = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        let readOnly = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
+        XCTAssertEqual(try readOnly.snapshot(), expected)
+        XCTAssertThrowsError(try readOnly.transaction { $0.records.removeAll() })
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        let fresh = try store(root.appendingPathComponent("modern-restore"))
+        let restored = try fresh.importBackup(fresh.previewBackup(s.exportBackup()), policy: nil)
+        XCTAssertEqual(restored.records.first { $0.id == restoredLinked.id }, restoredLinked)
+        XCTAssertEqual(restored.records.first { $0.id == completedStandalone.id }, completedStandalone)
+    }
+
     func testCorruptLegacyAndConflictingLegacyBackupNeverReplaceSource() throws {
         let corrupt = Data("{not-json".utf8)
         try corrupt.write(to: legacy)

@@ -15,7 +15,12 @@ struct PickupTextParser {
         var requiresConfirmation: Bool { true }
     }
 
-    func parse(_ text: String) -> Result {
+    func parse(_ input: String) -> Result {
+        // SMS/OCR may use full-width or typographic hyphens inside the code,
+        // not only after its label. Normalize before matching/protecting tokens.
+        // Do not compatibility-normalize other characters or numeric identifiers.
+        let text = input.replacingOccurrences(of: #"[－﹣‐‑‒–—−]"#,
+                                              with: "-", options: .regularExpression)
         let full = NSRange(text.startIndex..., in: text)
         func matches(_ pattern: String) -> [NSTextCheckingResult] {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
@@ -27,7 +32,7 @@ struct PickupTextParser {
         }
         // Do not parse labels embedded in links or contact/order identifiers.
         let protected = matches(#"(?:https?://|www\.)[^\s，。；！？]+|(?:订单(?:号)?|运单(?:号)?|物流单(?:号)?|快递单(?:号)?|手机(?:号)?|电话(?:号)?)\s*[:：\-－—]?\s*(?:取件码|取货码|取餐码|提货码)?\s*[:：\-－—]?\s*[A-Za-z0-9+._/#*\-]+"#).map(\.range)
-        let codeMatches = matches(#"(?:取件码|取货码|取餐码|提货码)\s*(?:是|为)?\s*[:：\-－—]?\s*([A-Za-z0-9][A-Za-z0-9_#*+\-]*)(?![A-Za-z0-9_#*+\-])"#)
+        let codeMatches = matches(#"(?:取件码|取货码|取餐码|提货码)\s*(?:是|为)?\s*[:：\-－—]?\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-])"#)
         let continuation = try? NSRegularExpression(pattern: #"\G\s*[,，、/;；]\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-\p{Han}])"#)
         var codes: [String] = []
         var codeOccurrences = 0

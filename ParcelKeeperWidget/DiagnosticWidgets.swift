@@ -10,6 +10,7 @@ private struct DiagnosticEntry: TimelineEntry {
     let date: Date
     let status: String
     let detail: String
+    var operationError: String? = nil
 }
 
 private struct DiagnosticProvider: TimelineProvider {
@@ -31,14 +32,9 @@ private struct DiagnosticProvider: TimelineProvider {
         guard readsSharedData else {
             return DiagnosticEntry(date: Date(), status: "组件运行正常", detail: "D1 · 不读取共享数据")
         }
-        guard let group = Bundle.main.object(forInfoDictionaryKey: "ParcelKeeperAppGroup") as? String,
-              !group.isEmpty else {
-            return DiagnosticEntry(date: Date(), status: "共享组配置缺失", detail: "D2 · Info.plist")
-        }
-        guard FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) != nil else {
-            return DiagnosticEntry(date: Date(), status: "共享容器不可访问", detail: "D2 · 请核对组件签名授权")
-        }
         do {
+            // Same selected-group policy as production, including re-signed groups.
+            let group = try AppGroupResolver.groupID()
             let store = try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData)
             let data = try store.snapshot()
             let count = data.records.filter { !$0.isCompleted }.count
@@ -46,7 +42,7 @@ private struct DiagnosticProvider: TimelineProvider {
                                    detail: "D2 · 分组 \(data.groups.count) · 待取 \(count)")
         } catch {
             // Do not expose raw errors: paths and shipment data may be private.
-            return DiagnosticEntry(date: Date(), status: "容器可访问，读取失败", detail: "D2 · 初始化、锁或数据格式异常")
+            return DiagnosticEntry(date: Date(), status: "共享数据读取失败", detail: "D2 · 共享组选择、授权或数据异常，请到 App 检查")
         }
     }
 }
@@ -57,6 +53,12 @@ private struct DiagnosticView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(entry.status).font(.headline)
             Text(entry.detail).font(.caption)
+            if entry.operationError != nil {
+                // Presence only: never render persisted/raw error contents.
+                Text("操作失败，请打开 App 核对后重试")
+                    .font(.caption2).foregroundStyle(.red)
+                    .accessibilityLabel("操作错误：请打开 App 核对后重试")
+            }
             Text(entry.date, style: .time).font(.caption2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -86,12 +88,13 @@ private struct ReadOnlyDiagnosticWidget: Widget {
     }
 }
 
-// D3 retains the production configuration/provider, replacing only its view.
+// D3 isolates the legacy AppIntent provider, not the production A–J slots.
 private struct ConfiguredTextDiagnosticWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "ParcelKeeperDiagnosticConfiguredText", intent: PickupGroupSelection.self, provider: PickupProvider()) { entry in
             DiagnosticView(entry: DiagnosticEntry(date: entry.date,
-                status: "分组时间线已返回", detail: "D3 · \(entry.title) · 记录 \(entry.records.count) · \(entry.message ?? "有数据")"))
+                status: "分组时间线已返回", detail: "D3 · 记录 \(entry.records.count) · \(entry.message == nil ? "有数据" : "请到 App 检查分组或共享数据")",
+                operationError: entry.error == nil ? nil : "操作失败"))
         }
         .configurationDisplayName("诊断③分组纯文字")
         .description("选择分组后只显示纯文字，隔离原交互视图。")
@@ -170,6 +173,29 @@ struct ParcelKeeperDiagnosticBundle: WidgetBundle {
     var body: some Widget {
         MinimalConfiguredWidget()
         diagnosisWidgets()
+        productionSlots()
+    }
+    // Actual A–J configurations/providers/views, not D3 substitutes.
+    @WidgetBundleBuilder
+    private func productionSlots() -> some Widget {
+        firstSlots()
+        lastSlots()
+    }
+    @WidgetBundleBuilder
+    private func firstSlots() -> some Widget {
+        SlotWidget(slot: .a)
+        SlotWidget(slot: .b)
+        SlotWidget(slot: .c)
+        SlotWidget(slot: .d)
+        SlotWidget(slot: .e)
+    }
+    @WidgetBundleBuilder
+    private func lastSlots() -> some Widget {
+        SlotWidget(slot: .f)
+        SlotWidget(slot: .g)
+        SlotWidget(slot: .h)
+        SlotWidget(slot: .i)
+        SlotWidget(slot: .j)
     }
     @WidgetBundleBuilder
     private func diagnosisWidgets() -> some Widget {

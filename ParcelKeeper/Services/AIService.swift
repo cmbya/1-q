@@ -308,8 +308,19 @@ final class AIService {
                 guard numbers == [normalized] else { throw AIServiceError.invalidResponse }
                 let time = timeText.isEmpty ? nil : ShipmentShortcutParser.date(timeText)
                 if !timeText.isEmpty && time == nil { throw AIServiceError.invalidResponse }
+                // Ground the pair against the SAME locally selected latest event,
+                // not two independent substrings anywhere in the supplied history.
+                let latest = try ShipmentShortcutParser.parse(text)
+                if info.isEmpty {
+                    guard time == nil else { throw AIServiceError.invalidResponse }
+                } else {
+                    guard let evidence = latest.logisticsInfo, evidence.contains(info),
+                          latest.logisticsTime == time,
+                          ShipmentShortcutParser.status(info) == latest.status else { throw AIServiceError.invalidResponse }
+                }
                 return .init(trackingNumber: normalized, carrierName: carrier.isEmpty ? nil : carrier,
-                    logisticsInfo: info.isEmpty ? nil : info, status: info.isEmpty ? nil : ShipmentShortcutParser.status(info), logisticsTime: time)
+                    logisticsInfo: info.isEmpty ? nil : latest.logisticsInfo,
+                    status: info.isEmpty ? nil : latest.status, logisticsTime: time)
             } catch let error as AIServiceError {
                 if [.authentication, .configuration, .cancelled, .keychain, .keyBindingRequired, .insecureHTTP].contains(error) { throw error }
                 failures.append(.init(model: model, category: error))

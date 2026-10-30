@@ -33,14 +33,26 @@ enum ShipmentShortcutParser {
         return value
     }
     static func status(_ text: String) -> ShipmentStatus? {
-        // Negation/awaiting collection comes before positive delivery phrases.
-        if ["未签收", "尚未签收", "待签收", "等待领取", "待取件", "待领取", "尚未领取", "未领取", "等待取件", "请取件", "已放驿站", "已放入快递柜", "已到驿站"].contains(where: text.contains) { return .readyForPickup }
-        if ["未取件", "未完成", "未收货"].contains(where: text.contains) { return nil }
-        if ["已签收", "本人签收", "签收成功", "已领取", "已取件", "已收货", "已完成"].contains(where: text.contains) { return .delivered }
+        // Classify ONE event, never a concatenated history. A station/cabinet
+        // receipt is custody, not evidence that the recipient collected it.
+        let text = text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? text
         if ["异常", "拒收", "退回", "滞留"].contains(where: text.contains) { return .exception }
-        if ["派送中", "配送中", "正在派送", "正在配送"].contains(where: text.contains) { return .outForDelivery }
+        if ["未签收", "尚未签收", "待签收", "等待领取", "待取件", "待领取", "尚未领取", "未领取", "等待取件", "请取件"].contains(where: text.contains) { return .readyForPickup }
+        if ["非本人签收", "非收件人签收", "未经本人签收", "未经收件人签收", "未由本人签收", "未由收件人签收", "不是本人签收", "不是收件人签收"].contains(where: text.contains) { return .readyForPickup }
+        if ["未取件", "未完成", "未收货"].contains(where: text.contains) {
+            return ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) ? .readyForPickup : nil
+        }
+        if ["本人签收", "收件人签收", "已领取", "已取件", "已收货"].contains(where: text.contains) { return .delivered }
+        if ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) { return .readyForPickup }
+        if ["已签收", "签收成功", "已完成"].contains(where: text.contains) { return .delivered }
+        if ["派送中", "配送中", "正在派送", "正在配送", "快递员派送"].contains(where: text.contains) { return .outForDelivery }
         if ["运输中", "转运", "已发出", "已揽收", "已到达", "正在发往"].contains(where: text.contains) { return .inTransit }
         return nil
+    }
+    /// An unclassified denial is not permission for an explicit delivered value.
+    static func deniesCompletion(_ raw: String) -> Bool {
+        let text = raw.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? raw
+        return ["未取件", "未完成", "未收货", "未签收", "尚未签收", "待签收", "未领取", "尚未领取", "非本人签收", "非收件人签收", "未经本人签收", "未经收件人签收", "未由本人签收", "未由收件人签收", "不是本人签收", "不是收件人签收"].contains(where: text.contains)
     }
     static func date(_ raw: String) -> Date? {
         let iso = ISO8601DateFormatter()
@@ -56,16 +68,11 @@ enum ShipmentShortcutParser {
         return nil
     }
     static func numbers(in text: String) -> [String] {
-        let pattern = #"(?:运单号|物流单号|快递单号|单号|trackingNumber)\s*[：:=]?\s*[\"']?([A-Za-z0-9]{8,28})(?![A-Za-z0-9])"#
-        let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive)
-        let labeled = regex?.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match -> String? in
-            guard let range = Range(match.range(at: 1), in: text) else { return nil }
-            return try? number(String(text[range]))
-        } ?? []
-        // Do not let an extra plausible tracking token disappear merely because
-        // one other token is labeled. Multiple parcels must never share fields.
-        let detected = CarrierDetector.extractTrackingNumbers(from: text).filter { (try? number($0)) != nil }
-        return Array(Set(labeled + detected)).sorted()
+        // Share one boundary/field policy with smart import. No confidence
+        // cutoff or default 12-result limit may hide an ambiguous second parcel.
+        let detected = CarrierDetector.extractTrackingNumbers(from: text, limit: Int.max)
+            .filter { (try? number($0)) != nil }
+        return Array(Set(detected)).sorted()
     }
     static func parse(_ raw: String) throws -> ShipmentShortcutInput {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -88,17 +95,29 @@ enum ShipmentShortcutParser {
                 for name in names { if let value = object[name] as? String, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return value.trimmingCharacters(in: .whitespacesAndNewlines) } }
                 return nil
             }
-            let info = field(["logisticsInfo", "物流信息", "最新物流"])
+            let suppliedInfo = field(["logisticsInfo", "物流信息", "最新物流"])
+            let event = try suppliedInfo.map { try latestEvent(in: $0) }
+            let info = event?.info ?? suppliedInfo
             let stateText = field(["status", "物流状态", "状态"])
             let timeText = field(["logisticsTime", "物流时间"])
-            let time = timeText.flatMap(date)
-            if timeText != nil && time == nil { throw ShipmentShortcutError.invalidText }
+            let suppliedTime = timeText.flatMap(date)
+            if timeText != nil && suppliedTime == nil { throw ShipmentShortcutError.invalidText }
+            if let eventTime = event?.time, let suppliedTime, eventTime != suppliedTime { throw ShipmentShortcutError.ambiguous }
+            let time = event?.time ?? suppliedTime
+            if stateText.flatMap(status) == .delivered, let info, deniesCompletion(info) { throw ShipmentShortcutError.statusConflict }
             if let expected = stateText.flatMap(status), let observed = info.flatMap(status), expected != observed { throw ShipmentShortcutError.statusConflict }
             return ShipmentShortcutInput(trackingNumber: id, carrierName: field(["carrierName", "快递服务商", "快递公司"]), logisticsInfo: info,
                 status: stateText.flatMap(status) ?? info.flatMap(status), logisticsTime: time)
         }
+        let event = try latestEvent(in: text)
+        return .init(trackingNumber: id, carrierName: CarrierDetector.carrierMentioned(in: text)?.name,
+                     logisticsInfo: event.info, status: event.state, logisticsTime: event.time)
+    }
+
+    /// Shared by text import and AI grounding. Refuses unorderable histories.
+    static func latestEvent(in text: String) throws -> (info: String?, state: ShipmentStatus?, time: Date?) {
         let lines = text.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
-        let timeRegex = try NSRegularExpression(pattern: #"(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)"#)
+        let timeRegex = try NSRegularExpression(pattern: #"(\d{4}[-/]\d{2}[-/]\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?)"#)
         var events: [(Date, String)] = []
         var undatedStates: [(ShipmentStatus, String)] = []
         for line in lines {
@@ -106,12 +125,21 @@ enum ShipmentShortcutParser {
             guard matches.count <= 1 else { throw ShipmentShortcutError.ambiguous }
             if let match = matches.first, let range = Range(match.range(at: 1), in: line) {
                 guard let time = date(String(line[range])) else { throw ShipmentShortcutError.invalidText }
-                let description = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "：:|-")))
+                // Some providers put the event before its timestamp. Preserve
+                // both sides; dropping the prefix could resurrect an old receipt.
+                let description = (String(line[..<range.lowerBound]) + " " + String(line[range.upperBound...]))
+                    .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "：:|-")))
                 guard !description.isEmpty else { throw ShipmentShortcutError.ambiguous }
                 events.append((time, description))
-            } else if let state = status(line) { undatedStates.append((state, line)) }
+            } else {
+                // A carrier/station title containing only parcel metadata is
+                // not a logistics event. Keep genuine undated summaries intact.
+                let metadata = line.replacingOccurrences(of: #"(?:运单号|運單號|物流单号|物流單號|快递单号|快遞單號|单号|單號|trackingNumber)\s*[：:=]?\s*[A-Za-z0-9]{8,28}(?![A-Za-z0-9_－-])"#, with: "", options: [.regularExpression, .caseInsensitive])
+                    .replacingOccurrences(of: #"(?:菜鸟驿站|菜鳥驛站|驿站|驛站|丰巢|豐巢|快递柜|快遞櫃|圆通速递|顺丰速运|快递|物流|[\s：:|,，-])+"#, with: "", options: .regularExpression)
+                let isParcelTitle = metadata.isEmpty && !numbers(in: line).isEmpty
+                if !isParcelTitle, let state = status(line) { undatedStates.append((state, line)) }
+            }
         }
-        let carrier = CarrierDetector.carrierMentioned(in: text)?.name
         if !events.isEmpty {
             let sorted = events.sorted { $0.0 > $1.0 }
             let newest = sorted[0]
@@ -119,12 +147,15 @@ enum ShipmentShortcutParser {
             let state = status(newest.1)
             // Conflicting undated summaries cannot be ordered against events.
             if undatedStates.contains(where: { $0.0 != state }) { throw ShipmentShortcutError.ambiguous }
-            return .init(trackingNumber: id, carrierName: carrier, logisticsInfo: newest.1, status: state, logisticsTime: newest.0)
+            return (newest.1, state, newest.0)
         }
         let states = Set(undatedStates.map { $0.0.rawValue })
         guard states.count <= 1 else { throw ShipmentShortcutError.ambiguous }
         let info = undatedStates.first?.1 ?? lines.first(where: { $0.hasPrefix("物流信息") || $0.hasPrefix("最新物流") })
-        return .init(trackingNumber: id, carrierName: carrier, logisticsInfo: info, status: undatedStates.first?.0, logisticsTime: nil)
+        // Multiple undated descriptions cannot establish which one is latest,
+        // even when their states happen to match.
+        guard Set(undatedStates.map { $0.1 }).count <= 1 else { throw ShipmentShortcutError.ambiguous }
+        return (info, undatedStates.first?.0, nil)
     }
 }
 
@@ -141,9 +172,20 @@ struct ShipmentShortcutService {
         value.carrierName = nonempty(value.carrierName)
         value.logisticsInfo = nonempty(value.logisticsInfo)
         guard (value.carrierName?.count ?? 0) <= 100, (value.logisticsInfo?.count ?? 0) <= 10000 else { throw ShipmentShortcutError.invalidText }
-        if value.status == nil { value.status = value.logisticsInfo.flatMap(ShipmentShortcutParser.status) }
-        else if let inferred = value.logisticsInfo.flatMap(ShipmentShortcutParser.status), inferred != value.status {
-            throw ShipmentShortcutError.statusConflict
+        if let info = value.logisticsInfo {
+            let others = ShipmentShortcutParser.numbers(in: info).filter { $0 != value.trackingNumber }
+            guard others.isEmpty else { throw ShipmentShortcutError.ambiguous }
+            let event = try ShipmentShortcutParser.latestEvent(in: info)
+            if let time = event.time {
+                if let supplied = value.logisticsTime, supplied != time { throw ShipmentShortcutError.ambiguous }
+                value.logisticsTime = time
+                value.logisticsInfo = event.info
+            }
+            let inferred = event.state
+            let selectedInfo = event.info ?? info
+            if value.status == .delivered && ShipmentShortcutParser.deniesCompletion(selectedInfo) { throw ShipmentShortcutError.statusConflict }
+            if let explicit = value.status, let inferred, explicit != inferred { throw ShipmentShortcutError.statusConflict }
+            if value.status == nil { value.status = inferred }
         }
         return value
     }
@@ -164,6 +206,7 @@ struct ShipmentShortcutService {
                 index = data.shipments.count - 1
             }
             var shipment = data.shipments[index]
+            let previousStatus = shipment.status
             if let old = shipment.logisticsTime, let new = value.logisticsTime, new < old { throw ShipmentShortcutError.olderUpdate }
             // An undated update cannot supersede an event with known time.
             if shipment.logisticsTime != nil && value.logisticsTime == nil && (value.logisticsInfo != nil || value.status != nil) { throw ShipmentShortcutError.statusConflict }
@@ -178,7 +221,20 @@ struct ShipmentShortcutService {
             shipment.updatedAt = now
             data.shipments[index] = shipment
             if let linked = data.records.firstIndex(where: { $0.shipmentID == shipment.id }) {
-                if value.status == .delivered { data.records[linked].isCompleted = true }
+                if shipment.status != previousStatus {
+                    let becomesCompleted = shipment.status == .delivered || shipment.status == .archived
+                    let record = data.records[linked]
+                    let code = record.code.trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Only a newly reopened pending code can introduce a duplicate.
+                    // Preserve pre-existing pending duplicates from history/backups.
+                    if record.isCompleted && !becomesCompleted && !code.isEmpty {
+                        guard !data.records.contains(where: {
+                            $0.id != record.id && $0.groupID == record.groupID && !$0.isCompleted &&
+                            $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code
+                        }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码。") }
+                    }
+                    data.records[linked].isCompleted = becomesCompleted
+                }
                 data.records[linked].updatedAt = now
             } else {
                 guard let group = data.expressGroupID, data.groups.contains(where: { $0.id == group }) else { throw PickupStorageError.invalidData("快递默认分组不可用") }

@@ -83,47 +83,27 @@ enum CarrierDetector {
 
     static func extractTrackingNumbers(from rawText: String, limit: Int = 12) -> [String] {
         let normalized = normalizeText(rawText)
-        let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
-        let wholeLooksLikeNumber = isStandaloneCandidate(trimmed)
-
-        let tokenPattern = #"(?<![A-Z0-9])(?:[A-Z]{1,5}[A-Z0-9]{7,27}|[0-9]{8,22})(?![A-Z0-9])"#
+        let fullRange = NSRange(normalized.startIndex..., in: normalized)
+        // Field ownership is local to its value, not the whole line. A second
+        // full-text scoring pass must not resurrect order/phone/pickup values.
+        let excludedPattern = #"(?<![A-Z0-9_])(?:订单号|訂單號|订单编号|訂單編號|ORDER(?:NUMBER|ID)?|手机号|手機號|联系电话|聯繫電話|电话|電話|PHONE|MOBILE|身份证|身份證|日期|DATE|取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼|PICKUPCODE|CODE)[\"']?\s*[：:=为為是]?\s*[\"']?[A-Z0-9]+(?:[-－][A-Z0-9]+)*"#
+        let excluded = (try? NSRegularExpression(pattern: excludedPattern))?.matches(in: normalized, range: fullRange).map(\.range) ?? []
+        let labelPattern = #"(?<![A-Z0-9_订訂])(?:运单号|運單號|物流单号|物流單號|快递单号|快遞單號|快件号|快件號|单号|單號|TRACKINGNUMBER|TRACKING)[\"']?\s*[：:=]?\s*[\"']?([A-Z0-9]{8,28})(?![A-Z0-9_－-])"#
+        let labeled = (try? NSRegularExpression(pattern: labelPattern))?.matches(in: normalized, range: fullRange).map { $0.range(at: 1) } ?? []
+        let tokenPattern = #"(?<![A-Z0-9_－-])[A-Z0-9]{8,28}(?![A-Z0-9_－-])"#
         guard let regex = try? NSRegularExpression(pattern: tokenPattern) else { return [] }
-
         var scored: [(value: String, score: Int)] = []
-        let lines = normalized.components(separatedBy: .newlines)
-
-        for line in lines {
-            let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
-            for match in regex.matches(in: line, range: lineRange) {
-                guard let swiftRange = Range(match.range, in: line) else { continue }
-                let rawCandidate = String(line[swiftRange])
-                let candidate = sanitize(rawCandidate)
-                guard isPlausible(candidate) else { continue }
-
-                var score = scoreCandidate(candidate)
-                let upperLine = line.uppercased()
-
-                if containsTrackingLabel(upperLine) { score += 650 }
-                if upperLine.contains("物流") || upperLine.contains("快递") || upperLine.contains("快遞") { score += 180 }
-                if upperLine.contains("订单号") || upperLine.contains("訂單號") || upperLine.contains("订单编号") { score -= 520 }
-                if upperLine.contains("手机号") || upperLine.contains("联系电话") || upperLine.contains("電話") { score -= 900 }
-                if upperLine.contains("身份证") || upperLine.contains("身份證") { score -= 1_200 }
-                if isLikelyPhoneNumber(candidate) { score -= 1_100 }
-                if wholeLooksLikeNumber && sanitize(trimmed) == candidate { score += 700 }
-
-                scored.append((candidate, score))
-            }
-        }
-
-        // 有些 App 复制出来不会保留换行，再对全文补扫一次。
-        let fullRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         for match in regex.matches(in: normalized, range: fullRange) {
-            guard let swiftRange = Range(match.range, in: normalized) else { continue }
-            let candidate = sanitize(String(normalized[swiftRange]))
-            guard isPlausible(candidate) else { continue }
-            var score = scoreCandidate(candidate)
-            if wholeLooksLikeNumber && sanitize(trimmed) == candidate { score += 700 }
-            scored.append((candidate, score))
+            guard !excluded.contains(where: { NSIntersectionRange($0, match.range).length > 0 }),
+                  let range = Range(match.range, in: normalized) else { continue }
+            let candidate = String(normalized[range])
+            guard isPlausible(candidate), !isLikelyPhoneNumber(candidate) else { continue }
+            // Compact calendar dates are metadata, not an unlabeled parcel.
+            let isLabeled = labeled.contains(match.range)
+            if !isLabeled && matches(candidate, pattern: #"^(?:19|20)[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])$"#) { continue }
+            // Confidence ranks carriers; it must never erase a syntactically
+            // valid second parcel (e.g. AB123456) from ambiguity checks.
+            scored.append((candidate, max(250, scoreCandidate(candidate)) + (isLabeled ? 650 : 0)))
         }
 
         var bestScoreByValue: [String: Int] = [:]

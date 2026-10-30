@@ -18,20 +18,38 @@ final class ShipmentStore: ObservableObject {
     var isHistoricalSnapshot: Bool { storage?.isReadOnly == true }
 
     // Configure ParcelKeeperAppGroup in Info.plist and matching entitlements for every target.
-    init(fileManager: FileManager = .default, appGroupID: String? = Bundle.main.object(forInfoDictionaryKey: "ParcelKeeperAppGroup") as? String) {
+    init(fileManager: FileManager = .default, appGroupID: String? = Bundle.main.object(forInfoDictionaryKey: "ParcelKeeperAppGroup") as? String,
+         storageProvider: (() throws -> SharedPickupStore)? = nil, historicalContainerURL: URL? = nil) {
         do {
-            storage = try SharedPickupStore(appGroupID: appGroupID, fileManager: fileManager)
-            try reload()
-        } catch PickupStorageError.appGroupUnavailable {
-            // Show existing local data without creating or migrating anything.
-            if let local = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
-               let fallback = try? SharedPickupStore(appGroupID: nil, fileManager: fileManager, containerURL: local, readOnly: true) {
-                storage = fallback
-                if let data = try? fallback.snapshot() { apply(data) }
+            if let storageProvider {
+                storage = try storageProvider()
+            } else {
+                storage = try SharedPickupStore(appGroupID: appGroupID, fileManager: fileManager)
             }
-            lastErrorMessage = PickupStorageError.appGroupUnavailable.localizedDescription + " 显示的本地内容仅为可能过时的历史快照，不代表当前共享数据，且只读。"
+            try reload()
         } catch {
-            lastErrorMessage = error.localizedDescription
+            // Only lack of access permits historical fallback. Choosing a group or
+            // resolving competing datasets must never silently select local data.
+            let permitsHistory: Bool
+            switch error {
+            case PickupStorageError.appGroupUnavailable, AppGroupResolver.ResolutionError.noAccess:
+                permitsHistory = true
+            default:
+                permitsHistory = false
+            }
+            storage = nil
+            if permitsHistory {
+                let local = historicalContainerURL ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+                if let local,
+                   let fallback = try? SharedPickupStore(appGroupID: nil, fileManager: fileManager, legacyURL: local.appendingPathComponent("ParcelKeeper/shipments.json"), containerURL: local, readOnly: true),
+                   let data = try? fallback.snapshot() {
+                    storage = fallback
+                    apply(data)
+                }
+                lastErrorMessage = error.localizedDescription + " 显示的本地内容仅为可能过时的历史快照，不代表当前共享数据，且只读。"
+            } else {
+                lastErrorMessage = error.localizedDescription
+            }
         }
     }
     func reconnectSharedStorage() throws {
@@ -87,12 +105,27 @@ final class ShipmentStore: ObservableObject {
         case duplicateTrackingNumber
         var errorDescription: String? { "运单号已存在" }
     }
+    // Only newly introduced pending identities are checked, under the storage lock.
+    // Existing history/backup duplicates must not block unrelated edits.
+    private func checkPendingDuplicate(_ record: PickupRecord, previous: PickupRecord? = nil, in data: PickupDataset) throws {
+        let code = record.code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !record.isCompleted, !code.isEmpty else { return }
+        if let previous, !previous.isCompleted, previous.groupID == record.groupID,
+           previous.code.trimmingCharacters(in: .whitespacesAndNewlines) == code { return }
+        guard !data.records.contains(where: {
+            $0.id != record.id && $0.groupID == record.groupID && !$0.isCompleted &&
+            $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code
+        }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码。") }
+    }
+
     func addThrowing(_ shipment: Shipment) throws {
             try change { data in
                 guard !data.shipments.contains(where: { CarrierDetector.sanitize($0.trackingNumber) == CarrierDetector.sanitize(shipment.trackingNumber) }) else { throw ShipmentWriteError.duplicateTrackingNumber }
                 data.shipments.insert(shipment, at: 0)
                 guard let groupID = data.expressGroupID, data.groups.contains(where: { $0.id == groupID }) else { throw PickupStorageError.invalidData("快递默认分组不可用") }
-                data.records.append(PickupRecord(groupID: groupID, code: shipment.pickupCode, source: shipment.note, createdAt: shipment.createdAt, updatedAt: shipment.updatedAt, shipmentID: shipment.id))
+                let record = PickupRecord(groupID: groupID, code: shipment.pickupCode, source: shipment.note, isCompleted: shipment.status == .delivered || shipment.status == .archived, createdAt: shipment.createdAt, updatedAt: shipment.updatedAt, shipmentID: shipment.id)
+                try checkPendingDuplicate(record, in: data)
+                data.records.append(record)
             }
     }
     @discardableResult func add(_ shipment: Shipment) -> Bool {
@@ -113,15 +146,25 @@ final class ShipmentStore: ObservableObject {
     private func updateThrowing(id: UUID, mutation: (inout Shipment) -> Void) throws {
         try change { data in
             guard let index = data.shipments.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+            let previousStatus = data.shipments[index].status
             mutation(&data.shipments[index])
             let shipment = data.shipments[index]
             if let recordIndex = data.records.firstIndex(where: { $0.shipmentID == id }) {
+                let previous = data.records[recordIndex]
                 data.records[recordIndex].code = shipment.pickupCode
                 data.records[recordIndex].source = shipment.note
+                // Only an actual logistics status change synchronizes completion.
+                // Editing a note/reminder must preserve an explicit pickup restore.
+                if previousStatus != shipment.status {
+                    data.records[recordIndex].isCompleted = shipment.status == .delivered || shipment.status == .archived
+                }
                 data.records[recordIndex].updatedAt = shipment.updatedAt
+                try checkPendingDuplicate(data.records[recordIndex], previous: previous, in: data)
             } else {
                 guard let groupID = data.expressGroupID, data.groups.contains(where: { $0.id == groupID }) else { throw PickupStorageError.invalidData("快递默认分组不可用") }
-                data.records.append(PickupRecord(groupID: groupID, code: shipment.pickupCode, source: shipment.note, createdAt: shipment.createdAt, updatedAt: shipment.updatedAt, shipmentID: id))
+                let record = PickupRecord(groupID: groupID, code: shipment.pickupCode, source: shipment.note, isCompleted: shipment.status == .delivered || shipment.status == .archived, createdAt: shipment.createdAt, updatedAt: shipment.updatedAt, shipmentID: id)
+                try checkPendingDuplicate(record, in: data)
+                data.records.append(record)
             }
         }
     }
@@ -152,7 +195,11 @@ final class ShipmentStore: ObservableObject {
         guard d.groups.count > 1 else { throw PickupStorageError.invalidData("至少保留一个分组") }
         if d.records.contains(where: { $0.groupID == id }) || d.expressGroupID == id {
             guard let destination = destination, destination != id, d.groups.contains(where: { $0.id == destination }) else { throw PickupStorageError.nonEmptyGroup }
+            let previous = d.records
             for i in d.records.indices where d.records[i].groupID == id { d.records[i].groupID = destination; d.records[i].updatedAt = Date() }
+            for record in d.records where previous.contains(where: { $0.id == record.id && $0.groupID == id }) {
+                try checkPendingDuplicate(record, previous: previous.first { $0.id == record.id }, in: d)
+            }
         }
         if d.expressGroupID == id { d.expressGroupID = destination }
         d.groups.removeAll { $0.id == id }
@@ -160,9 +207,7 @@ final class ShipmentStore: ObservableObject {
     @discardableResult func addPickupRecord(groupID: UUID, code: String, location: String = "", source: String = "") throws -> UUID {
         let record = PickupRecord(groupID: groupID, code: code, location: location, source: source)
         try change { data in
-            guard !data.records.contains(where: {
-                $0.groupID == groupID && !$0.isCompleted && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines)
-            }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码，未重复添加。") }
+            try checkPendingDuplicate(record, in: data)
             data.records.append(record)
         }; return record.id
     }
@@ -173,22 +218,50 @@ final class ShipmentStore: ObservableObject {
             data.records.removeAll { $0.id == id }
         }
     }
-    func updatePickupRecord(id: UUID, code: String, location: String, source: String) throws { try change { d in
+    func updatePickupRecord(id: UUID, code: String? = nil, location: String? = nil, source: String? = nil, expected: PickupRecord? = nil) throws { try change { d in
         guard let i = d.records.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
-        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupStorageError.invalidData("取码不能为空") }
+        let latest = d.records[i]
+        if let expected {
+            guard expected.id == id else { throw PickupStorageError.invalidData("编辑快照与记录不匹配") }
+        }
+        // With a snapshot, full-form callers also behave as a field-level patch.
+        let changesCode = code.map { value in expected.map { value != $0.code } ?? true } ?? false
+        let changesLocation = location.map { value in expected.map { value != $0.location } ?? true } ?? false
+        let changesSource = source.map { value in expected.map { value != $0.source } ?? true } ?? false
+        if let expected {
+            guard (!changesCode || latest.code == expected.code),
+                  (!changesLocation || latest.location == expected.location),
+                  (!changesSource || latest.source == expected.source) else {
+                throw PickupStorageError.invalidData("此字段已被其他操作修改，请重新打开后编辑。")
+            }
+        }
+        guard changesCode || changesLocation || changesSource else { return }
+        if changesCode, let code {
+            guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupStorageError.invalidData("取码不能为空") }
+            d.records[i].code = code
+        }
+        if changesLocation, let location { d.records[i].location = location }
+        if changesSource, let source { d.records[i].source = source }
+        try checkPendingDuplicate(d.records[i], previous: latest, in: d)
         let now = Date()
-        d.records[i].code = code; d.records[i].location = location; d.records[i].source = source; d.records[i].updatedAt = now
-        if let shipmentID = d.records[i].shipmentID, let j = d.shipments.firstIndex(where: { $0.id == shipmentID }) {
-            d.shipments[j].pickupCode = code; d.shipments[j].note = source; d.shipments[j].updatedAt = now
+        d.records[i].updatedAt = now
+        if (changesCode || changesSource), let shipmentID = latest.shipmentID, let j = d.shipments.firstIndex(where: { $0.id == shipmentID }) {
+            if changesCode { d.shipments[j].pickupCode = d.records[i].code }
+            if changesSource { d.shipments[j].note = d.records[i].source }
+            d.shipments[j].updatedAt = now
         }
     } }
     func movePickupRecord(id: UUID, to groupID: UUID) throws { try change { d in
         guard d.groups.contains(where: { $0.id == groupID }), let i = d.records.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+        let previous = d.records[i]
         d.records[i].groupID = groupID; d.records[i].updatedAt = Date()
+        try checkPendingDuplicate(d.records[i], previous: previous, in: d)
     } }
     func setPickupCompleted(id: UUID, completed: Bool) throws { try change { d in
         guard let i = d.records.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+        let previous = d.records[i]
         d.records[i].isCompleted = completed; d.records[i].updatedAt = Date()
+        try checkPendingDuplicate(d.records[i], previous: previous, in: d)
     } }
     func pendingPickupRecords(groupID: UUID) -> [PickupRecord] { pickupRecords.filter { $0.groupID == groupID && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
 

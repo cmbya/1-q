@@ -24,6 +24,13 @@ struct WidgetSlotBinding {
         guard FileManager.default.fileExists(atPath: file.path) else { return nil }
         return try JSONDecoder().decode(UUID?.self, from: Data(contentsOf: file))
     }
+    // A damaged file must not prevent reading or explicitly repairing other slots.
+    // Loading is read-only: failures are preserved, never converted into unbound.
+    func loadAll() -> [WidgetSlot: Result<UUID?, Error>] {
+        Dictionary(uniqueKeysWithValues: WidgetSlot.allCases.map { slot in
+            (slot, Result { try groupID(for: slot) })
+        })
+    }
     func save(_ groupID: UUID?, for slot: WidgetSlot) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(groupID).write(to: url(slot), options: .atomic)

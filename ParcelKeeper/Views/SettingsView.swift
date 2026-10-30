@@ -60,8 +60,8 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("关于 1.1") {
-                    LabeledContent("版本", value: "1.1.0")
+                Section("关于") {
+                    LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知")
                     Text("当前版本已修复粘贴后偶发空白页的问题，并支持从整段物流文字中识别多个运单、平台来源、取件码和当前状态。实时物流轨迹仍需接入正规的快递查询 API。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

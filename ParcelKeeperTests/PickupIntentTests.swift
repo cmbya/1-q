@@ -181,7 +181,10 @@ final class PickupIntentTests: XCTestCase {
     }
 
     func testUnavailableAndReadOnlyStorageFail() throws {
-        XCTAssertThrowsError(try SharedPickupStore(appGroupID: nil))
+        // A file cannot contain the required data subdirectory, regardless of signing.
+        let unavailable = directory.appendingPathComponent("not-a-container")
+        try Data("blocked".utf8).write(to: unavailable)
+        XCTAssertThrowsError(try SharedPickupStore(appGroupID: nil, legacyURL: directory.appendingPathComponent("no-legacy.json"), containerURL: unavailable))
         let readOnly = try SharedPickupStore(appGroupID: nil, legacyURL: directory.appendingPathComponent("no-legacy.json"), containerURL: directory, readOnly: true)
         let id = try XCTUnwrap(service.groups().first?.id)
         XCTAssertThrowsError(try PickupIntentService(store: readOnly).add(code: "123", location: nil, groupID: id, source: nil))
