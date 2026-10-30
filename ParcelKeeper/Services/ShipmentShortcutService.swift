@@ -8,6 +8,8 @@ struct ShipmentShortcutInput: Equatable {
     var status: ShipmentStatus?
     var logisticsTime: Date?
     var queryInfo: String? = nil
+    // Set only by labeled local parsing, not inferred from event prose.
+    var hasExplicitCurrentStatus = false
 }
 
 enum ShipmentShortcutError: LocalizedError {
@@ -43,6 +45,7 @@ enum ShipmentShortcutParser {
         if ["未取件", "未完成", "未收货"].contains(where: text.contains) {
             return ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) ? .readyForPickup : nil
         }
+        if text.range(of: #"(?:请|请尽快|请凭|请使用|请您)[^，。；;！!？?\n]*完成取件"#, options: .regularExpression) != nil { return .readyForPickup }
         if ["本人签收", "收件人签收", "已领取", "已取件", "已收货", "完成取件"].contains(where: text.contains) { return .delivered }
         if ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) { return .readyForPickup }
         if ["已签收", "签收成功", "已完成"].contains(where: text.contains) { return .delivered }
@@ -140,14 +143,15 @@ enum ShipmentShortcutParser {
         let event = try info.map { try latestEvent(in: $0) }
         let state = value("当前状态").flatMap(status)
         let observed = event?.state
-        if state == .delivered, let info, deniesCompletion(info) { throw ShipmentShortcutError.statusConflict }
-        if let state, let observed, state != observed { throw ShipmentShortcutError.statusConflict }
+        // The explicitly labeled current state wins over event wording.
+        // Do not search the full query/history for a competing status.
         let suppliedTime = value("最新时间")
         let time = suppliedTime.flatMap(date)
         if suppliedTime != nil && time == nil { throw ShipmentShortcutError.invalidText }
         if let time, let eventTime = event?.time, time != eventTime { throw ShipmentShortcutError.ambiguous }
         return .init(trackingNumber: trackingNumber, carrierName: value("快递公司"),
-                     logisticsInfo: event?.info ?? info, status: observed ?? state, logisticsTime: event?.time ?? time)
+                     logisticsInfo: event?.info ?? info, status: state ?? observed, logisticsTime: event?.time ?? time,
+                     hasExplicitCurrentStatus: state != nil)
     }
 
     /// Local text import only. Refuses unorderable histories.
@@ -226,8 +230,10 @@ struct ShipmentShortcutService {
             }
             let inferred = event.state
             let selectedInfo = event.info ?? info
-            if value.status == .delivered && ShipmentShortcutParser.deniesCompletion(selectedInfo) { throw ShipmentShortcutError.statusConflict }
-            if let explicit = value.status, let inferred, explicit != inferred { throw ShipmentShortcutError.statusConflict }
+            if !value.hasExplicitCurrentStatus {
+                if value.status == .delivered && ShipmentShortcutParser.deniesCompletion(selectedInfo) { throw ShipmentShortcutError.statusConflict }
+                if let explicit = value.status, let inferred, explicit != inferred { throw ShipmentShortcutError.statusConflict }
+            }
             if value.status == nil { value.status = inferred }
         }
         return value

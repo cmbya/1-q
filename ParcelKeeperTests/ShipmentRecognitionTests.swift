@@ -23,6 +23,35 @@ final class ShipmentRecognitionTests: XCTestCase {
         XCTAssertEqual(value.status, .inTransit)
         XCTAssertThrowsError(try ShipmentShortcutParser.parse("快递单号：JT5539273200253 最新进展：派送中 最新进展：已签收"))
     }
+    func testCompletionRequestIsNotCompletedWithoutExplicitStatus() throws {
+        for text in ["请凭取件码完成取件", "请尽快完成取件", "尚未完成取件"] {
+            XCTAssertNotEqual(ShipmentShortcutParser.status(text), .delivered, text)
+        }
+        for text in ["取件人凭取件码完成取件", "已完成取件"] {
+            XCTAssertEqual(ShipmentShortcutParser.status(text), .delivered, text)
+        }
+    }
+    func testLabeledCurrentStatusHasPriorityThroughPersistence() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try SharedPickupStore(appGroupID: nil, legacyURL: directory.appendingPathComponent("missing"), containerURL: directory)
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        for (state, progress, expected) in [("已签收", "请凭取件码完成取件", ShipmentStatus.delivered),
+                                            ("待取件", "已完成取件", .readyForPickup),
+                                            ("已签收", "", .delivered)] {
+            let text = "快递单号：JT5539273200253 当前状态：\(state) 最新进展：\(progress)"
+            let parsed = try ShipmentShortcutParser.parse(text)
+            XCTAssertEqual(parsed.status, expected)
+            XCTAssertEqual(try service.validate(parsed).status, expected)
+            // Isolate each case: completed shipments cannot auto-reopen.
+            try store.transaction { data in data.records.removeAll(); data.shipments.removeAll() }
+            XCTAssertTrue(try service.upsert(parsed))
+            XCTAssertEqual(try store.snapshot().shipments[0].status, expected)
+            XCTAssertEqual(try store.snapshot().records[0].isCompleted, expected == .delivered)
+        }
+        let withoutState = try ShipmentShortcutParser.parse("快递单号：JT5539273200253 最新进展：请凭取件码完成取件")
+        XCTAssertEqual(withoutState.status, .readyForPickup)
+    }
     func testAIPathDoesNotRequireLocalRecognitionOrOverrideAIState() async throws {
         let expected = ShipmentShortcutInput(trackingNumber: "JT5539273200253", carrierName: "极兔速递", logisticsInfo: "驿站已签收", status: .delivered, logisticsTime: nil)
         let result = try await ShipmentRecognition.recognize("unrecognized local text", useAI: true) { text in
