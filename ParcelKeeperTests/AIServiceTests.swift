@@ -45,6 +45,19 @@ final class AIServiceTests: XCTestCase {
         let envelope: [String: Any] = ["choices": [["message": ["content": String(data: content, encoding: .utf8)!]]]]
         return String(data: try! JSONSerialization.data(withJSONObject: envelope), encoding: .utf8)!
     }
+    func testAILabeledHyphenCodeAcceptedButSuffixRejected() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        network.responses = [(200, response("3-4-1366", "菜鸟驿站"))]
+        let text = "已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密"
+        let result = try await service.extract(text)
+        XCTAssertEqual(result.code, "3-4-1366")
+        XCTAssertEqual(result.location, "菜鸟驿站")
+        network.responses = [(200, response("4-1366")), (200, response("4-1366")), (200, response("4-1366"))]
+        do { _ = try await service.extract(text); XCTFail("Must reject a suffix of the real code") }
+        catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("Unexpected error") } }
+    }
+
     func testConsentAndPersistence() throws {
         XCTAssertThrowsError(try service.saveConfiguration(config()))
         try service.saveConfiguration(config(), privacyConfirmed: true)

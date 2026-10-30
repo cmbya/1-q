@@ -17,6 +17,21 @@ final class PickupIntentTests: XCTestCase {
         try FileManager.default.removeItem(at: directory)
     }
 
+    func testCainiaoWithoutAIAndEnrichmentFailureStillConfirmLocalCode() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        try await service.recognize(text: "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密", groupID: id) { candidate, _ in
+            XCTAssertEqual(candidate.code, "3-4-1366")
+            XCTAssertEqual(candidate.location, "菜鸟驿站")
+        }
+        service.aiEnabled = { true }
+        service.aiExtract = { _ in throw AIServiceError.invalidResponse }
+        try await service.recognize(text: "取件码-7-8-9012", groupID: id) { candidate, _ in
+            XCTAssertEqual(candidate.code, "7-8-9012")
+            XCTAssertNil(candidate.location)
+        }
+        XCTAssertEqual(try store.snapshot().records.count, 2)
+    }
+
     func testStableGroupIDAndRename() throws {
         let original = try XCTUnwrap(service.groups().first)
         try store.transaction { data in

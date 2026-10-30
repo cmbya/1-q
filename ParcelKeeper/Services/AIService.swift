@@ -251,12 +251,17 @@ final class AIService {
         guard matches.count == 1 else { return false }
         let start = whole.lowerBound, end = whole.upperBound
         let word = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_/.:@?=&%")
-        if start > text.startIndex, text[text.index(before: start)].unicodeScalars.contains(where: { word.contains($0) }) { return false }
+        // A label separator is not part of the code. Allow it only when the
+        // local parser independently identifies this exact whole token outside
+        // protected phone/order/URL spans; never accept a suffix of a code.
+        let labeledWholeToken = PickupTextParser().parse(text).candidates.contains { $0.code == code }
+        if start > text.startIndex, text[text.index(before: start)].unicodeScalars.contains(where: { word.contains($0) }),
+           !labeledWholeToken { return false }
         if end < text.endIndex, text[end].unicodeScalars.contains(where: { word.contains($0) }) { return false }
         // Only the label immediately preceding this occurrence describes the candidate;
         // unrelated phone/order fields elsewhere on the line must not reject it.
         let prefix = String(text[..<start])
-        let pickupLabel = "(?:取件|取货|取餐|提货)码\\s*[:：]?\\s*$"
+        let pickupLabel = "(?:取件|取货|取餐|提货)码\\s*(?:是|为)?\\s*[:：\\-－—]?\\s*$"
         let otherLabel = "(?:手机(?:号码|号)?|电话(?:号码|号)?|订单(?:号码|号)?|运单(?:号码|号)?|单号)\\s*[:：]?\\s*$"
         let explicitlyLabeled = prefix.range(of: pickupLabel, options: .regularExpression) != nil
         if prefix.range(of: otherLabel, options: .regularExpression) != nil { return false }

@@ -73,18 +73,24 @@ struct PickupIntentService {
                 if !result.candidates.isEmpty || result.isAmbiguous { throw PickupIntentError.confirmationRequired }
                 throw PickupIntentError.noCandidate
             }
-            let extracted: AIExtraction
+            let local = result.candidates.count == 1 ? result.candidates.first : nil
             do {
                 try Task.checkCancellation()
-                extracted = try await aiExtract(text)
+                let extracted = try await aiExtract(text)
                 try Task.checkCancellation()
+                guard !extracted.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupIntentError.aiFailed }
+                // Enrichment must not silently replace an already grounded code.
+                if let local, extracted.code != local.code { throw PickupIntentError.aiFailed }
+                candidate = PickupTextParser.Candidate(code: extracted.code,
+                    location: extracted.location.isEmpty ? local?.location : extracted.location, source: nil)
             } catch is CancellationError { throw CancellationError() }
             catch AIServiceError.cancelled { throw AIServiceError.cancelled }
-            catch { throw PickupIntentError.aiFailed }
-            // Multiple local records still require editing rather than accepting one AI choice.
-            guard !result.isAmbiguous, result.candidates.count <= 1 else { throw PickupIntentError.confirmationRequired }
-            guard !extracted.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupIntentError.aiFailed }
-            candidate = PickupTextParser.Candidate(code: extracted.code, location: extracted.location.isEmpty ? nil : extracted.location, source: nil)
+            catch {
+                guard let local else { throw PickupIntentError.aiFailed }
+                // Only optional enrichment failed. Confirmation still shows the
+                // local code and an unknown location rather than losing the code.
+                candidate = local
+            }
         }
         try await confirm(candidate, group.name)
         try Task.checkCancellation()

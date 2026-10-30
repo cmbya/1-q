@@ -26,8 +26,8 @@ struct PickupTextParser {
             return String(text[range])
         }
         // Do not parse labels embedded in links or contact/order identifiers.
-        let protected = matches(#"(?:https?://|www\.)[^\s，。；！？]+|(?:订单(?:号)?|运单(?:号)?|物流单(?:号)?|快递单(?:号)?|手机(?:号)?|电话(?:号)?)\s*[:：]?\s*(?:取件码|取货码|取餐码|提货码)?\s*[:：]?\s*[A-Za-z0-9+._/#*\-]+"#).map(\.range)
-        let codeMatches = matches(#"(?:取件码|取货码|取餐码|提货码)\s*(?:是|为)?\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9_#*+\-]*)(?![A-Za-z0-9_#*+\-])"#)
+        let protected = matches(#"(?:https?://|www\.)[^\s，。；！？]+|(?:订单(?:号)?|运单(?:号)?|物流单(?:号)?|快递单(?:号)?|手机(?:号)?|电话(?:号)?)\s*[:：\-－—]?\s*(?:取件码|取货码|取餐码|提货码)?\s*[:：\-－—]?\s*[A-Za-z0-9+._/#*\-]+"#).map(\.range)
+        let codeMatches = matches(#"(?:取件码|取货码|取餐码|提货码)\s*(?:是|为)?\s*[:：\-－—]?\s*([A-Za-z0-9][A-Za-z0-9_#*+\-]*)(?![A-Za-z0-9_#*+\-])"#)
         let continuation = try? NSRegularExpression(pattern: #"\G\s*[,，、/;；]\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-\p{Han}])"#)
         var codes: [String] = []
         var codeOccurrences = 0
@@ -52,7 +52,8 @@ struct PickupTextParser {
             }
         }
         let sources = matches(#"【([^【】\n]{1,30})】"#).compactMap { value($0, 1) }
-        let locations = matches(#"(?:至|到|地点\s*[:：]|地址\s*[:：])\s*([^，,。；;！!？?\n]+?)(?:取件|取货|取餐|领取|[，,。；;！!？?\n]|$)"#)
+            .filter { $0.range(of: #"(?:取件|取货|取餐|提货)码"#, options: .regularExpression) == nil }
+        let locations = matches(#"(?:送达|至|到|地点\s*[:：]|地址\s*[:：])\s*([^，,。；;！!？?\n]+?)(?:取件|取货|取餐|领取|[，,。；;！!？?\n]|$)"#)
             .compactMap { value($0, 1)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         // Repeated occurrences may represent separate messages, even for identical values.

@@ -4,6 +4,20 @@ import XCTest
 final class PickupTextParserTests: XCTestCase {
     private let parser = PickupTextParser()
 
+    func testCainiaoHyphenLabelAndContentBracket() throws {
+        let text = "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密，享号码保护服务，点击查看详情>>"
+        let result = parser.parse(text)
+        XCTAssertEqual(result.candidates.map(\.code), ["3-4-1366"])
+        XCTAssertEqual(result.candidates.first?.location, "菜鸟驿站")
+        XCTAssertNil(result.candidates.first?.source)
+        XCTAssertFalse(result.isAmbiguous)
+        for separator in ["-", "：", ":", "—", "－"] {
+            XCTAssertEqual(parser.parse("【菜鸟】取件码\(separator)3-4-1366").candidates.first?.code, "3-4-1366")
+        }
+        XCTAssertTrue(parser.parse("订单号取件码-3-4-1366").candidates.isEmpty)
+        XCTAssertTrue(parser.parse("https://example.test/取件码-3-4-1366").candidates.isEmpty)
+    }
+
     func testLockerExample() throws {
         let result = parser.parse("【丰巢】凭取件码88772092至新港西路214号宿舍大院值班室旁丰巢柜取件。")
         let candidate = try XCTUnwrap(result.candidates.first)
