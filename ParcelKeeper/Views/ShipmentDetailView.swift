@@ -59,6 +59,15 @@ struct ShipmentDetailView: View {
                         }
                     }
 
+                    if let info = shipment.logisticsInfo, !info.isEmpty {
+                        Section("最新物流信息") {
+                            Text(info).textSelection(.enabled)
+                            if let time = shipment.logisticsTime {
+                                LabeledContent("物流发生时间", value: time.formatted(date: .abbreviated, time: .shortened))
+                            }
+                        }
+                    }
+
                     Section("备注与取件码") {
                         TextField("备注", text: $note)
                             .onChange(of: note) { _, newValue in

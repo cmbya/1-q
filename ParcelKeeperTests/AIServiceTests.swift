@@ -58,6 +58,21 @@ final class AIServiceTests: XCTestCase {
         catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("Unexpected error") } }
     }
 
+    func testShipmentAIUsesConfiguredModelsAndGroundedFields() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        func envelope(_ fields: [String: String]) throws -> String {
+            let content = String(data: try JSONSerialization.data(withJSONObject: fields), encoding: .utf8)!
+            return String(data: try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": content]]]]), encoding: .utf8)!
+        }
+        network.responses = [(200, try envelope(["trackingNumber": "YT1234567890123", "carrierName": "圆通速递", "logisticsInfo": "虚构签收", "logisticsTime": ""])),
+                             (200, try envelope(["trackingNumber": "YT1234567890123", "carrierName": "圆通速递", "logisticsInfo": "已签收", "logisticsTime": ""]))]
+        let result = try await service.extractShipment("圆通速递 运单号：YT1234567890123 最新物流：已签收")
+        XCTAssertEqual(result.trackingNumber, "YT1234567890123")
+        XCTAssertEqual(result.status, .delivered)
+        XCTAssertEqual(network.requests.count, 2)
+    }
+
     func testConsentAndPersistence() throws {
         XCTAssertThrowsError(try service.saveConfiguration(config()))
         try service.saveConfiguration(config(), privacyConfirmed: true)

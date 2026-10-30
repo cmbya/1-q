@@ -12,6 +12,9 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var updatedAt: Date
     var lastCheckedAt: Date?
     var reminderDate: Date?
+    // Optional fields keep old shipment JSON and backups decodable.
+    var logisticsInfo: String?
+    var logisticsTime: Date?
 
     init(
         id: UUID = UUID(),
@@ -24,7 +27,9 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         lastCheckedAt: Date? = nil,
-        reminderDate: Date? = nil
+        reminderDate: Date? = nil,
+        logisticsInfo: String? = nil,
+        logisticsTime: Date? = nil
     ) {
         self.id = id
         self.trackingNumber = trackingNumber
@@ -37,6 +42,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         self.updatedAt = updatedAt
         self.lastCheckedAt = lastCheckedAt
         self.reminderDate = reminderDate
+        self.logisticsInfo = logisticsInfo
+        self.logisticsTime = logisticsTime
     }
 }
 

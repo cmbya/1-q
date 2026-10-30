@@ -16,6 +16,13 @@ struct ShipmentRow: View {
                 .font(.system(.body, design: .monospaced, weight: .medium))
                 .textSelection(.enabled)
 
+            if let info = shipment.logisticsInfo, !info.isEmpty {
+                Text(info).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                if let time = shipment.logisticsTime {
+                    Text(time.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+
             if !shipment.note.isEmpty || !shipment.pickupCode.isEmpty {
                 HStack(spacing: 12) {
                     if !shipment.note.isEmpty {

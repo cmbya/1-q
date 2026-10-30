@@ -130,8 +130,15 @@ struct AddPickupIntent: AppIntent {
     @Parameter(title: "地点") var location: String?
     @Parameter(title: "分组") var group: PickupGroupEntity
     @Parameter(title: "来源或备注") var source: String?
+    @Parameter(title: "写入前确认", default: true) var confirmBeforeSaving: Bool
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        if confirmBeforeSaving {
+            let dialog: IntentDialog = "请确认保存取件码：\(code)，地点：\(location ?? "未提供")，分组：\(group.name)。"
+            if #available(iOS 18.0, *) { try await requestConfirmation(dialog: dialog) }
+            else { try await requestConfirmation(result: .result(dialog: dialog), showPrompt: true) }
+        }
+        try Task.checkCancellation()
         try PickupIntentService.live().add(code: code, location: location, groupID: group.id, source: source)
         return .result(dialog: "取件码已保存。")
     }
@@ -143,9 +150,11 @@ struct RecognizePickupIntent: AppIntent {
 
     @Parameter(title: "原始文本") var text: String
     @Parameter(title: "分组") var group: PickupGroupEntity
+    @Parameter(title: "写入前确认", default: true) var confirmBeforeSaving: Bool
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         try await PickupIntentService.live().recognize(text: text, groupID: group.id) { candidate, groupName in
+            guard confirmBeforeSaving else { return }
             let location = candidate.location ?? "未识别"
             let dialog: IntentDialog = "请确认保存取件码：\(candidate.code)，地点：\(location)，分组：\(groupName)。"
             if #available(iOS 18.0, *) {
