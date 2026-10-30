@@ -26,7 +26,8 @@ struct SettingsView: View {
                 }
 
                 Section("桌面组件") {
-                    NavigationLink("组件 A / B 分组设置") { WidgetSettingsView() }
+                    NavigationLink("共享存储适配") { SharedStorageSettingsView() }
+                    NavigationLink("组件 A–J 分组设置") { WidgetSettingsView() }
                 }
 
                 Section("AI") {

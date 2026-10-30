@@ -2,19 +2,18 @@ import Foundation
 
 // Preferences are separate from pickup-data.json: no record migration required.
 enum WidgetSlot: String, CaseIterable, Identifiable {
-    case a, b
+    case a, b, c, d, e, f, g, h, i, j
     var id: String { rawValue }
-    var title: String { self == .a ? "组件 A" : "组件 B" }
+    var title: String { "组件 " + rawValue.uppercased() }
     var kind: String { "ParcelKeeperSlot" + rawValue.uppercased() }
 }
 
 struct WidgetSlotBinding {
     private let directory: URL
     init(containerURL: URL? = nil) throws {
-        let group = Bundle.main.object(forInfoDictionaryKey: "ParcelKeeperAppGroup") as? String
-        guard let container = containerURL ?? group.flatMap({ FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) }) else {
-            throw PickupStorageError.appGroupUnavailable
-        }
+        let container: URL
+        if let injected = containerURL { container = injected }
+        else { container = try AppGroupResolver.container() }
         directory = container.appendingPathComponent("ParcelKeeper", isDirectory: true)
     }
     private func url(_ slot: WidgetSlot) -> URL {

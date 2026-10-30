@@ -56,6 +56,7 @@ targets:
           - ParcelKeeperWidget.entitlements
           - Info.plist
           - README.md
+      - path: ParcelKeeper/Services/AppGroupResolver.swift
       - path: ParcelKeeper/Models/WidgetSlotBinding.swift
       - path: ParcelKeeper/Models/PickupData.swift
       - path: ParcelKeeper/Models/Shipment.swift

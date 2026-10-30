@@ -10,7 +10,8 @@ private enum WidgetStore {
     }
     static func errorKey(_ group: UUID) -> String { "widget.error." + group.uuidString }
     static func defaults() throws -> UserDefaults {
-        guard let id = groupID, !id.isEmpty, let defaults = UserDefaults(suiteName: id) else {
+        let id = try AppGroupResolver.groupID()
+        guard let defaults = UserDefaults(suiteName: id) else {
             throw PickupStorageError.invalidData("组件状态不可用，请打开 App 检查共享配置")
         }
         return defaults

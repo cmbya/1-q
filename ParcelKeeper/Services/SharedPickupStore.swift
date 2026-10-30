@@ -54,9 +54,9 @@ final class SharedPickupStore {
         self.fileManager = fileManager
         self.accessMode = accessMode
         self.readOnly = readOnly
-        guard let container = containerURL ?? appGroupID.flatMap({ fileManager.containerURL(forSecurityApplicationGroupIdentifier: $0) }) else {
-            throw PickupStorageError.appGroupUnavailable
-        }
+        let container: URL
+        if let injected = containerURL { container = injected }
+        else { container = try AppGroupResolver.container(configured: appGroupID) }
         directory = container.appendingPathComponent("ParcelKeeper", isDirectory: true)
         guard let support = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw PickupStorageError.invalidData("无法定位旧数据目录")

@@ -34,6 +34,14 @@ final class ShipmentStore: ObservableObject {
             lastErrorMessage = error.localizedDescription
         }
     }
+    func reconnectSharedStorage() throws {
+        let next = try SharedPickupStore(appGroupID: nil)
+        let data = try next.snapshot()
+        storage = next
+        apply(data)
+        lastErrorMessage = nil
+        WidgetCenter.shared.reloadAllTimelines()
+    }
     // Call when the application returns to the foreground.
     func refreshOnForeground() {
         do { try reload() } catch { lastErrorMessage = error.localizedDescription }
