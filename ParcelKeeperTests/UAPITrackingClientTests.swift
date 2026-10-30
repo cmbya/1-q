@@ -165,6 +165,7 @@ final class UAPITrackingClientTests: XCTestCase {
         XCTAssertTrue(UAPIError.quota.stopsBatch)
         XCTAssertTrue(UAPIError.rateLimited(nil).stopsBatch)
         XCTAssertFalse(UAPIError.noData.stopsBatch)
+        XCTAssertFalse(UAPIError.unavailable.stopsBatch)
     }
     func testMalformedAndCancellationDoNotLeakProviderErrors() async throws {
         try enable()

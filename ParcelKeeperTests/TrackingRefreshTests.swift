@@ -6,9 +6,11 @@ final class TrackingRefreshTests: XCTestCase {
         var onQuery: (() throws -> Void)?
         var failure: Error?
         var calls = 0
+        var queriedNumbers: [String] = []
         var result = UAPITrackingResult(trackingNumber: "YT1234567890123", carrierName: "圆通速递", carrierCode: "yuantong", status: .delivered, logisticsInfo: "本人签收", logisticsTime: Date(timeIntervalSinceReferenceDate: 2000), queryInfo: "完整查询信息", queriedAt: Date(timeIntervalSinceReferenceDate: 3000))
         func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult {
             calls += 1
+            queriedNumbers.append(trackingNumber)
             try onQuery?()
             if let failure { throw failure }
             return result
@@ -91,12 +93,77 @@ final class TrackingRefreshTests: XCTestCase {
         let encoded = try JSONEncoder().encode(shipment!)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         object.removeValue(forKey: "lastQueriedAt"); object.removeValue(forKey: "uapiCarrierCode")
+        object.removeValue(forKey: "lastQueryAttemptAt")
         let legacy = try JSONDecoder().decode(Shipment.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertNil(legacy.lastQueriedAt); XCTAssertNil(legacy.uapiCarrierCode)
-        try storage.transaction { $0.shipments[0].lastQueriedAt = Date(timeIntervalSinceReferenceDate: 1234); $0.shipments[0].uapiCarrierCode = "yuantong" }
+        XCTAssertNil(legacy.lastQueryAttemptAt)
+        try storage.transaction {
+            $0.shipments[0].lastQueriedAt = Date(timeIntervalSinceReferenceDate: 1234)
+            $0.shipments[0].lastQueryAttemptAt = Date(timeIntervalSinceReferenceDate: 2345)
+            $0.shipments[0].uapiCarrierCode = "yuantong"
+        }
         let backup = try JSONDecoder().decode(PickupDataset.self, from: storage.exportBackup())
         XCTAssertEqual(backup.shipments[0].uapiCarrierCode, "yuantong")
         XCTAssertEqual(backup.shipments[0].lastQueriedAt, Date(timeIntervalSinceReferenceDate: 1234))
+        XCTAssertEqual(backup.shipments[0].lastQueryAttemptAt, Date(timeIntervalSinceReferenceDate: 2345))
+    }
+    private func addPendingShipments(_ count: Int) throws {
+        try storage.transaction { data in
+            for index in 0..<count {
+                var other = self.shipment!
+                other.id = UUID()
+                other.trackingNumber = "YT22345678901\(index)"
+                data.shipments.append(other)
+                data.records.append(PickupRecord(groupID: data.groups[0].id, code: "extra-\(index)", shipmentID: other.id))
+            }
+        }
+    }
+    func testTemporaryFailureContinuesBatchAndReportsSafePerParcelDetails() async throws {
+        try addPendingShipments(1)
+        let client = Client(); client.failure = UAPIError.unavailable
+        let report = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refreshPending()
+        XCTAssertEqual(client.calls, 2)
+        XCTAssertEqual(report.failed, 2)
+        XCTAssertEqual(report.remaining, 0)
+        XCTAssertNil(report.stoppedReason)
+        XCTAssertTrue(report.message.contains(shipment.trackingNumber))
+        XCTAssertTrue(report.message.contains(UAPIError.unavailable.localizedDescription))
+        XCTAssertEqual(report.failures.count, report.failed)
+    }
+    func testSlowFailedAttemptsRotateAcrossServiceInstancesWithoutChangingLogistics() async throws {
+        try addPendingShipments(2)
+        let before = try storage.snapshot().shipments
+        let client = Client(); client.failure = UAPIError.noData
+        var uptime: TimeInterval = 0
+        client.onQuery = { uptime += 12 }
+        let first = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}, uptime: { uptime }).refreshPending()
+        XCTAssertEqual(first.failed, 2)
+        XCTAssertEqual(first.remaining, 1)
+        _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}, uptime: { uptime }).refreshPending()
+        XCTAssertEqual(Set(client.queriedNumbers.prefix(3)).count, 3)
+        for old in before {
+            var after = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == old.id })
+            XCTAssertNotNil(after.lastQueryAttemptAt)
+            after.lastQueryAttemptAt = old.lastQueryAttemptAt
+            XCTAssertEqual(after, old)
+        }
+    }
+    func testUnknownBatchErrorNeverEchoesRawSecrets() async throws {
+        let client = Client()
+        client.failure = NSError(domain: "Bearer secret phone=9876", code: 1, userInfo: [NSLocalizedDescriptionKey: "Bearer secret phone=9876"])
+        let report = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refreshPending()
+        XCTAssertTrue(report.message.contains(shipment.trackingNumber))
+        XCTAssertFalse(report.message.contains("secret"))
+        XCTAssertFalse(report.message.contains("9876"))
+    }
+    func testPostSaveWarningsRetainQueryAndEachReminderFailure() {
+        for reminder in ["没有通知权限", "提醒保存失败", "提醒创建失败"] {
+            let message = ShipmentPostSaveWarnings.message(query: "物流查询未完成", reminder: reminder)
+            XCTAssertTrue(message.contains("物流查询未完成"))
+            XCTAssertTrue(message.contains(reminder))
+            XCTAssertTrue(message.contains("快递已保存"))
+        }
+        XCTAssertEqual(ShipmentPostSaveWarnings.message(query: nil, reminder: "提醒创建失败"), "快递已保存。\n提醒创建失败")
     }
     func testBatchStopsOnAuthenticationAndExcludesCompleted() async throws {
         let client = Client(); client.failure = UAPIError.authentication

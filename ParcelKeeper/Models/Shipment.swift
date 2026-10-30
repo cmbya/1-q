@@ -18,6 +18,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var queryInfo: String?
     var uapiCarrierCode: String?
     var lastQueriedAt: Date?
+    // Batch scheduling only; a failed attempt must not change successful query data.
+    var lastQueryAttemptAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -35,7 +37,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         logisticsTime: Date? = nil,
         queryInfo: String? = nil,
         uapiCarrierCode: String? = nil,
-        lastQueriedAt: Date? = nil
+        lastQueriedAt: Date? = nil,
+        lastQueryAttemptAt: Date? = nil
     ) {
         self.id = id
         self.trackingNumber = trackingNumber
@@ -53,6 +56,7 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         self.queryInfo = queryInfo
         self.uapiCarrierCode = uapiCarrierCode
         self.lastQueriedAt = lastQueriedAt
+        self.lastQueryAttemptAt = lastQueryAttemptAt
     }
 }
 

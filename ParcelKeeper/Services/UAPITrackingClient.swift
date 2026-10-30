@@ -18,7 +18,7 @@ enum UAPIError: LocalizedError, Equatable {
 
     var stopsBatch: Bool {
         switch self {
-        case .notConfigured, .privacyConsentRequired, .authentication, .quota, .rateLimited, .keychain, .cancelled, .unavailable: return true
+        case .notConfigured, .privacyConsentRequired, .authentication, .quota, .rateLimited, .keychain, .cancelled: return true
         default: return false
         }
     }

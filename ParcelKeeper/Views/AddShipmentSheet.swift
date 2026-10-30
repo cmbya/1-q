@@ -1,5 +1,11 @@
 import SwiftUI
 
+enum ShipmentPostSaveWarnings {
+    static func message(query: String?, reminder: String?) -> String {
+        (["快递已保存。"] + [query, reminder].compactMap { $0 }).joined(separator: "\n")
+    }
+}
+
 struct AddShipmentSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: ShipmentStore
@@ -169,17 +175,17 @@ struct AddShipmentSheet: View {
                     _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: queryPhone.isEmpty ? nil : queryPhone)
                     try store.reload()
                     queryPhone = ""
-                } catch { queryWarning = "快递已保存，但物流查询未完成：\(error.localizedDescription)"; try? store.reload() }
+                } catch { queryWarning = "物流查询未完成：\(error.localizedDescription)"; try? store.reload() }
             }
             guard reminderEnabled else {
-                if let queryWarning { isSaving = false; reminderError = queryWarning }
+                if let queryWarning { isSaving = false; reminderError = ShipmentPostSaveWarnings.message(query: queryWarning, reminder: nil) }
                 else { dismiss() }
                 return
             }
             let granted = await NotificationManager.shared.requestAuthorization()
             guard granted else {
                 isSaving = false
-                reminderError = "快递已保存，但没有通知权限，提醒未创建。"
+                reminderError = ShipmentPostSaveWarnings.message(query: queryWarning, reminder: "没有通知权限，提醒未创建。")
                 return
             }
             do {
@@ -189,14 +195,14 @@ struct AddShipmentSheet: View {
                 } catch {
                     NotificationManager.shared.cancelReminder(for: shipment.id)
                     isSaving = false
-                    reminderError = "快递已保存，但提醒保存失败：\(error.localizedDescription)"
+                    reminderError = ShipmentPostSaveWarnings.message(query: queryWarning, reminder: "提醒保存失败：\(error.localizedDescription)")
                     return
                 }
-                if let queryWarning { isSaving = false; reminderError = queryWarning }
+                if let queryWarning { isSaving = false; reminderError = ShipmentPostSaveWarnings.message(query: queryWarning, reminder: nil) }
                 else { dismiss() }
             } catch {
                 isSaving = false
-                reminderError = "快递已保存，但提醒创建失败：\(error.localizedDescription)"
+                reminderError = ShipmentPostSaveWarnings.message(query: queryWarning, reminder: "提醒创建失败：\(error.localizedDescription)")
             }
         }
     }

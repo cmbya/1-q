@@ -3,13 +3,19 @@ import WidgetKit
 
 struct TrackingRefreshReport {
     var succeeded = 0
-    var failed = 0
+    struct Failure {
+        let trackingNumber: String
+        let reason: String
+    }
+    var failures: [Failure] = []
+    var failed: Int { failures.count }
     var newlyDelivered = 0
     var remaining = 0
     var stoppedReason: String?
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
         if let stoppedReason { value += " \(stoppedReason)" }
+        for failure in failures { value += "\n\(failure.trackingNumber)：\(failure.reason)" }
         return value
     }
 }
@@ -19,6 +25,7 @@ struct TrackingRefreshService {
     let store: SharedPickupStore
     let client: any UAPITrackingQuerying
     var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
+    var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     static func live() throws -> TrackingRefreshService {
         TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient())
     }
@@ -84,16 +91,16 @@ struct TrackingRefreshService {
     }
     func refreshPending() async throws -> TrackingRefreshReport {
         let ids = try store.snapshot().shipments.filter(Self.isPending).sorted {
-            let left = $0.lastQueriedAt ?? .distantPast
-            let right = $1.lastQueriedAt ?? .distantPast
+            let left = $0.lastQueryAttemptAt ?? $0.lastQueriedAt ?? .distantPast
+            let right = $1.lastQueryAttemptAt ?? $1.lastQueriedAt ?? .distantPast
             return left == right ? $0.id.uuidString < $1.id.uuidString : left < right
         }.map(\.id)
         var report = TrackingRefreshReport()
-        let started = ProcessInfo.processInfo.systemUptime
+        let started = uptime()
         for (offset, id) in ids.enumerated() {
             try Task.checkCancellation()
             // Do not run an unbounded network loop inside a Shortcuts invocation.
-            if ProcessInfo.processInfo.systemUptime - started >= 20 {
+            if uptime() - started >= 20 {
                 report.remaining = ids.count - offset
                 report.stoppedReason = "本轮执行时间已到，请再次运行以继续刷新。"
                 break
@@ -101,12 +108,32 @@ struct TrackingRefreshService {
             // Recheck before each request; another process may have completed/deleted it.
             guard let latest = try store.snapshot().shipments.first(where: { $0.id == id }), Self.isPending(latest) else { continue }
             do {
+                // Persist only scheduling metadata before awaiting; shared across invocations.
+                let shouldQuery = try store.transaction { data -> Bool in
+                    guard let index = data.shipments.firstIndex(where: { $0.id == id }),
+                          Self.isPending(data.shipments[index]),
+                          data.shipments[index].trackingNumber == latest.trackingNumber else { return false }
+                    data.shipments[index].lastQueryAttemptAt = Date()
+                    return true
+                }
+                guard shouldQuery else { continue }
                 if try await refresh(id: id) { report.newlyDelivered += 1 }
                 report.succeeded += 1
             } catch is CancellationError { throw CancellationError() }
             catch UAPIError.cancelled { throw UAPIError.cancelled }
             catch {
-                report.failed += 1
+                let reason: String
+                if let failure = error as? UAPIError { reason = failure.localizedDescription }
+                else if let failure = error as? ShipmentShortcutError { reason = failure.localizedDescription }
+                else if let failure = error as? PickupStorageError {
+                    // invalidData may contain user/provider text; do not echo its payload.
+                    switch failure {
+                    case .notFound: reason = "快递记录已删除或关联记录缺失，未更新。"
+                    default: reason = "快递存储或共享访问失败，未更新；请在 App 检查。"
+                    }
+                } else { reason = "查询或保存失败，未更新；请在 App 检查。" }
+                let number = (try? ShipmentShortcutParser.number(latest.trackingNumber)) ?? "无效运单号"
+                report.failures.append(.init(trackingNumber: number, reason: reason))
                 if let failure = error as? UAPIError, failure.stopsBatch {
                     report.remaining = ids.count - offset - 1
                     report.stoppedReason = failure.localizedDescription
