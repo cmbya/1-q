@@ -133,7 +133,7 @@ final class SharedPickupStoreTests: XCTestCase {
         XCTAssertEqual(try history.snapshot(), snapshot)
         let reopened = try SharedPickupStore(appGroupID: nil, legacyURL: legacy, containerURL: container, readOnly: true)
         XCTAssertEqual(try reopened.snapshot(), snapshot)
-        XCTAssertEqual(try reopened.exportBackup(), history.exportBackup())
+        XCTAssertEqual(try reopened.exportBackup(), try history.exportBackup())
         XCTAssertTrue(try XCTUnwrap(snapshot.records.first).isCompleted)
         XCTAssertThrowsError(try history.transaction { $0.groups.removeAll() })
         XCTAssertFalse(FileManager.default.fileExists(atPath: container.path))
