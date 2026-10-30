@@ -21,7 +21,10 @@ enum PickupIntentError: LocalizedError {
 /// All validation that depends on mutable data occurs inside the store transaction.
 struct PickupIntentService {
     let store: SharedPickupStore
-    var reloadWidget: () -> Void = { WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget") }
+    var reloadWidget: () -> Void = {
+        WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
+        for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
+    }
     var aiEnabled: () -> Bool = { false }
     var aiExtract: (String) async throws -> AIExtraction = { _ in throw AIServiceError.disabled }
 

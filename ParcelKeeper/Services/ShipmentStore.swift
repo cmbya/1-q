@@ -58,6 +58,7 @@ final class ShipmentStore: ObservableObject {
             return (result, data)
         }
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
+        for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         // Preserve the committed snapshot even if a subsequent read fails.
         do { try reload() } catch {
             apply(committed)
@@ -199,6 +200,7 @@ final class ShipmentStore: ObservableObject {
         guard let storage = storage else { throw PickupStorageError.appGroupUnavailable }
         let committed = try storage.importBackup(preview, policy: policy)
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
+        for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         do { try reload() } catch {
             apply(committed)
             lastErrorMessage = "备份已导入，但刷新失败：\(error.localizedDescription)"

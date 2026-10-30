@@ -25,6 +25,10 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("桌面组件") {
+                    NavigationLink("组件 A / B 分组设置") { WidgetSettingsView() }
+                }
+
                 Section("AI") {
                     NavigationLink("AI 服务设置") { AISettingsView() }
                 }

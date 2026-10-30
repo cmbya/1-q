@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import ParcelKeeper
 
 final class SharedPickupStoreTests: XCTestCase {
@@ -29,6 +30,28 @@ final class SharedPickupStoreTests: XCTestCase {
                  updatedAt: Date(timeIntervalSinceReferenceDate: 2000.25),
                  lastCheckedAt: Date(timeIntervalSinceReferenceDate: 3000.5),
                  reminderDate: Date(timeIntervalSinceReferenceDate: 4000.75))
+    }
+
+    func testContendedLockTimesOutWithoutChangingDataAndRecoversAfterUnlock() throws {
+        let s = try store()
+        let initial = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        let lock = container.appendingPathComponent("ParcelKeeper/pickup-data.lock")
+        let fd = open(lock.path, O_RDWR)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        XCTAssertEqual(flock(fd, LOCK_EX | LOCK_NB), 0)
+        // Ensure an assertion failure cannot leave the lock held during teardown.
+        defer { flock(fd, LOCK_UN) }
+        let started = ProcessInfo.processInfo.systemUptime
+        XCTAssertThrowsError(try s.snapshot()) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .ETIMEDOUT)
+        }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 3.0)
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        XCTAssertEqual(flock(fd, LOCK_UN), 0)
+        XCTAssertEqual(try s.snapshot(), initial)
     }
 
     func testMigrationPreservesEveryShipmentFieldAndIsIdempotent() throws {

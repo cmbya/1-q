@@ -73,7 +73,19 @@ final class SharedPickupStore {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         defer { close(fd) }
-        guard flock(fd, LOCK_EX) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        // Use monotonic time: a suspended owner must not hang a widget forever.
+        // Timing out never enters the critical section or changes stored data.
+        let deadline = ProcessInfo.processInfo.systemUptime + 1.0
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            guard code == EWOULDBLOCK || code == EAGAIN || code == EINTR else {
+                throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                throw POSIXError(.ETIMEDOUT)
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
         defer { flock(fd, LOCK_UN) }
         return try body()
     }

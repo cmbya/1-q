@@ -191,9 +191,7 @@ struct PickupWidgetView: View {
     }
 }
 
-#if !WIDGET_DIAGNOSTICS
-@main
-#endif
+// Retained only for opt-in diagnostic comparisons, not in the normal bundle.
 struct ParcelKeeperWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "ParcelKeeperPickupWidget", intent: PickupGroupSelection.self, provider: PickupProvider()) { entry in
