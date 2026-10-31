@@ -1,9 +1,60 @@
 import Foundation
 
-/// Shared provenance protection only; each entry point retains its own code grammar.
+/// Shared provenance, whole-token and structural multiplicity protection.
+/// Entry points retain their own label semantics and compatible length limits.
 /// Ranges always refer to the exact text supplied by the caller (UTF-16 for Foundation).
 enum PickupFieldProtection {
     private static let pattern = #"(?:https?://|www\.)[^\s，。；！？]+|(?:(?:订单|訂單|运单|運單|物流单|物流單|快递单|快遞單|手机|手機|电话|電話)(?:号码|號碼|编号|編號|号|號)?|单(?:号码|號碼|编号|編號|号|號)|單(?:号码|號碼|编号|編號|号|號))\s*[:：\-－﹣‐‑‒–—−]?\s*(?:取件码|取件碼|取货码|取貨碼|取餐码|取餐碼|提货码|提貨碼|凭证码|憑證碼|核销码|核銷碼)?\s*(?:是|为|為)?\s*[:：\-－﹣‐‑‒–—−]?\s*[A-Za-z0-9+._/#*\-－﹣‐‑‒–—−]+"#
+
+    static let tokenPattern = #"[A-Za-z0-9][A-Za-z0-9_#*+\-－﹣‐‑‒–—−]*"#
+
+    static func singleNotification(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let regex = try? NSRegularExpression(pattern: #"\A(.+?)(?:\s+\1)+\z"#, options: [.dotMatchesLineSeparators]),
+              let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+              let range = Range(match.range(at: 1), in: trimmed) else { return trimmed }
+        return String(trimmed[range])
+    }
+
+    // A dot is a sentence terminator only when it does not join another token.
+    // URL/identifier punctuation must never authorize extracting a short prefix.
+    static func isWholeToken(_ range: NSRange, in text: String, labeled: Bool = false) -> Bool {
+        guard let span = Range(range, in: text) else { return false }
+        let joined = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_#*+-－﹣‐‑‒–—−/@?=&%:")
+        if span.lowerBound > text.startIndex && !labeled {
+            let before = text[text.index(before: span.lowerBound)]
+            if before == "." || before.unicodeScalars.contains(where: { joined.contains($0) }) { return false }
+        }
+        if span.upperBound < text.endIndex {
+            let after = text[span.upperBound]
+            if after.unicodeScalars.contains(where: { joined.contains($0) }) { return false }
+            if after == "." {
+                let next = text.index(after: span.upperBound)
+                if next < text.endIndex && text[next].unicodeScalars.contains(where: { joined.contains($0) }) { return false }
+            }
+        }
+        return true
+    }
+
+    // Structural list evidence only, including unlabeled model-selected codes.
+    // A numeric address prefix (456号楼) is not another standalone code.
+    static func hasAdjacentListItem(to range: NSRange, in text: String) -> Bool {
+        guard let span = Range(range, in: text) else { return false }
+        let item = "(?>" + tokenPattern + ")(?![A-Za-z0-9_#*+\\-－﹣‐‑‒–—−\\p{Han}])"
+        let suffix = String(text[span.upperBound...])
+        let prefix = String(text[..<span.lowerBound])
+        let protected = ranges(in: text)
+        func validItem(_ part: String, pattern: String, offset: Int) -> Bool {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: part, range: NSRange(part.startIndex..., in: part)),
+                  let captured = Range(match.range(at: 1), in: part) else { return false }
+            let candidate = NSRange(location: offset + match.range(at: 1).location, length: match.range(at: 1).length)
+            return allows(String(part[captured]), range: candidate, protected: protected)
+                && isWholeToken(candidate, in: text)
+        }
+        return validItem(suffix, pattern: #"^\s*[,，、/;；]\s*("# + item + ")", offset: range.location + range.length)
+            || validItem(prefix, pattern: "(" + item + #")\s*[,，、/;；]\s*$"#, offset: 0)
+    }
 
     static func ranges(in text: String) -> [NSRange] {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
@@ -37,16 +88,7 @@ struct PickupTextParser {
         // Do not compatibility-normalize other characters or numeric identifiers.
         // Collapse only exact repetitions of the entire notice, never globally
         // unique codes/locations or repeated lines inside different messages.
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        let repetition = try? NSRegularExpression(pattern: #"\A(.+?)(?:\s+\1)+\z"#,
-                                                  options: [.dotMatchesLineSeparators])
-        let repeated = repetition?.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))
-        let notice: String
-        if let repeated, let range = Range(repeated.range(at: 1), in: trimmed) {
-            notice = String(trimmed[range])
-        } else {
-            notice = trimmed
-        }
+        let notice = PickupFieldProtection.singleNotification(input)
         let text = notice.replacingOccurrences(of: #"[－﹣‐‑‒–—−]"#,
                                                with: "-", options: .regularExpression)
         let full = NSRange(text.startIndex..., in: text)
@@ -66,6 +108,7 @@ struct PickupTextParser {
         var codeOccurrences = 0
         for match in codeMatches {
             guard let code = value(match, 1), code.count <= 32,
+                  PickupFieldProtection.isWholeToken(match.range(at: 1), in: text, labeled: true),
                   PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected) else { continue }
             codeOccurrences += 1
             if !codes.contains(code) { codes.append(code) }
@@ -76,6 +119,7 @@ struct PickupTextParser {
                   let next = continuation?.firstMatch(in: text, options: [.anchored],
                                                       range: NSRange(location: position, length: full.length - position)),
                   let extra = value(next, 1), extra.count <= 32,
+                  PickupFieldProtection.isWholeToken(next.range(at: 1), in: text, labeled: true),
                   PickupFieldProtection.allows(extra, range: next.range(at: 1), protected: protected) {
                 codeOccurrences += 1
                 if !codes.contains(extra) { codes.append(extra) }

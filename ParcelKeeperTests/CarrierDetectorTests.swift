@@ -46,6 +46,14 @@ final class CarrierDetectorTests: XCTestCase {
         }
     }
 
+    func testURLTokensAreExcludedWithoutErasingAdjacentTrackingNumbers() {
+        for url in ["https://example.test/SF1234567890", "HTTPS://example.test/?trackingNumber=SF1234567890", "www.example.test/12345678"] {
+            XCTAssertTrue(CarrierDetector.extractTrackingNumbers(from: url).isEmpty, url)
+            XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: "😀 " + url + "，运单号：YT9876543210"), ["YT9876543210"], url)
+            XCTAssertEqual(CarrierDetector.extractTrackingNumbers(from: url + " SF1234567890"), ["SF1234567890"], url)
+        }
+    }
+
     func testExtractionPrioritizesLabelAndDeduplicates() {
         let text = "手机号 13800138000\n运单号 SF1234567890\n运单号 SF1234567890"
         let numbers = CarrierDetector.extractTrackingNumbers(from: text)

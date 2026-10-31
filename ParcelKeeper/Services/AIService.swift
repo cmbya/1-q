@@ -274,35 +274,26 @@ final class AIService {
     // Only collapse an exact repetition of the entire notification (possibly
     // multiline). Never deduplicate individual lines or combine different notices.
     private func singleNotification(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let regex = try? NSRegularExpression(pattern: #"\A(.+?)(?:\s+\1)+\z"#, options: [.dotMatchesLineSeparators]),
-              let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
-              let range = Range(match.range(at: 1), in: trimmed) else { return trimmed }
-        return String(trimmed[range])
+        PickupFieldProtection.singleNotification(text)
     }
     // Provenance/token boundaries only: do not ask the local pickup parser to
     // identify candidates or re-adjudicate the model's semantic interpretation.
     private func safeCode(_ code: String, in text: String) -> Bool {
         guard code == code.trimmingCharacters(in: .whitespacesAndNewlines),
-              code.range(of: "^[A-Za-z0-9-]{1,20}$", options: .regularExpression) != nil,
+              code.count <= 20,
+              code.range(of: "^" + PickupFieldProtection.tokenPattern + "$", options: .regularExpression) != nil,
               let regex = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: code)) else { return false }
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         guard !matches.isEmpty else { return false }
         let protected = PickupFieldProtection.ranges(in: text)
-        let word = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_/.:@?=&%")
-        let pickupLabel = #"(?:取件|取货|取餐|提货)码\s*(?:是|为)?\s*[:：\-－—]?\s*$"#
+        let pickupLabel = #"(?:取件|取货|取餐|提货)码\s*(?:是|为)?\s*[:：\-－﹣‐‑‒–—−]?\s*$"#
         return matches.allSatisfy { match in
             guard PickupFieldProtection.allows(code, range: match.range, protected: protected),
                   let whole = Range(match.range, in: text) else { return false }
-            let start = whole.lowerBound, end = whole.upperBound
-            let prefix = String(text[..<start])
+            let prefix = String(text[..<whole.lowerBound])
             let explicitlyLabeled = prefix.range(of: pickupLabel, options: .regularExpression) != nil
-            // Permit a label's separator, but not a suffix inside a longer code.
-            if start > text.startIndex,
-               text[text.index(before: start)].unicodeScalars.contains(where: { word.contains($0) }),
-               !explicitlyLabeled { return false }
-            if end < text.endIndex,
-               text[end].unicodeScalars.contains(where: { word.contains($0) }) { return false }
+            guard PickupFieldProtection.isWholeToken(match.range, in: text, labeled: explicitlyLabeled),
+                  !PickupFieldProtection.hasAdjacentListItem(to: match.range, in: text) else { return false }
             if code.allSatisfy({ $0.isNumber }) && code.count >= 7 {
                 guard code.count == 8 && explicitlyLabeled else { return false }
             }
@@ -422,7 +413,7 @@ final class AIService {
                 // Structural multiplicity guard only, after exact whole-notice
                 // repetition removal. Do not silently choose one parcel or erase
                 // its location and return apparent success.
-                let labelPattern = try? NSRegularExpression(pattern: "(?:取件|取货|取餐|提货)码")
+                let labelPattern = try? NSRegularExpression(pattern: "取件[码碼]|取货码|取貨碼|取餐[码碼]|提货码|提貨碼|凭证码?|憑證碼?|核销码|核銷碼")
                 let labelCount = labelPattern?.numberOfMatches(in: notification, range: NSRange(notification.startIndex..., in: notification)) ?? 0
                 let occurrences = notification.components(separatedBy: code).count - 1
                 guard labelCount <= 1, occurrences == 1 else { throw AIServiceError.invalidResponse }

@@ -8,7 +8,7 @@ on:
         type: boolean
         default: false
       widget_diagnostics:
-        description: Build extra static/read-only diagnostic widgets (artifact only)
+        description: Build diagnostic widgets including writable completion buttons; use test data only (artifact only)
         type: boolean
         default: false
   push:

@@ -189,6 +189,15 @@ final class PickupTextParserTests: XCTestCase {
         }
     }
 
+    func testUnsupportedTokensAreNotTruncatedAndTerminatorsRemainValid() {
+        for code in ["ABC.123", "ABC/123", "ABC@123", "ABC=123"] {
+            XCTAssertTrue(parser.parse("取件码" + code).candidates.isEmpty, code)
+        }
+        for code in ["00A-1#", "ABC_123", "ABC+123", "ABC*123"] {
+            XCTAssertEqual(parser.parse("取件码" + code + ".").candidates.map(\.code), [code])
+        }
+    }
+
     func testPickupLabelInProtectedIdentifier() {
         XCTAssertTrue(parser.parse("订单号提货码123456").candidates.isEmpty)
     }

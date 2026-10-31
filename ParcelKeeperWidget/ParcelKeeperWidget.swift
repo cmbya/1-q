@@ -63,10 +63,16 @@ struct CompletePickupIntent: AppIntent {
     static var title: LocalizedStringResource = "标记取件完成"
     @Parameter(title: "分组 ID") var groupID: String
     @Parameter(title: "记录 ID") var recordID: String
+    // Optional only for decoding pre-upgrade widget actions; missing snapshots fail closed.
+    @Parameter(title: "显示的取件码") var expectedCode: String?
+    @Parameter(title: "显示时的记录版本") var expectedUpdatedAt: String?
     init() {}
-    init(groupID: UUID, recordID: UUID) {
+    init(groupID: UUID, record: PickupRecord) {
         self.groupID = groupID.uuidString
-        self.recordID = recordID.uuidString
+        self.recordID = record.id.uuidString
+        self.expectedCode = record.code
+        // A Double string round-trips fractional dates without formatter precision loss.
+        self.expectedUpdatedAt = String(record.updatedAt.timeIntervalSinceReferenceDate)
     }
     func perform() async throws -> some IntentResult {
         guard let group = UUID(uuidString: groupID), let record = UUID(uuidString: recordID) else {
@@ -75,14 +81,8 @@ struct CompletePickupIntent: AppIntent {
         do {
             _ = try WidgetStore.defaults()
             let store = try WidgetStore.open()
-            try store.transaction { data in
-                guard data.groups.contains(where: { $0.id == group }),
-                      let index = data.records.firstIndex(where: { $0.id == record && $0.groupID == group }) else {
-                    throw PickupStorageError.notFound
-                }
-                data.records[index].isCompleted = true
-                data.records[index].updatedAt = Date()
-            }
+            try store.completePickup(groupID: group, recordID: record,
+                                     expectedCode: expectedCode, expectedUpdatedAt: expectedUpdatedAt)
         } catch {
             // Keep the stored message generic: errors may contain private data.
             do { try WidgetStore.setError("标记失败，请打开 App 检查后重试", group: group) }
@@ -160,7 +160,7 @@ struct PickupWidgetView: View {
                 ForEach(Array(entry.records.prefix(capacity))) { record in
                     HStack(spacing: 4) {
                         if let group = entry.groupID {
-                            Button(intent: CompletePickupIntent(groupID: group, recordID: record.id)) {
+                            Button(intent: CompletePickupIntent(groupID: group, record: record)) {
                                 Image(systemName: "checkmark.circle")
                             }
                             .buttonStyle(.plain)

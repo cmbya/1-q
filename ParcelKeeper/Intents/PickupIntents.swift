@@ -58,6 +58,23 @@ struct PickupIntentService {
         reloadWidget()
     }
 
+    func addManually(code: String, location: String?, groupID: UUID, source: String?,
+                     confirmBeforeSaving: Bool, confirm: (String) async throws -> Void) async throws {
+        var expectedGroupName: String?
+        if confirmBeforeSaving {
+            // AppEntity may have been resolved before a rename. Confirm a fresh name,
+            // then require that exact name under the same lock as the eventual write.
+            guard let group = try groups().first(where: { $0.id == groupID }) else { throw PickupIntentError.invalidGroup }
+            expectedGroupName = group.name
+            try Task.checkCancellation()
+            try await confirm(group.name)
+        }
+        try Task.checkCancellation()
+        // With confirmation disabled, add still validates the stable ID atomically.
+        try add(code: code, location: location, groupID: groupID, source: source,
+                expectedGroupName: expectedGroupName)
+    }
+
     @discardableResult
     func recognize(text: String, groupID: UUID,
                    confirm: (PickupTextParser.Candidate, String) async throws -> Void) async throws -> String {
@@ -129,13 +146,12 @@ struct AddPickupIntent: AppIntent {
     @Parameter(title: "写入前确认", default: true) var confirmBeforeSaving: Bool
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        if confirmBeforeSaving {
-            let dialog: IntentDialog = "请确认保存取件码：\(code)，地点：\(location ?? "未提供")，分组：\(group.name)。"
+        try await PickupIntentService.live().addManually(code: code, location: location, groupID: group.id,
+                                                       source: source, confirmBeforeSaving: confirmBeforeSaving) { groupName in
+            let dialog: IntentDialog = "请确认保存取件码：\(code)，地点：\(location ?? "未提供")，分组：\(groupName)。"
             if #available(iOS 18.0, *) { try await requestConfirmation(dialog: dialog) }
             else { try await requestConfirmation(result: .result(dialog: dialog), showPrompt: true) }
         }
-        try Task.checkCancellation()
-        try PickupIntentService.live().add(code: code, location: location, groupID: group.id, source: source)
         return .result(dialog: "取件码已保存。")
     }
 }

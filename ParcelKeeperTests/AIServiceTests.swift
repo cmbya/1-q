@@ -97,6 +97,14 @@ final class AIServiceTests: XCTestCase {
         XCTAssertEqual((body["messages"] as? [[String: String]])?.first?["content"], "下一次请求的新提示词")
     }
 
+    func testValidPickupFollowedByURLIsNotAList() async throws {
+        try enableShipmentAI()
+        for tail in ["https://example.test/detail", "www.example.test/detail"] {
+            network.responses = [(200, response("00123"))]
+            let result = try await service.extract("取件码00123，" + tail)
+            XCTAssertEqual(result.code, "00123")
+        }
+    }
     func testPickupAIAllowsExactRepeatedNotificationsIncludingMultiline() async throws {
         try enableShipmentAI()
         for notification in ["取件码00123 地点测试柜", "通知\n取件码00123\n地点测试柜"] {
@@ -144,6 +152,22 @@ final class AIServiceTests: XCTestCase {
         catch let error as AIServiceError {
             guard case .allModelsFailed = error else { return XCTFail("Unexpected error: \(error)") }
         }
+    }
+
+    func testPickupAIRejectsListsAndPreservesWholeSymbolTokens() async throws {
+        try enableShipmentAI()
+        for text in ["取件码00123、00456", "取件码00123、00123", "凭证 00123、00456", "凭证00123 地点甲柜\n凭证00456 地点乙柜", "凭证00123 地点甲柜\n凭证00123 地点乙柜"] {
+            try await assertPickupRejected(text)
+        }
+        for code in ["00A-1#", "ABC_123", "ABC+123", "ABC*123", "3—4—1366"] {
+            network.responses = [(200, response(code))]
+            let result = try await service.extract("凭证 " + code)
+            XCTAssertEqual(result.code, code)
+        }
+        for suffix in ["#", "_123", ".123", "/123", "—123"] {
+            try await assertPickupRejected("取件码00A-1" + suffix, code: "00A-1")
+        }
+        try await assertPickupRejected("取件码ABC.123", code: "ABC.123")
     }
 
     func testPickupAIUsesSemanticResultWithoutLocalCandidateRequirement() async throws {

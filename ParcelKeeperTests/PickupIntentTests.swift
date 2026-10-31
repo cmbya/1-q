@@ -34,6 +34,82 @@ final class PickupIntentTests: XCTestCase {
         XCTAssertEqual(try store.snapshot().records.count, 1)
     }
 
+    func testManualConfirmationDisplaysFreshNameAndSavesToStableID() async throws {
+        let stale = try XCTUnwrap(service.groups().first)
+        try store.transaction { data in
+            let i = try XCTUnwrap(data.groups.firstIndex { $0.id == stale.id })
+            data.groups[i].name = "最新名称"
+        }
+        var confirmations = 0
+        try await service.addManually(code: " 001 ", location: "柜台", groupID: stale.id,
+                                      source: "手动", confirmBeforeSaving: true) { name in
+            confirmations += 1
+            XCTAssertEqual(name, "最新名称")
+            XCTAssertNotEqual(name, stale.name)
+        }
+        XCTAssertEqual(confirmations, 1)
+        let record = try XCTUnwrap(store.snapshot().records.first)
+        XCTAssertEqual(record.groupID, stale.id)
+        XCTAssertEqual(record.code, "001")
+        XCTAssertEqual(record.location, "柜台")
+        XCTAssertEqual(record.source, "手动")
+    }
+
+    func testManualConfirmationRenameOrDeletionRejectsWriteAndWidgetReload() async throws {
+        let group = try XCTUnwrap(service.groups().last)
+        var reloads = 0
+        service.reloadWidget = { reloads += 1 }
+        for delete in [false, true] {
+            do {
+                try await service.addManually(code: "123", location: nil, groupID: group.id,
+                                              source: nil, confirmBeforeSaving: true) { _ in
+                    try self.store.transaction { data in
+                        if delete { data.groups.removeAll { $0.id == group.id } }
+                        else {
+                            let i = try XCTUnwrap(data.groups.firstIndex { $0.id == group.id })
+                            data.groups[i].name = "确认期间改名"
+                        }
+                    }
+                }
+                XCTFail("changed group must not be saved under an unconfirmed name")
+            } catch PickupIntentError.invalidGroup {}
+            XCTAssertTrue(try store.snapshot().records.isEmpty)
+        }
+        XCTAssertEqual(reloads, 0)
+    }
+
+    func testManualWithoutConfirmationStillValidatesIDAndAllowsRenamedGroup() async throws {
+        let stale = try XCTUnwrap(service.groups().last)
+        try store.transaction { data in
+            let i = try XCTUnwrap(data.groups.firstIndex { $0.id == stale.id })
+            data.groups[i].name = "无需确认的新名称"
+        }
+        try await service.addManually(code: "123", location: nil, groupID: stale.id,
+                                      source: nil, confirmBeforeSaving: false) { _ in XCTFail("confirmation disabled") }
+        XCTAssertEqual(try store.snapshot().records.first?.groupID, stale.id)
+        let missing = UUID()
+        let before = try store.snapshot()
+        do {
+            try await service.addManually(code: "456", location: nil, groupID: missing,
+                                          source: nil, confirmBeforeSaving: false) { _ in XCTFail("invalid ID") }
+            XCTFail("missing group must fail even without confirmation")
+        } catch PickupIntentError.invalidGroup {}
+        XCTAssertEqual(try store.snapshot(), before)
+    }
+
+    func testManualCancelledConfirmationDoesNotWrite() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        var reloads = 0
+        service.reloadWidget = { reloads += 1 }
+        do {
+            try await service.addManually(code: "123", location: nil, groupID: id,
+                                          source: nil, confirmBeforeSaving: true) { _ in throw CancellationError() }
+            XCTFail("cancelled confirmation must fail")
+        } catch is CancellationError {}
+        XCTAssertTrue(try store.snapshot().records.isEmpty)
+        XCTAssertEqual(reloads, 0)
+    }
+
     func testStableGroupIDAndRename() throws {
         let original = try XCTUnwrap(service.groups().first)
         try store.transaction { data in

@@ -46,7 +46,9 @@ struct SettingsView: View {
                     Text("备份包含取件码、地址和快递信息，请谨慎分享。")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button {
-                        exportURL = store.makeBackupFile()
+                        exportURL = nil
+                        if let generated = store.makeBackupFile() { exportURL = generated }
+                        else { importResultMessage = "备份生成失败：\(store.lastErrorMessage ?? "未能创建备份文件，请检查共享存储和可用空间。")" }
                     } label: {
                         Label("生成 JSON 备份", systemImage: "square.and.arrow.up")
                     }

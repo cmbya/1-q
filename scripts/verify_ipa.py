@@ -97,6 +97,9 @@ def verify(path):
         require(main_path + "Assets.car" in names, "Missing compiled asset catalog")
         for key in ("CFBundleShortVersionString", "CFBundleVersion", "MinimumOSVersion", "ParcelKeeperAppGroup"):
             require(main.get(key) and main[key] == widget.get(key), f"Main/widget mismatch: {key}")
+        group = main.get("ParcelKeeperAppGroup")
+        require(isinstance(group, str) and re.fullmatch(r"group\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*", group),
+                "Invalid App Group identifier")
         minimum = os_version(main["MinimumOSVersion"])
         for prefix, info in ((main_path, main), (widget_path, widget)):
             executable = info.get("CFBundleExecutable")
@@ -163,6 +166,12 @@ class VerifierTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case), self.assertRaises(ValueError):
                 verify(self.ipa(**case))
+
+    def test_app_group_requires_valid_string_identifier(self):
+        for invalid in (123, True, "123", "group.", " group.test", "group.test ", "group.test/invalid", "group..test"):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                verify(self.ipa(main_changes={"ParcelKeeperAppGroup": invalid},
+                                widget_changes={"ParcelKeeperAppGroup": invalid}))
 
     def test_invalid_commands_and_fat_bounds(self):
         data = bytearray(self.binary())

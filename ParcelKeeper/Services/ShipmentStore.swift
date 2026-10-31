@@ -209,8 +209,23 @@ final class ShipmentStore: ObservableObject {
     func updateReminderThrowing(id: UUID, date: Date?) throws { try updateThrowing(id: id) { $0.reminderDate = date; $0.updatedAt = Date() } }
 
     @discardableResult func createGroup(name: String) throws -> UUID {
-        let group = PickupGroup(name: name, sortOrder: (groups.map(\.sortOrder).max() ?? -1) + 1)
-        try change { $0.groups.append(group) }; return group.id
+        try change { data in
+            // Derive the append position from the locked dataset, never this store's cache.
+            var maximum = data.groups.map(\.sortOrder).max() ?? -1
+            if maximum == Int.max {
+                // Imported orders can exhaust Int. Compact only then, preserving business
+                // order (and stored array order for ties), identities, dates and links.
+                let indices = data.groups.indices.sorted {
+                    let lhs = data.groups[$0].sortOrder, rhs = data.groups[$1].sortOrder
+                    return lhs == rhs ? $0 < $1 : lhs < rhs
+                }
+                for (order, index) in indices.enumerated() { data.groups[index].sortOrder = order }
+                maximum = data.groups.count - 1
+            }
+            let group = PickupGroup(name: name, sortOrder: maximum + 1)
+            data.groups.append(group)
+            return group.id
+        }
     }
     func renameGroup(id: UUID, name: String) throws { try change { d in
         guard let i = d.groups.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }

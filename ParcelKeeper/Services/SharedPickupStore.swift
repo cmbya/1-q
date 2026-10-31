@@ -3,7 +3,7 @@ import Darwin
 import CryptoKit
 
 enum PickupStorageError: LocalizedError {
-    case appGroupUnavailable, requiresMainApp, invalidData(String), notFound, nonEmptyGroup, stalePreview, conflictConfirmationRequired, queryInProgress
+    case appGroupUnavailable, requiresMainApp, invalidData(String), notFound, nonEmptyGroup, stalePreview, staleCompletion, conflictConfirmationRequired, queryInProgress
     var errorDescription: String? {
         switch self {
         case .queryInProgress: return "这票快递正在查询，请等待本次查询结束，未重复发送请求。"
@@ -13,6 +13,7 @@ enum PickupStorageError: LocalizedError {
         case .notFound: return "记录或分组不存在。"
         case .nonEmptyGroup: return "分组非空，请先选择迁移目标。"
         case .stalePreview: return "数据已变化，请重新预览导入。"
+        case .staleCompletion: return "记录已变化或组件已过期，请刷新组件后重试。"
         case .conflictConfirmationRequired: return "备份存在冲突，请预览并选择冲突处理方式。"
         }
     }
@@ -212,6 +213,31 @@ final class SharedPickupStore {
             return result
         }
     }
+    // Compare the displayed snapshot against current data under the same short file lock
+    // as the write. Version checking deliberately rejects even note/location-only edits,
+    // as well as code changes that were later reverted and completion/reopen cycles.
+    // Nil is accepted only to reject legacy intent metadata, never as a bypass/default.
+    func completePickup(groupID: UUID, recordID: UUID, expectedCode: String?, expectedUpdatedAt: String?) throws {
+        try transaction { data in
+            guard let expectedCode = expectedCode,
+                  !expectedCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let version = expectedUpdatedAt.flatMap({ Double($0) }), version.isFinite else {
+                throw PickupStorageError.staleCompletion
+            }
+            guard data.groups.contains(where: { $0.id == groupID }),
+                  let index = data.records.firstIndex(where: { $0.id == recordID && $0.groupID == groupID }) else {
+                throw PickupStorageError.notFound
+            }
+            let current = data.records[index]
+            guard !current.isCompleted, current.code == expectedCode,
+                  current.updatedAt.timeIntervalSinceReferenceDate == version else {
+                throw PickupStorageError.staleCompletion
+            }
+            data.records[index].isCompleted = true
+            data.records[index].updatedAt = Date()
+        }
+    }
+
     func exportBackup() throws -> Data { try locked { try encoder.encode(readOrMigrate()) } }
     func previewBackup(_ bytes: Data) throws -> BackupPreview {
         try locked {

@@ -2,6 +2,16 @@ import XCTest
 @testable import ParcelKeeper
 
 final class SmartShipmentParserTests: XCTestCase {
+    func testValidCodeBesideURLAndLongSymbolSuffixRemainOneParcel() throws {
+        let header = "运单号：YT1234567890123 待取件，取件码："
+        for tail in ["，https://example.test/detail", "，www.example.test/detail"] {
+            XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + "123" + tail).first).pickupCode, "123")
+        }
+        for code in ["ABC*12345678", "ABC#12345678", "ABC+12345678", "ABC_12345678"] {
+            XCTAssertEqual(SmartShipmentParser.parse(header + code).count, 1)
+            XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + code).first).pickupCode, code)
+        }
+    }
     func testStationReceiptIsNotRecipientCompletionAndEightDigitCodeIsWhole() throws {
         for receipt in ["已签收，菜鸟驿站代收", "已簽收，豐巢快遞櫃代收"] {
             let draft = try XCTUnwrap(SmartShipmentParser.parse("运单号：YT1234567890123 \(receipt)，取件码：12345678").first)
@@ -80,11 +90,17 @@ final class SmartShipmentParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(mixed).first).pickupCode, "2222")
     }
 
-    func testUnsupportedSymbolCodesAreRejectedWholeInsteadOfTruncated() throws {
-        for code in ["00A-1#", "ABC_123", "ABC+123", "ABC*123"] {
-            let draft = try XCTUnwrap(SmartShipmentParser.parse("运单号：YT1234567890123 待取件，取件码：" + code).first)
-            XCTAssertEqual(draft.pickupCode, "", code)
+    func testWholeSymbolCodesAndAmbiguity() throws {
+        let header = "运单号：YT1234567890123 待取件，"
+        for code in ["00A-1#", "ABC_123", "ABC+123", "ABC*123", "3—4—1366"] {
+            let draft = try XCTUnwrap(SmartShipmentParser.parse(header + "取件码：" + code).first)
+            XCTAssertEqual(draft.pickupCode, code.replacingOccurrences(of: "—", with: "-"), code)
         }
+        for body in ["取件码123、456", "取件码123、123", "取件码123 地点甲柜\n取件码123 地点乙柜", "取件码ABC.123", "取件码ABC/123"] {
+            XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + body).first).pickupCode, "", body)
+        }
+        let notice = header + "取件码123，地点甲柜。"
+        XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(notice + "\n" + notice).first).pickupCode, "123")
     }
     func testJSONAndUniqueRepeatedTrackingNumber() throws {
         let json = #"{"trackingNumber":"YT1234567890123","logisticsInfo":"驿站已签收，取件码12345678"}"#

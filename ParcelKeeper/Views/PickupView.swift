@@ -321,7 +321,7 @@ private struct PickupImportView: View {
                         Text("请选择").tag(Optional<UUID>.none)
                         ForEach(store.groups) { Text($0.name).tag(Optional($0.id)) }
                     }
-                }
+                }.disabled(processing)
             }
             .navigationTitle("识别取码")
             .toolbar {

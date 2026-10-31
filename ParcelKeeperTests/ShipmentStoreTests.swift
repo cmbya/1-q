@@ -15,6 +15,53 @@ final class ShipmentStoreTests: XCTestCase {
         Shipment(trackingNumber: UUID().uuidString, carrierName: "测试", carrierCode: "test", status: status, note: "来源", pickupCode: "42")
     }
 
+    func testCreateGroupAppendsUsingLatestOrderAcrossStaleStores() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let otherShared = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("absent.json"), containerURL: root)
+        let other = ShipmentStore(storageProvider: { otherShared })
+        let original = app.groups.map(\.id)
+        let first = try other.createGroup(name: "先添加")
+        let second = try app.createGroup(name: "后添加")
+        XCTAssertEqual(app.groups.map(\.id), original + [first, second])
+        XCTAssertEqual(Set(app.groups.map(\.sortOrder)).count, app.groups.count)
+        let reversed = Array(app.groups.map(\.id).reversed())
+        try other.reorderGroups(ids: reversed)
+        let third = try app.createGroup(name: "排序后添加")
+        XCTAssertEqual(app.groups.map(\.id), reversed + [third])
+        XCTAssertEqual(try shared.snapshot().groups.count, original.count + 3)
+    }
+
+    func testCreateGroupAfterExtremeBackupNormalizesOrderWithoutChangingIdentity() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let groupID = try XCTUnwrap(app.groups.first?.id)
+        _ = try app.addPickupRecord(groupID: groupID, code: "保留关联")
+        var incoming = try shared.snapshot()
+        // Include tied maximum values and a negative value in non-business array order.
+        incoming.groups[0].sortOrder = Int.max
+        incoming.groups[1].sortOrder = Int.min
+        incoming.groups.append(PickupGroup(name: "同序分组", sortOrder: Int.max))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let preview = try shared.previewBackup(encoder.encode(incoming))
+        try app.confirmBackupImport(preview, policy: .replaceExisting)
+        let before = try shared.snapshot()
+        let ordered = before.groups.sorted { $0.sortOrder < $1.sortOrder }
+        let created = try app.createGroup(name: "极值后添加")
+        let after = try shared.snapshot()
+        XCTAssertEqual(app.groups.map(\.id), ordered.map(\.id) + [created])
+        XCTAssertEqual(app.groups.map(\.sortOrder), Array(0..<app.groups.count))
+        for group in before.groups {
+            var expected = group
+            expected.sortOrder = try XCTUnwrap(ordered.firstIndex { $0.id == group.id })
+            XCTAssertEqual(after.groups.first { $0.id == group.id }, expected)
+        }
+        XCTAssertEqual(after.expressGroupID, before.expressGroupID)
+        XCTAssertEqual(after.records, before.records)
+        XCTAssertEqual(after.shipments, before.shipments)
+    }
+
     func testManualCarrierCorrectionClearsOnlyStaleProviderCode() throws {
         let (root, shared, app) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

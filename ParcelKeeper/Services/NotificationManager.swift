@@ -13,6 +13,46 @@ enum ReminderCompensation {
     }
 }
 
+/// Backup data is already committed when this runs: never restore a pre-import
+/// request after scheduling fails. Closure injection keeps tests off the real center.
+/// On return, owned requests contain only successfully scheduled future imports;
+/// requests outside the shipment-reminder namespace are never removed.
+enum ReminderReconciliation {
+    private static let prefix = "shipment-reminder-"
+
+    static func identifier(for id: UUID) -> String { "\(prefix)\(id.uuidString)" }
+
+    static func reconcile(
+        shipments: [Shipment],
+        now: Date,
+        pendingIdentifiers: () async -> [String],
+        requestAuthorization: () async -> Bool,
+        schedule: (Shipment, Date) async throws -> Void,
+        remove: ([String]) -> Void
+    ) async -> [String] {
+        // Clear same-ID requests too: add() may fail without replacing their old
+        // dates/content. Also clears obsolete, expired and disabled reminders.
+        let owned = await pendingIdentifiers().filter { $0.hasPrefix(prefix) }
+        if !owned.isEmpty { remove(owned) }
+        let future = shipments.filter { ($0.reminderDate ?? .distantPast) > now }
+        guard !future.isEmpty else { return [] }
+        guard await requestAuthorization() else {
+            return ["没有通知权限，无法恢复未来提醒；旧快递通知已清除，导入的未来提醒均未启用。"]
+        }
+        var errors: [String] = []
+        for shipment in future {
+            guard let date = shipment.reminderDate else { continue }
+            do { try await schedule(shipment, date) }
+            catch {
+                // Defensive cleanup if scheduling partially succeeded before throwing.
+                remove([identifier(for: shipment.id)])
+                errors.append("\(shipment.trackingNumber)：\(error.localizedDescription)（此提醒未启用，旧通知已清除）")
+            }
+        }
+        return errors
+    }
+}
+
 final class NotificationManager {
     static let shared = NotificationManager()
 
@@ -58,22 +98,14 @@ final class NotificationManager {
 
     // Reconcile only our own requests after a successful backup import.
     func reconcileReminders(with shipments: [Shipment]) async -> [String] {
-        let future = shipments.filter { ($0.reminderDate ?? .distantPast) > Date() }
-        let desired = Set(future.map { reminderIdentifier(for: $0.id) })
-        let pending = await center.pendingNotificationRequests()
-        let obsolete = pending.map(\.identifier).filter {
-            $0.hasPrefix("shipment-reminder-") && !desired.contains($0)
-        }
-        center.removePendingNotificationRequests(withIdentifiers: obsolete)
-        guard !future.isEmpty else { return [] }
-        guard await requestAuthorization() else { return ["没有通知权限，无法恢复未来提醒。"] }
-        var errors: [String] = []
-        for shipment in future {
-            guard let date = shipment.reminderDate else { continue }
-            do { try await scheduleReminder(for: shipment, at: date) }
-            catch { errors.append("\(shipment.trackingNumber)：\(error.localizedDescription)") }
-        }
-        return errors
+        await ReminderReconciliation.reconcile(
+            shipments: shipments,
+            now: Date(),
+            pendingIdentifiers: { await self.center.pendingNotificationRequests().map(\.identifier) },
+            requestAuthorization: { await self.requestAuthorization() },
+            schedule: { shipment, date in try await self.scheduleReminder(for: shipment, at: date) },
+            remove: { self.center.removePendingNotificationRequests(withIdentifiers: $0) }
+        )
     }
 
     enum ReminderError: LocalizedError {
@@ -82,6 +114,6 @@ final class NotificationManager {
     }
 
     private func reminderIdentifier(for id: UUID) -> String {
-        "shipment-reminder-\(id.uuidString)"
+        ReminderReconciliation.identifier(for: id)
     }
 }

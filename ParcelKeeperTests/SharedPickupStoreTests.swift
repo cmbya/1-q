@@ -32,6 +32,139 @@ final class SharedPickupStoreTests: XCTestCase {
                  reminderDate: Date(timeIntervalSinceReferenceDate: 4000.75))
     }
 
+    private func complete(_ store: SharedPickupStore, displayed record: PickupRecord) throws {
+        try store.completePickup(groupID: record.groupID, recordID: record.id,
+                                 expectedCode: record.code,
+                                 expectedUpdatedAt: String(record.updatedAt.timeIntervalSinceReferenceDate))
+    }
+
+    func testWidgetCompletionRejectsChangedCodeEvenWhenVersionWasNotUpdated() throws {
+        let s = try store()
+        let group = try XCTUnwrap(s.snapshot().expressGroupID)
+        let displayed = PickupRecord(groupID: group, code: "X", updatedAt: Date(timeIntervalSinceReferenceDate: 1234.125))
+        try s.transaction { $0.records.append(displayed) }
+        // Simulate another process updating the same ID while the old timeline remains visible.
+        try store().transaction { $0.records[0].code = "Y" }
+        let before = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        XCTAssertThrowsError(try complete(s, displayed: displayed)) { error in
+            guard case PickupStorageError.staleCompletion = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+        XCTAssertEqual(try s.snapshot(), before)
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        XCTAssertFalse(try XCTUnwrap(s.snapshot().records.first).isCompleted)
+        try complete(s, displayed: XCTUnwrap(before.records.first))
+        XCTAssertTrue(try XCTUnwrap(store().snapshot().records.first).isCompleted)
+    }
+
+    func testWidgetCompletionRejectsChangedVersionIncludingSameCodeAndRevertedCode() throws {
+        let s = try store()
+        let group = try XCTUnwrap(s.snapshot().expressGroupID)
+        let displayed = PickupRecord(groupID: group, code: "X", updatedAt: Date(timeIntervalSinceReferenceDate: 1000.125))
+        try s.transaction { $0.records.append(displayed) }
+        // Strict version policy also rejects a note-only edit, despite an unchanged code.
+        try store().transaction {
+            $0.records[0].source = "changed note"
+            $0.records[0].updatedAt = displayed.updatedAt.addingTimeInterval(0.125)
+        }
+        let before = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        XCTAssertThrowsError(try complete(s, displayed: displayed))
+        XCTAssertEqual(try s.snapshot(), before)
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        try s.transaction {
+            $0.records[0].code = "Y"
+            $0.records[0].updatedAt = displayed.updatedAt.addingTimeInterval(1)
+        }
+        try s.transaction {
+            $0.records[0].code = "X"
+            $0.records[0].updatedAt = displayed.updatedAt.addingTimeInterval(2)
+        }
+        let reverted = try s.snapshot()
+        let revertedBytes = try Data(contentsOf: dataURL)
+        XCTAssertThrowsError(try complete(s, displayed: displayed))
+        XCTAssertEqual(try s.snapshot(), reverted)
+        XCTAssertEqual(try Data(contentsOf: dataURL), revertedBytes)
+    }
+
+    func testWidgetCompletionRejectsLegacyMissingMalformedAndInexactSnapshotsWithoutWrites() throws {
+        let s = try store()
+        let group = try XCTUnwrap(s.snapshot().expressGroupID)
+        let displayed = PickupRecord(groupID: group, code: "X-1", updatedAt: Date(timeIntervalSinceReferenceDate: 1000.125))
+        try s.transaction { $0.records.append(displayed) }
+        let before = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        let version = String(displayed.updatedAt.timeIntervalSinceReferenceDate)
+        let snapshots: [(String?, String?)] = [
+            (nil, nil), (nil, version), (displayed.code, nil),
+            (displayed.code, ""), (displayed.code, "not-a-date"),
+            (displayed.code, "nan"), (displayed.code, "inf"),
+            ("", version), ("  ", version), (" X-1 ", version),
+            (displayed.code, "1000")
+        ]
+        for (code, version) in snapshots {
+            XCTAssertThrowsError(try s.completePickup(groupID: group, recordID: displayed.id,
+                                                       expectedCode: code, expectedUpdatedAt: version)) { error in
+                guard case PickupStorageError.staleCompletion = error else { return XCTFail("Unexpected error: \(error)") }
+            }
+            XCTAssertEqual(try s.snapshot(), before)
+            XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        }
+    }
+
+    func testWidgetCompletionRejectsMovedDeletedAndCompletedRecordsWithoutWrites() throws {
+        let s = try store()
+        let initial = try s.snapshot()
+        let group = try XCTUnwrap(initial.expressGroupID)
+        let otherGroup = try XCTUnwrap(initial.groups.first { $0.id != group }).id
+        let displayed = PickupRecord(groupID: group, code: "X")
+        try s.transaction { $0.records.append(displayed) }
+        for mutation in 0..<3 {
+            try s.transaction {
+                switch mutation {
+                case 0: $0.records[0].groupID = otherGroup
+                case 1: $0.records = [displayed]; $0.records[0].isCompleted = true
+                default: $0.records.removeAll()
+                }
+            }
+            let before = try s.snapshot()
+            let bytes = try Data(contentsOf: dataURL)
+            XCTAssertThrowsError(try complete(s, displayed: displayed))
+            XCTAssertEqual(try s.snapshot(), before)
+            XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        }
+    }
+
+    func testWidgetCompletionPreservesLinkedShipmentDuplicateCodesAndManualReopen() throws {
+        try JSONEncoder().encode([shipment()]).write(to: legacy)
+        let s = try store()
+        let initial = try s.snapshot()
+        let displayed = try XCTUnwrap(initial.records.first)
+        let duplicate = PickupRecord(groupID: displayed.groupID, code: displayed.code)
+        try s.transaction { $0.records.append(duplicate) }
+        try complete(s, displayed: displayed)
+        let completed = try store().snapshot()
+        XCTAssertTrue(try XCTUnwrap(completed.records.first { $0.id == displayed.id }).isCompleted)
+        XCTAssertEqual(completed.records.first { $0.id == duplicate.id }, duplicate)
+        XCTAssertEqual(completed.shipments, initial.shipments)
+        let bytes = try Data(contentsOf: dataURL)
+        XCTAssertThrowsError(try complete(s, displayed: displayed))
+        XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        // Main-app manual reopen keeps the same logistics; an old action cannot undo it.
+        try s.transaction {
+            $0.records[0].isCompleted = false
+            $0.records[0].updatedAt = displayed.updatedAt.addingTimeInterval(10)
+        }
+        let reopened = try s.snapshot()
+        let reopenedBytes = try Data(contentsOf: dataURL)
+        XCTAssertThrowsError(try complete(s, displayed: displayed))
+        XCTAssertEqual(try Data(contentsOf: dataURL), reopenedBytes)
+        XCTAssertEqual(try s.snapshot(), reopened)
+        try complete(s, displayed: XCTUnwrap(reopened.records.first { $0.id == displayed.id }))
+        XCTAssertTrue(try XCTUnwrap(s.snapshot().records.first { $0.id == displayed.id }).isCompleted)
+        XCTAssertEqual(try s.snapshot().shipments, initial.shipments)
+    }
+
     func testContendedLockTimesOutWithoutChangingDataAndRecoversAfterUnlock() throws {
         let s = try store()
         let initial = try s.snapshot()
