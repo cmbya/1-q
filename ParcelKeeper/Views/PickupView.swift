@@ -279,13 +279,13 @@ private struct PickupImportView: View {
         NavigationStack {
             Form {
                 Section("主动粘贴") {
-                    Text("仅在点击粘贴后读取文字。本地优先识别；无法识别、结果有歧义，或已识别取件码但缺少地点时，仅在 AI 已开启的情况下将文字发送到配置的服务，该服务可能转发给上游。原文仅在识别或等待替换确认时临时使用，不会保存为记录。")
+                    Text("仅在点击粘贴后读取文字。AI 开启时直接将原文发送到配置的服务，失败不回退；AI 关闭才使用本地识别。服务可能转发给上游。可在 AI 设置中编辑取件码提示词，保存后下次识别生效。原文仅临时使用，不会保存为取件码记录。")
                         .font(.footnote).foregroundStyle(.secondary)
                     if processing {
                         ProgressView("正在识别")
                         Button("取消识别") {
                             requestID = UUID(); task?.cancel(); task = nil; processing = false
-                            status = "识别已取消，请选择本地候选或手动填写。"
+                            status = "识别已取消，未回退本地、未保存；可重新识别或手动填写。"
                         }
                     }
                     else {
@@ -351,38 +351,47 @@ private struct PickupImportView: View {
     }
 
     private func recognize(_ text: String) {
-        let result = PickupTextParser().parse(text)
-        candidates = result.candidates
-        failures = []
+        requestID = UUID()
+        task?.cancel(); task = nil
+        candidates = []; failures = []
         code = ""; location = ""; source = ""
-        needsChoice = result.isAmbiguous || result.candidates.isEmpty
-        if !result.isAmbiguous, result.candidates.count == 1, let candidate = result.candidates.first {
-            code = candidate.code; location = candidate.location ?? ""; source = candidate.source ?? ""
-        }
-        let needsAI = result.isAmbiguous || result.candidates.isEmpty || result.candidates.contains { ($0.location ?? "").isEmpty }
-        guard needsAI else { status = "本地识别完成，请核对并编辑后保存。"; return }
-        guard AIService().loadConfiguration().enabled else {
-            status = "本地结果不确定或未识别；AI 未开启，请选择候选或手动填写。"
+        needsChoice = true
+        let ai = AIService()
+        guard ai.loadConfiguration().enabled else {
+            processing = false
+            let result = PickupTextParser().parse(text)
+            candidates = result.candidates
+            if !result.isAmbiguous, result.candidates.count == 1, let candidate = result.candidates.first {
+                apply(candidate)
+                status = "本次使用本地识别，请核对并编辑后保存。"
+            } else {
+                status = "本次使用本地识别，未得到唯一结果；请选择候选或手动填写。"
+            }
             return
         }
         processing = true
-        status = "本地结果不确定，正在使用已开启的 AI 识别。"
+        status = "本次使用 AI 识别，正在请求；不会回退到本地。"
         let id = UUID()
         requestID = id
         task = Task { @MainActor in
             defer { if requestID == id { processing = false; task = nil } }
             do {
-                let extracted = try await AIService().extract(text)
+                let extracted = try await ai.extract(text)
                 guard !Task.isCancelled, requestID == id else { return }
                 failures = extracted.failures
+                guard !extracted.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    status = "本次使用 AI，未识别到唯一可靠取件码；未保存，请检查原文或手动填写。"
+                    return
+                }
                 let candidate = PickupTextParser.Candidate(code: extracted.code, location: extracted.location, source: extracted.source)
-                candidates.append(candidate)
-                status = "AI 模型 \(extracted.model) 返回候选，请选择并核对。"
+                candidates = [candidate]
+                apply(candidate)
+                status = "本次使用 AI，模型 \(extracted.model) 已填入结果，请核对后保存。"
             } catch {
                 guard !Task.isCancelled, requestID == id else { return }
                 let safeError = (error as? AIServiceError) ?? .unavailable
                 if case .allModelsFailed(let modelFailures) = safeError { failures = modelFailures }
-                status = "AI 识别失败：\(safeError.localizedDescription)。请使用本地候选或手动填写。"
+                status = "本次 AI 识别失败：\(safeError.localizedDescription)。未回退本地、未保存；请重试或手动填写。"
             }
         }
     }

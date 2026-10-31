@@ -13,6 +13,7 @@ struct AISettingsView: View {
     @State private var showingReuse = false
     @State private var reuseSource: String?
     @State private var networkTask: Task<Void, Never>?
+    @State private var hasLoadedConfiguration = false
 
     private var invalidModels: [String] {
         ([config.defaultModel] + config.fallbackModels).filter { !$0.isEmpty && !config.models.contains($0) }
@@ -97,6 +98,13 @@ struct AISettingsView: View {
                         .foregroundStyle(.orange)
                 }
             }
+            Section("取件码识别") {
+                NavigationLink("编辑 AI 取件码提示词") {
+                    PickupPromptEditorView()
+                }
+                Text("App 与快捷指令共用；保存后从下一次取件码 AI 请求起生效，不会自动开启 AI。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Section("连接测试") {
                 Button("发送合成文本测试") { networkTask = Task { await testConnection() } }
                 Text("测试仅发送固定的合成取件文本，不发送您的真实记录；需要先保存配置并启用 AI。")
@@ -110,6 +118,9 @@ struct AISettingsView: View {
         .navigationTitle("AI 服务设置")
         .onDisappear { networkTask?.cancel(); networkTask = nil }
         .onAppear {
+            // Returning from the prompt editor must not discard unsaved service / Key input.
+            guard !hasLoadedConfiguration else { return }
+            hasLoadedConfiguration = true
             saved = service.loadConfiguration()
             config = saved
             updateKeyStatus()
@@ -225,6 +236,118 @@ struct AISettingsView: View {
                 details = failures.map { "\($0.model)：\($0.category.localizedDescription)" }.joined(separator: "；")
             }
             message = "连接测试失败：\(safeError.localizedDescription)" + (details.isEmpty ? "" : "。各模型失败：\(details)")
+        }
+    }
+}
+
+// Kept in this file so both existing project generation and target membership include it.
+private struct PickupPromptEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    private let service = AIService()
+    private let maximumLength = 12_000
+    @State private var draft = ""
+    @State private var savedPrompt = ""
+    @State private var loaded = false
+    @State private var showingReset = false
+    @State private var showingDiscard = false
+    @State private var message: String?
+
+    private var isDirty: Bool { draft != savedPrompt }
+    private var isValid: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.count <= maximumLength
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $draft)
+                    .frame(minHeight: 280)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("AI 取件码识别提示词")
+                Text("\(draft.count) / \(maximumLength) 字符" + (isDirty ? " · 未保存" : " · 无未保存更改"))
+                    .font(.footnote)
+                    .foregroundStyle(isValid ? Color.secondary : Color.red)
+                if !isValid {
+                    Text("提示词不能为空或仅含空白，且不能超过 12000 个字符。")
+                        .font(.footnote).foregroundStyle(.red)
+                }
+            } header: {
+                Text("识别指引")
+            } footer: {
+                Text("只编辑取件码与地点的识别指引；响应格式约束和安全校验由程序固定，不可在此修改。不要填写 API Key、密码或其他秘密；提示词会随 AI 请求发送到配置的服务，该服务可能转发上游。")
+            }
+            Section {
+                Button("保存提示词") { savePrompt() }
+                    .disabled(!loaded || !isValid || !isDirty)
+                Button("恢复默认提示词", role: .destructive) { showingReset = true }
+                    .disabled(!loaded)
+                Text("独立保存，不改变服务地址、API Key、模型选择或 AI 启用状态。保存后无需重新编译，从下一次取件码 AI 请求起生效；App 与快捷指令共用，已发出的请求不会改变。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            if let message {
+                Section("操作结果") { Text(message).textSelection(.enabled) }
+            }
+        }
+        .navigationTitle("取件码提示词")
+        .navigationBarTitleDisplayMode(.inline)
+        // A custom back action prevents navigation from silently dropping the draft.
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    if isDirty { showingDiscard = true } else { dismiss() }
+                } label: {
+                    Label("返回", systemImage: "chevron.backward")
+                }
+            }
+        }
+        .onAppear {
+            guard !loaded else { return }
+            savedPrompt = service.loadPickupPrompt()
+            draft = savedPrompt
+            loaded = true
+        }
+        .onChange(of: draft) { _, _ in message = nil }
+        .confirmationDialog("恢复默认取件码提示词？", isPresented: $showingReset, titleVisibility: .visible) {
+            Button("恢复默认并保存", role: .destructive) {
+                service.resetPickupPrompt()
+                let persisted = service.loadPickupPrompt()
+                guard persisted == AIService.defaultPickupPrompt else {
+                    message = "恢复默认失败，当前草稿尚未保存。"
+                    return
+                }
+                savedPrompt = persisted
+                draft = persisted
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("将立即保存默认提示词，并丢弃此页尚未保存的编辑；不改变 AI 配置或启用状态。")
+        }
+        .confirmationDialog("提示词有未保存的更改", isPresented: $showingDiscard, titleVisibility: .visible) {
+            Button("放弃更改并返回", role: .destructive) { dismiss() }
+            Button("继续编辑", role: .cancel) { }
+        } message: {
+            Text("返回不会自动保存；请继续编辑并点击“保存提示词”，或明确放弃更改。")
+        }
+    }
+
+    private func savePrompt() {
+        guard isValid else {
+            message = "保存失败：提示词须为非空文本，且不能超过 12000 个字符。"
+            return
+        }
+        do {
+            try service.savePickupPrompt(draft)
+            let persisted = service.loadPickupPrompt()
+            guard persisted == draft else {
+                message = "保存校验失败，草稿已保留，请重试。"
+                return
+            }
+            savedPrompt = persisted
+            message = "提示词已保存，将从下一次取件码 AI 请求起生效。"
+        } catch {
+            message = "保存提示词失败：\(error.localizedDescription)。草稿已保留。"
         }
     }
 }

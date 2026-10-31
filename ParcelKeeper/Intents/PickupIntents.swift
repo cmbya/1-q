@@ -58,45 +58,41 @@ struct PickupIntentService {
         reloadWidget()
     }
 
+    @discardableResult
     func recognize(text: String, groupID: UUID,
-                   confirm: (PickupTextParser.Candidate, String) async throws -> Void) async throws {
+                   confirm: (PickupTextParser.Candidate, String) async throws -> Void) async throws -> String {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupIntentError.emptyText }
         guard let group = try groups().first(where: { $0.id == groupID }) else { throw PickupIntentError.invalidGroup }
-        let result = PickupTextParser().parse(text)
-        guard !result.isAmbiguous else { throw PickupIntentError.confirmationRequired }
         let candidate: PickupTextParser.Candidate
-        if result.candidates.count == 1, !result.isAmbiguous, let local = result.candidates.first,
-           !(aiEnabled() && (local.location ?? "").isEmpty) {
-            candidate = local
-        } else {
-            guard aiEnabled() else {
-                if !result.candidates.isEmpty || result.isAmbiguous { throw PickupIntentError.confirmationRequired }
-                throw PickupIntentError.noCandidate
-            }
-            let local = result.candidates.count == 1 ? result.candidates.first : nil
+        let path: String
+        if aiEnabled() {
+            path = "AI"
             do {
                 try Task.checkCancellation()
                 let extracted = try await aiExtract(text)
                 try Task.checkCancellation()
                 guard !extracted.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PickupIntentError.aiFailed }
-                // Enrichment must not silently replace an already grounded code.
-                if let local, extracted.code != local.code { throw PickupIntentError.aiFailed }
                 candidate = PickupTextParser.Candidate(code: extracted.code,
-                    location: extracted.location.isEmpty ? local?.location : extracted.location, source: nil)
+                    location: extracted.location.isEmpty ? nil : extracted.location, source: nil)
             } catch is CancellationError { throw CancellationError() }
             catch AIServiceError.cancelled { throw AIServiceError.cancelled }
-            catch {
-                guard let local else { throw PickupIntentError.aiFailed }
-                // Only optional enrichment failed. Confirmation still shows the
-                // local code and an unknown location rather than losing the code.
-                candidate = local
+            catch { throw PickupIntentError.aiFailed }
+        } else {
+            path = "本地"
+            let result = PickupTextParser().parse(text)
+            guard !result.isAmbiguous else { throw PickupIntentError.confirmationRequired }
+            guard result.candidates.count == 1, let local = result.candidates.first else {
+                throw PickupIntentError.noCandidate
             }
+            candidate = local
         }
+        try Task.checkCancellation()
         try await confirm(candidate, group.name)
         try Task.checkCancellation()
         // Never persist the input text or inferred source; validate the displayed group again atomically.
         try add(code: candidate.code, location: candidate.location, groupID: groupID,
                 source: nil, expectedGroupName: group.name)
+        return path
     }
 }
 
@@ -153,7 +149,7 @@ struct RecognizePickupIntent: AppIntent {
     @Parameter(title: "写入前确认", default: true) var confirmBeforeSaving: Bool
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        try await PickupIntentService.live().recognize(text: text, groupID: group.id) { candidate, groupName in
+        let path = try await PickupIntentService.live().recognize(text: text, groupID: group.id) { candidate, groupName in
             guard confirmBeforeSaving else { return }
             let location = candidate.location ?? "未识别"
             let dialog: IntentDialog = "请确认保存取件码：\(candidate.code)，地点：\(location)，分组：\(groupName)。"
@@ -163,6 +159,6 @@ struct RecognizePickupIntent: AppIntent {
                 try await requestConfirmation(result: .result(dialog: dialog), showPrompt: true)
             }
         }
-        return .result(dialog: "取件码已保存。")
+        return .result(dialog: "取件码已保存（本次识别：\(path)）。")
     }
 }

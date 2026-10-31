@@ -17,7 +17,7 @@ final class PickupIntentTests: XCTestCase {
         try FileManager.default.removeItem(at: directory)
     }
 
-    func testCainiaoWithoutAIAndEnrichmentFailureStillConfirmLocalCode() async throws {
+    func testCainiaoWithoutAIAndAIFailureNeverFallsBack() async throws {
         let id = try XCTUnwrap(service.groups().first?.id)
         try await service.recognize(text: "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密", groupID: id) { candidate, _ in
             XCTAssertEqual(candidate.code, "3-4-1366")
@@ -25,11 +25,13 @@ final class PickupIntentTests: XCTestCase {
         }
         service.aiEnabled = { true }
         service.aiExtract = { _ in throw AIServiceError.invalidResponse }
-        try await service.recognize(text: "取件码-7-8-9012", groupID: id) { candidate, _ in
-            XCTAssertEqual(candidate.code, "7-8-9012")
-            XCTAssertNil(candidate.location)
-        }
-        XCTAssertEqual(try store.snapshot().records.count, 2)
+        do {
+            try await service.recognize(text: "取件码-7-8-9012，到菜鸟驿站取件", groupID: id) { _, _ in
+                XCTFail("AI failure must not confirm a local fallback")
+            }
+            XCTFail("AI failure must throw")
+        } catch PickupIntentError.aiFailed {}
+        XCTAssertEqual(try store.snapshot().records.count, 1)
     }
 
     func testStableGroupIDAndRename() throws {
@@ -104,30 +106,67 @@ final class PickupIntentTests: XCTestCase {
         XCTAssertEqual(records[0].source, "")
     }
 
-    func testAIFallbackAndLocalPriority() async throws {
+    func testAIAlwaysReceivesOriginalTextAndCanChooseDifferentSemanticCode() async throws {
         let id = try XCTUnwrap(service.groups().first?.id)
         var calls = 0
         service.aiEnabled = { true }
-        service.aiExtract = { text in
+        let text = " 取件码00123，到菜鸟驿站取件\n备注：请凭7788领取 "
+        service.aiExtract = { original in
             calls += 1
-            XCTAssertEqual(text, "请凭 7788 到东门领取")
+            XCTAssertEqual(original, text)
             return AIExtraction(code: "7788", location: "东门", source: "私密来源", model: "mock", failures: [])
         }
-        try await service.recognize(text: "取件码00123，到菜鸟驿站取件", groupID: id) { _, _ in }
-        XCTAssertEqual(calls, 0)
-        try await service.recognize(text: "请凭 7788 到东门领取", groupID: id) { candidate, _ in
+        let path = try await service.recognize(text: text, groupID: id) { candidate, _ in
             XCTAssertEqual(candidate.code, "7788")
             XCTAssertEqual(candidate.location, "东门")
             XCTAssertNil(candidate.source)
-            XCTAssertEqual(try self.store.snapshot().records.count, 1)
+            XCTAssertTrue(try self.store.snapshot().records.isEmpty)
         }
+        XCTAssertEqual(path, "AI")
         XCTAssertEqual(calls, 1)
         let records = try store.snapshot().records
-        XCTAssertEqual(records.count, 2)
-        XCTAssertEqual(records[1].source, "")
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records[0].source, "")
     }
 
-    func testAIEnrichesMissingLocalLocation() async throws {
+    func testLocalRouteNeverCallsAIAndReportsPath() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        service.aiExtract = { _ in XCTFail("AI is disabled"); throw AIServiceError.unavailable }
+        let path = try await service.recognize(text: "取件码00123，到菜鸟驿站取件", groupID: id) { _, _ in }
+        XCTAssertEqual(path, "本地")
+    }
+
+    func testExactDuplicateLocalNoticesConfirmOnce() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        let notice = "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密"
+        var confirmations = 0
+        let path = try await service.recognize(text: notice + "\n" + notice, groupID: id) { candidate, _ in
+            confirmations += 1
+            XCTAssertEqual(candidate.code, "3-4-1366")
+            XCTAssertEqual(candidate.location, "菜鸟驿站")
+        }
+        XCTAssertEqual(path, "本地")
+        XCTAssertEqual(confirmations, 1)
+        XCTAssertEqual(try store.snapshot().records.count, 1)
+    }
+
+    func testAIEmptyCodeAndCancellationNeverConfirmOrSave() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        service.aiEnabled = { true }
+        service.aiExtract = { _ in AIExtraction(code: " \n", location: "东门", source: "", model: "mock", failures: []) }
+        do {
+            try await service.recognize(text: "取件码00123", groupID: id) { _, _ in XCTFail("empty AI code") }
+            XCTFail("empty AI result must throw")
+        } catch PickupIntentError.aiFailed {}
+        service.aiExtract = { _ in throw AIServiceError.cancelled }
+        do {
+            try await service.recognize(text: "取件码00123", groupID: id) { _, _ in XCTFail("cancelled AI") }
+            XCTFail("cancellation must propagate")
+        } catch AIServiceError.cancelled {}
+        XCTAssertTrue(try store.snapshot().records.isEmpty)
+    }
+
+    func testAIReturnsLocationWithoutLocalEnrichment() async throws {
         let id = try XCTUnwrap(service.groups().first?.id)
         service.aiEnabled = { true }
         service.aiExtract = { _ in AIExtraction(code: "00123", location: "测试柜", source: "", model: "mock", failures: []) }
@@ -144,11 +183,12 @@ final class PickupIntentTests: XCTestCase {
             calls += 1
             return AIExtraction(code: "00123", location: "", source: "", model: "mock", failures: [])
         }
-        do {
-            try await service.recognize(text: "取件码00123, 00456", groupID: id) { _, _ in XCTFail("ambiguous") }
-            XCTFail("must require app handling")
-        } catch PickupIntentError.confirmationRequired {}
-        XCTAssertEqual(calls, 0)
+        let path = try await service.recognize(text: "取件码00123, 00456", groupID: id) { candidate, _ in
+            XCTAssertEqual(candidate.code, "00123")
+        }
+        XCTAssertEqual(path, "AI")
+        XCTAssertEqual(calls, 1)
+        try store.transaction { $0.records.removeAll() }
         do {
             try await service.recognize(text: "凭00123领取", groupID: id) { _, _ in throw CancellationError() }
             XCTFail("confirmation cancelled")

@@ -35,8 +35,20 @@ struct PickupTextParser {
         // SMS/OCR may use full-width or typographic hyphens inside the code,
         // not only after its label. Normalize before matching/protecting tokens.
         // Do not compatibility-normalize other characters or numeric identifiers.
-        let text = input.replacingOccurrences(of: #"[－﹣‐‑‒–—−]"#,
-                                              with: "-", options: .regularExpression)
+        // Collapse only exact repetitions of the entire notice, never globally
+        // unique codes/locations or repeated lines inside different messages.
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let repetition = try? NSRegularExpression(pattern: #"\A(.+?)(?:\s+\1)+\z"#,
+                                                  options: [.dotMatchesLineSeparators])
+        let repeated = repetition?.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))
+        let notice: String
+        if let repeated, let range = Range(repeated.range(at: 1), in: trimmed) {
+            notice = String(trimmed[range])
+        } else {
+            notice = trimmed
+        }
+        let text = notice.replacingOccurrences(of: #"[－﹣‐‑‒–—−]"#,
+                                               with: "-", options: .regularExpression)
         let full = NSRange(text.startIndex..., in: text)
         func matches(_ pattern: String) -> [NSTextCheckingResult] {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
@@ -72,7 +84,7 @@ struct PickupTextParser {
         }
         let sources = matches(#"【([^【】\n]{1,30})】"#).compactMap { value($0, 1) }
             .filter { $0.range(of: #"(?:取件|取货|取餐|提货)码"#, options: .regularExpression) == nil }
-        let locations = matches(#"(?:送达|至|到|地点\s*[:：]|地址\s*[:：])\s*([^，,。；;！!？?\n]+?)(?:取件|取货|取餐|领取|[，,。；;！!？?\n]|$)"#)
+        let locations = matches(#"(?:送达|至|到|地点\s*[:：]|地址\s*[:：])\s*([^，,。；;！!？?\n]+?)(?:包裹待签收|取件|取货|取餐|领取|【|[，,。；;！!？?\n]|$)"#)
             .compactMap { value($0, 1)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         // Repeated occurrences may represent separate messages, even for identical values.

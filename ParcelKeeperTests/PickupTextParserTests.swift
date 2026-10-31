@@ -18,6 +18,34 @@ final class PickupTextParserTests: XCTestCase {
         XCTAssertTrue(parser.parse("https://example.test/取件码-3-4-1366").candidates.isEmpty)
     }
 
+    func testFlattenedCainiaoNoticeDoesNotPolluteLocation() {
+        let text = "您购买的宝贝已送达菜鸟驿站 包裹待签收【取件码-3-4-1366】，手机号已加密，享号码保护服务，点击查看详情>>"
+        let result = parser.parse(text)
+        XCTAssertEqual(result.candidates.map(\.code), ["3-4-1366"])
+        XCTAssertEqual(result.candidates.first?.location, "菜鸟驿站")
+        XCTAssertFalse(result.isAmbiguous)
+    }
+
+    func testExactRepeatedWholeNoticesAreOneButDifferentNoticesRemainAmbiguous() {
+        let notice = "【菜鸟】取件码001，地点：东门。"
+        for separator in ["\n", "\n\n", " "] {
+            let result = parser.parse(notice + separator + notice)
+            XCTAssertFalse(result.isAmbiguous, separator)
+            XCTAssertEqual(result.candidates.count, 1)
+            XCTAssertEqual(result.candidates.first?.location, "东门")
+            XCTAssertEqual(result.candidates.first?.source, "菜鸟")
+        }
+        let multiline = "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密，享号码保护服务，点击查看详情>>"
+        XCTAssertFalse(parser.parse(multiline + "\n" + multiline).isAmbiguous)
+        for other in ["【菜鸟】取件码001，地点：西门。", "【菜鸟】取件码001，地点：东门。另一个订单"] {
+            let result = parser.parse(notice + "\n" + other)
+            XCTAssertTrue(result.isAmbiguous)
+            XCTAssertNil(result.candidates.first?.location)
+        }
+        // Do not deduplicate a repeated line inside a different whole message.
+        XCTAssertTrue(parser.parse("【甲】\n取件码001\n【乙】\n取件码001").isAmbiguous)
+    }
+
     func testUnicodeHyphensAreNormalizedAcrossWholeTokens() {
         for separator in ["－", "﹣", "‐", "‑", "‒", "–", "—", "−"] {
             let code = "3\(separator)4\(separator)1366"

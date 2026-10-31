@@ -49,6 +49,112 @@ final class AIServiceTests: XCTestCase {
         let envelope: [String: Any] = ["choices": [["message": ["content": String(data: content, encoding: .utf8)!]]]]
         return String(data: try! JSONSerialization.data(withJSONObject: envelope), encoding: .utf8)!
     }
+    func testPickupPromptPersistenceValidationAndResetAreIndependent() throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        let oldJSON = defaults.data(forKey: "ai.configuration")
+        XCTAssertEqual(service.loadPickupPrompt(), AIService.defaultPickupPrompt)
+        let custom = "  自定义语义提示词\n保留空白。  "
+        try service.savePickupPrompt(custom)
+        let reloaded = AIService(defaults: defaults, keys: keys, network: network)
+        XCTAssertEqual(reloaded.loadPickupPrompt(), custom)
+        XCTAssertEqual(defaults.string(forKey: "ai.configuration.pickupPrompt"), custom)
+        XCTAssertEqual(defaults.data(forKey: "ai.configuration"), oldJSON)
+        for invalid in ["", " \n\t", String(repeating: "字", count: 12001)] {
+            XCTAssertThrowsError(try service.savePickupPrompt(invalid))
+            XCTAssertEqual(service.loadPickupPrompt(), custom)
+        }
+        try service.savePickupPrompt(String(repeating: "字", count: 12000))
+        service.resetPickupPrompt()
+        XCTAssertNil(defaults.object(forKey: "ai.configuration.pickupPrompt"))
+        XCTAssertEqual(reloaded.loadPickupPrompt(), AIService.defaultPickupPrompt)
+        XCTAssertEqual(service.loadConfiguration(), config())
+        let isolated = AIService(defaults: defaults, storageKey: "other", keys: keys, network: network)
+        try isolated.savePickupPrompt("独立命名空间")
+        XCTAssertEqual(service.loadPickupPrompt(), AIService.defaultPickupPrompt)
+    }
+
+    func testPickupPromptIsSentSeparatelyAndSnapshottedAcrossFallbacks() async throws {
+        try enableShipmentAI()
+        try service.savePickupPrompt("只按我的语义提取")
+        network.responses = [(503, ""), (200, response("00123"))]
+        network.onRequest = { try self.service.savePickupPrompt("下一次请求的新提示词") }
+        _ = try await service.extract("取件码00123")
+        for request in network.requests {
+            let body = try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as! [String: Any]
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            XCTAssertEqual(messages.count, 3)
+            XCTAssertEqual(messages[0]["role"], "system")
+            XCTAssertEqual(messages[0]["content"], "只按我的语义提取")
+            XCTAssertEqual(messages[1]["role"], "system")
+            for field in ["code", "location", "source", "不可信", "JSON"] {
+                XCTAssertTrue(messages[1]["content"]!.contains(field))
+            }
+            XCTAssertEqual(messages[2]["content"], "取件码00123")
+        }
+        network.responses = [(200, response("00123"))]
+        _ = try await service.extract("取件码00123")
+        let body = try JSONSerialization.jsonObject(with: XCTUnwrap(network.requests.last?.httpBody)) as! [String: Any]
+        XCTAssertEqual((body["messages"] as? [[String: String]])?.first?["content"], "下一次请求的新提示词")
+    }
+
+    func testPickupAIAllowsExactRepeatedNotificationsIncludingMultiline() async throws {
+        try enableShipmentAI()
+        for notification in ["取件码00123 地点测试柜", "通知\n取件码00123\n地点测试柜"] {
+            for separator in ["\n", "\n\n", " "] {
+                network.responses = [(200, response("00123", "测试柜"))]
+                let result = try await service.extract(notification + separator + notification)
+                XCTAssertEqual(result.code, "00123")
+                XCTAssertEqual(result.location, "测试柜")
+            }
+        }
+    }
+
+    private func assertPickupRejected(_ text: String, code: String = "00123", location: String = "") async throws {
+        network.responses = Array(repeating: (200, response(code, location)), count: 3)
+        do { _ = try await service.extract(text); XCTFail("Must reject: \(text)") }
+        catch let error as AIServiceError {
+            guard case let .allModelsFailed(failures) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(failures.map(\.category), [.invalidResponse, .invalidResponse, .invalidResponse])
+        }
+    }
+
+    func testPickupAIRejectsDifferentNotificationsAndEveryUnsafeOccurrence() async throws {
+        try enableShipmentAI()
+        for text in ["取件码00123 地点甲柜\n取件码00123 地点乙柜",
+                     "取件码00123 地点甲柜\n取件码00456 地点乙柜",
+                     "取件码00123\nhttps://example.test/00123",
+                     "取件码00123\n取件码X00123"] {
+            try await assertPickupRejected(text)
+        }
+        try await assertPickupRejected("取件码00123 地点测试柜（已入柜）", location: "测试柜（已入柜）")
+        try await assertPickupRejected("无法确定取件码", code: "")
+    }
+
+    func testPickupDefaultPromptAndExplicitSourceContract() async throws {
+        for requirement in ["code", "location", "source", "完整", "连续", "状态括号", "原文明示", "重复通知", "多票", "不可信"] {
+            XCTAssertTrue(AIService.defaultPickupPrompt.contains(requirement), requirement)
+        }
+        try enableShipmentAI()
+        let text = "【菜鸟】取件码00123，地点测试柜"
+        network.responses = [(200, try shipmentEnvelope(["code": "00123", "location": "测试柜", "source": "菜鸟"]))]
+        let result = try await service.extract(text)
+        XCTAssertEqual(result.source, "菜鸟")
+        network.responses = Array(repeating: (200, try shipmentEnvelope(["code": "00123", "location": "测试柜", "source": "顺丰"])), count: 3)
+        do { _ = try await service.extract(text); XCTFail("Source must be explicit in input") }
+        catch let error as AIServiceError {
+            guard case .allModelsFailed = error else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+
+    func testPickupAIUsesSemanticResultWithoutLocalCandidateRequirement() async throws {
+        try enableShipmentAI()
+        network.responses = [(200, response("AB-12", "测试柜"))]
+        let result = try await service.extract("请到测试柜，出示凭证 AB-12")
+        XCTAssertEqual(result.code, "AB-12")
+        XCTAssertEqual(result.location, "测试柜")
+        XCTAssertEqual(network.requests.count, 1)
+    }
+
     func testAILabeledHyphenCodeAcceptedButSuffixRejected() async throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
@@ -507,11 +613,7 @@ final class AIServiceTests: XCTestCase {
     func testMultipleRecordsDoNotMixLocations() async throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
-        network.responses = [(200, response("00123", "乙柜"))]
-        let result = try await service.extract("取件码 00123 地点甲柜\n取件码 00456 地点乙柜")
-        XCTAssertEqual(result.code, "00123")
-        XCTAssertEqual(result.location, "")
-        XCTAssertEqual(result.source, "")
+        try await assertPickupRejected("取件码 00123 地点甲柜\n取件码 00456 地点乙柜", location: "乙柜")
     }
 
     func testAdjacentChineseAndLocalFieldContext() async throws {
@@ -542,10 +644,11 @@ final class AIServiceTests: XCTestCase {
         let content = try JSONSerialization.data(withJSONObject: ["code": "00123", "location": "乙柜", "source": "乙店"])
         let body = try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": String(data: content, encoding: .utf8)!]]]])
         for other in ["取货码", "取餐码", "提货码", "取件码"] {
-            network.responses = [(200, String(data: body, encoding: .utf8)!)]
-            let result = try await service.extract("取件码00123甲柜，\(other)00456乙柜乙店")
-            XCTAssertEqual(result.location, "")
-            XCTAssertEqual(result.source, "")
+            network.responses = Array(repeating: (200, String(data: body, encoding: .utf8)!), count: 3)
+            do { _ = try await service.extract("取件码00123甲柜，\(other)00456乙柜乙店"); XCTFail("Must not select one parcel") }
+            catch let error as AIServiceError {
+                guard case .allModelsFailed = error else { return XCTFail("Unexpected error: \(error)") }
+            }
         }
     }
     func testConnectionErrorsFallbackButTLSDoesNot() async throws {
