@@ -264,7 +264,7 @@ final class SharedPickupStore {
             let current = TrainTicketSelection.ticket(in: tickets, binding: binding, now: now)
             guard current?.id == expectedTicketID else { throw PickupStorageError.staleCompletion }
             let eligible = TrainTicketSelection.eligibleTickets(in: tickets, now: now)
-            guard eligible.count > 1 else {
+            guard !eligible.isEmpty, current == nil || eligible.count > 1 else {
                 throw PickupStorageError.invalidData("当前没有其他可展示的车票。")
             }
             // Empty fixed bindings can enter browsing on either end of the list.

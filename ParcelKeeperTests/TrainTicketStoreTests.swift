@@ -253,6 +253,23 @@ final class TrainTicketStoreTests: XCTestCase {
         XCTAssertEqual(try shared.snapshot(), before)
     }
 
+    func testEmptyFixedSlotCanBrowseSingleTicket() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = try app.saveTrainTicket(fields())
+        let now = try XCTUnwrap(fields().departure)
+        for direction in [-1, 1] {
+            try app.setTrainWidgetBinding(TrainWidgetBinding(slot: .b, mode: .fixed))
+            try shared.browseTrainWidget(slot: .b, direction: direction, expectedTicketID: nil, now: now)
+            let snapshot = try shared.snapshot()
+            let binding = TrainTicketSelection.binding(for: .b, in: snapshot.trainWidgetBindings ?? [])
+            XCTAssertEqual(binding.browsingTicketID, id)
+            XCTAssertEqual(binding.mode, .automatic)
+            XCTAssertThrowsError(try shared.browseTrainWidget(slot: .b, direction: direction, expectedTicketID: id, now: now))
+            XCTAssertEqual(try shared.snapshot(), snapshot)
+        }
+    }
+
     func testBrowseUsesLockedSelectionWrapsRejectsStaleAndResetClearsFixed() throws {
         let (root, shared, app) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

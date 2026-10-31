@@ -31,6 +31,22 @@ final class TrainTicketRecognitionTests: XCTestCase {
         XCTAssertEqual(try TrainTicketRecognition.parse(missingYear).departureDate, "")
     }
 
+    func testNumericTrainAndShortOrderLabels() throws {
+        let single = Self.labeled.replacingOccurrences(of: "G311", with: "1234")
+        XCTAssertEqual(try TrainTicketRecognition.parse(single).validated().trainNumber, "1234")
+        for extra in ["\n车次：5678", "\n车次：1234"] {
+            XCTAssertThrowsError(try TrainTicketRecognition.parse(single + extra))
+        }
+        for label in ["下单", "订单", "支付", "付款", "出票", "购票", "查询", "生成"] {
+            let raw = Self.inline.replacingOccurrences(of: "下单时间：", with: label + "：")
+            let evidence = TrainTicketRecognition.travelEvidence(raw)
+            XCTAssertFalse(evidence.contains("2026-04-25"), label)
+            XCTAssertFalse(evidence.contains("22:07"), label)
+            XCTAssertTrue(evidence.contains("2026-05-01"), label)
+            XCTAssertEqual(try TrainTicketRecognition.parse(raw), try TrainTicketRecognition.parse(Self.labeled))
+        }
+    }
+
     func testPassengerListsRejectedButEnglishAndMaskedNamesPreserved() throws {
         for name in ["张三 李四", "张三，李四", "张三,李四", "张三、李四", "姜** 张**"] {
             let raw = Self.labeled.replacingOccurrences(of: "姜**", with: name)
