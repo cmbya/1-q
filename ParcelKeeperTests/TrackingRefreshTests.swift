@@ -194,6 +194,39 @@ final class TrackingRefreshTests: XCTestCase {
         _ = try await service.refresh(id: shipment.id)
         XCTAssertEqual(client.calls, 2)
     }
+    func testUnknownCarrierRenameWhileQueryRunsRejectsStaleResponse() async throws {
+        try storage.transaction {
+            $0.shipments[0].carrierCode = CarrierDetector.unknown.code
+            $0.shipments[0].carrierName = "自定义甲"
+        }
+        let client = Client()
+        client.onQuery = { try self.storage.transaction { $0.shipments[0].carrierName = "自定义乙" } }
+        do {
+            _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id)
+            XCTFail("Stale company response must be refused")
+        } catch {}
+        let saved = try XCTUnwrap(storage.snapshot().shipments.first)
+        XCTAssertEqual(saved.carrierName, "自定义乙")
+        XCTAssertNil(saved.queryInfo)
+    }
+    func testReminderCompensationCancelsNewRequestWhenRestoreFails() async throws {
+        var cancelled = false
+        do {
+            try await ReminderCompensation.restore(oldDate: Date(timeIntervalSinceReferenceDate: 20), now: Date(timeIntervalSinceReferenceDate: 10), schedule: { _ in throw UAPIError.unavailable }, cancel: { cancelled = true })
+            XCTFail("Restore failure must remain visible")
+        } catch {}
+        XCTAssertTrue(cancelled)
+    }
+    func testReminderCompensationPreservesSuccessfulRestore() async throws {
+        let date = Date(timeIntervalSinceReferenceDate: 20)
+        var restored: Date?
+        var cancelled = false
+        try await ReminderCompensation.restore(oldDate: date, now: Date(timeIntervalSinceReferenceDate: 10), schedule: { restored = $0 }, cancel: { cancelled = true })
+        XCTAssertEqual(restored, date)
+        XCTAssertFalse(cancelled)
+        try await ReminderCompensation.restore(oldDate: nil, now: date, schedule: { _ in XCTFail() }, cancel: { cancelled = true })
+        XCTAssertTrue(cancelled)
+    }
     func testChangingCarrierWhileQueryRunsRejectsStaleResponse() async throws {
         let client = Client()
         client.onQuery = {

@@ -235,10 +235,15 @@ struct ShipmentDetailView: View {
                 } catch {
                     let saveError = error.localizedDescription
                     // Restore the old request when persistence fails.
-                    if let oldDate = current.reminderDate, oldDate > Date() {
-                        do { try await NotificationManager.shared.scheduleReminder(for: current, at: oldDate) }
-                        catch { reminderError = "提醒保存失败，且旧提醒恢复失败：\(error.localizedDescription)"; restoreReminderControls(); return }
-                    } else { NotificationManager.shared.cancelReminder(for: shipmentID) }
+                    do {
+                        try await ReminderCompensation.restore(oldDate: current.reminderDate,
+                            schedule: { try await NotificationManager.shared.scheduleReminder(for: current, at: $0) },
+                            cancel: { NotificationManager.shared.cancelReminder(for: shipmentID) })
+                    } catch {
+                        reminderError = "提醒保存失败（\(saveError)），且旧提醒恢复失败（\(error.localizedDescription)）；已请求取消本次新提醒，旧提醒未恢复。请重新设置提醒。"
+                        restoreReminderControls()
+                        return
+                    }
                     restoreReminderControls()
                     reminderError = "提醒保存失败：\(saveError)"
                     return

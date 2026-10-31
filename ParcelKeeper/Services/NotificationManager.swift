@@ -1,6 +1,18 @@
 import Foundation
 import UserNotifications
 
+/// Compensate a scheduled replacement when its persistence fails.
+/// A failed restoration must not leave the unsaved replacement active.
+enum ReminderCompensation {
+    static func restore(oldDate: Date?, now: Date = Date(),
+                        schedule: (Date) async throws -> Void,
+                        cancel: () -> Void) async throws {
+        guard let oldDate, oldDate > now else { cancel(); return }
+        do { try await schedule(oldDate) }
+        catch { cancel(); throw error }
+    }
+}
+
 final class NotificationManager {
     static let shared = NotificationManager()
 

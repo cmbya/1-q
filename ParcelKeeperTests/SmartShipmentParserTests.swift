@@ -80,6 +80,12 @@ final class SmartShipmentParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(mixed).first).pickupCode, "2222")
     }
 
+    func testUnsupportedSymbolCodesAreRejectedWholeInsteadOfTruncated() throws {
+        for code in ["00A-1#", "ABC_123", "ABC+123", "ABC*123"] {
+            let draft = try XCTUnwrap(SmartShipmentParser.parse("运单号：YT1234567890123 待取件，取件码：" + code).first)
+            XCTAssertEqual(draft.pickupCode, "", code)
+        }
+    }
     func testJSONAndUniqueRepeatedTrackingNumber() throws {
         let json = #"{"trackingNumber":"YT1234567890123","logisticsInfo":"驿站已签收，取件码12345678"}"#
         let draft = try XCTUnwrap(SmartShipmentParser.parse(json).first)

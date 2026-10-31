@@ -51,7 +51,7 @@ enum SmartShipmentParser {
     }
 
     private static func extractPickupCode(from text: String) -> String {
-        let pattern = #"(?:取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼)\s*[：:为為是]?\s*([A-Z0-9]{1,5}(?:[-－][A-Z0-9]{1,6}){1,2}|[A-Z0-9]{3,12})(?![A-Z0-9－-])"#
+        let pattern = #"(?:取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼)\s*[：:为為是]?\s*([A-Z0-9]{1,5}(?:[-－][A-Z0-9]{1,6}){1,2}|[A-Z0-9]{3,12})(?![A-Z0-9_#*+－-])"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return "" }
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         let protected = PickupFieldProtection.ranges(in: text)

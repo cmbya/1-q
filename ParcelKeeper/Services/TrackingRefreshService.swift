@@ -57,7 +57,10 @@ struct TrackingRefreshService {
                   CarrierDetector.sanitize(data.shipments[index].trackingNumber) == number else { throw PickupStorageError.notFound }
             var current = data.shipments[index]
             guard current.carrierCode == before.carrierCode,
-                  current.uapiCarrierCode == before.uapiCarrierCode else { throw PickupStorageError.stalePreview }
+                  current.uapiCarrierCode == before.uapiCarrierCode,
+                  current.carrierCode != CarrierDetector.unknown.code ||
+                    current.carrierName.trimmingCharacters(in: .whitespacesAndNewlines) == before.carrierName.trimmingCharacters(in: .whitespacesAndNewlines)
+            else { throw PickupStorageError.stalePreview }
             guard current.status != .archived else { throw ShipmentShortcutError.statusConflict }
             if let old = current.logisticsTime {
                 guard let incoming = result.logisticsTime, incoming >= old else { throw ShipmentShortcutError.olderUpdate }
