@@ -16,6 +16,15 @@ final class ShipmentRecognitionTests: XCTestCase {
         }
         XCTAssertEqual(ShipmentShortcutParser.status("请凭取件码取件"), .readyForPickup)
     }
+    func testEmojiDecorationsAreRemovedAsWholeCharacters() throws {
+        for marker in ["📍", "📍️", "🕒", "🕒️"] {
+            let text = "快递单号：JT5539273200253 当前状态：已签收 最新时间： \(marker) 最新进展：本人签收 🔍 查询来源：测试"
+            let result = try ShipmentShortcutParser.parse(text)
+            XCTAssertNil(result.logisticsTime)
+            XCTAssertEqual(result.logisticsInfo, "本人签收")
+            XCTAssertEqual(result.status, .delivered)
+        }
+    }
     func testLabeledMetadataWithoutProgressIsNotSavedAsLogistics() throws {
         let value = try ShipmentShortcutParser.parse("快递单号：JT5539273200253 当前状态：运输中 最新时间： 查询来源：百度搜索")
         XCTAssertNil(value.logisticsInfo)

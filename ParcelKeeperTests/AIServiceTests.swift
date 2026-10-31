@@ -22,6 +22,10 @@ final class AIServiceTests: XCTestCase {
             requests.append(request)
             try onRequest?()
             if let error = error { throw error }
+            guard !responses.isEmpty else {
+                XCTFail("Unexpected network request: mock response queue exhausted")
+                throw AIServiceError.unavailable
+            }
             let (status, body) = responses.removeFirst()
             return (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
         }
@@ -105,7 +109,7 @@ final class AIServiceTests: XCTestCase {
         for label in ["取件码", "取货码", "取餐码", "提货码"] {
             for code in ["001", "12345678", "A-1", String(repeating: "A", count: 20)] {
                 network.responses = [(200, response(code))]
-                let result = try await service.extract("電話號碼13800138000，\(label)：\(code)")
+                let result = try await service.extract("電話號碼13987654320，\(label)：\(code)")
                 XCTAssertEqual(result.code, code)
             }
         }

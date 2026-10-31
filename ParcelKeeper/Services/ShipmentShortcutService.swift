@@ -128,21 +128,35 @@ enum ShipmentShortcutParser {
             Range(match.range(at: 1), in: text).map { text[$0] == "最新进展" || text[$0] == "当前状态" } ?? false
         }) else { return nil }
         var fields: [String: String] = [:]
-        let decorations = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "📦🚚📍🕒🔍\u{FE0F}"))
+        let source = text as NSString
+        let decorations: Set<Character> = ["📦", "🚚", "📍", "🕒", "🔍", "📦️", "🚚️", "📍️", "🕒️", "🔍️"]
+        func cleanField(_ raw: String) -> String {
+            var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            while let first = value.first, decorations.contains(first) {
+                value.removeFirst()
+                value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            while let last = value.last, decorations.contains(last) {
+                value.removeLast()
+                value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return value
+        }
         for (index, match) in matches.enumerated() {
             guard let keyRange = Range(match.range(at: 1), in: text) else { throw ShipmentShortcutError.invalidText }
             let key = String(text[keyRange])
             guard fields[key] == nil else { throw ShipmentShortcutError.ambiguous }
             let end = index + 1 < matches.count ? matches[index + 1].range.location : (text as NSString).length
             let range = NSRange(location: NSMaxRange(match.range), length: end - NSMaxRange(match.range))
-            guard let valueRange = Range(range, in: text) else { throw ShipmentShortcutError.invalidText }
-            fields[key] = String(text[valueRange]).trimmingCharacters(in: decorations)
+            fields[key] = cleanField(source.substring(with: range))
         }
         func value(_ key: String) -> String? { fields[key].flatMap { $0.isEmpty ? nil : $0 } }
         let info = value("最新进展")
         let event = try info.map { try latestEvent(in: $0) }
         let state = value("当前状态").flatMap(status)
-        let observed = event?.state
+        // A labeled progress field owns its body even without a timestamp;
+        // do not let generic page/title filtering discard its status.
+        let observed = event?.state ?? info.flatMap(status)
         // The explicitly labeled current state wins over event wording.
         // Do not search the full query/history for a competing status.
         let suppliedTime = value("最新时间")
