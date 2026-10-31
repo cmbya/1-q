@@ -38,6 +38,7 @@ enum ShipmentShortcutParser {
     static func status(_ text: String) -> ShipmentStatus? {
         // Classify ONE event, never a concatenated history. A station/cabinet
         // receipt is custody, not evidence that the recipient collected it.
+        let raw = text
         let text = text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? text
         if ["异常", "拒收", "退回", "滞留"].contains(where: text.contains) { return .exception }
         if ["未签收", "尚未签收", "待签收", "等待领取", "待取件", "待领取", "尚未领取", "未领取", "等待取件", "请取件"].contains(where: text.contains) { return .readyForPickup }
@@ -45,7 +46,7 @@ enum ShipmentShortcutParser {
         if ["未取件", "未完成", "未收货"].contains(where: text.contains) {
             return ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) ? .readyForPickup : nil
         }
-        if text.range(of: #"(?:请|请尽快|请凭|请使用|请您)[^，。；;！!？?\n]*完成取件"#, options: .regularExpression) != nil { return .readyForPickup }
+        if raw.range(of: #"(?:请|請)[^，。；;！!？?\n]*完成取件"#, options: .regularExpression) != nil { return .readyForPickup }
         if ["本人签收", "收件人签收", "已领取", "已取件", "已收货", "完成取件"].contains(where: text.contains) { return .delivered }
         if ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) { return .readyForPickup }
         if ["已签收", "签收成功", "已完成"].contains(where: text.contains) { return .delivered }

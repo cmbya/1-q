@@ -96,9 +96,11 @@ final class SmartShipmentParserTests: XCTestCase {
             let draft = try XCTUnwrap(SmartShipmentParser.parse(header + "取件码：" + code).first)
             XCTAssertEqual(draft.pickupCode, code.replacingOccurrences(of: "—", with: "-"), code)
         }
-        for body in ["取件码123、456", "取件码123、123", "取件码123 地点甲柜\n取件码123 地点乙柜", "取件码ABC.123", "取件码ABC/123"] {
+        for body in ["取件码123、456", "取件码123、123", "取件码ABC.123", "取件码ABC/123"] {
             XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + body).first).pickupCode, "", body)
         }
+        XCTAssertTrue(SmartShipmentParser.parse(header + "取件码123 地点甲柜\n取件码123 地点乙柜").isEmpty,
+                      "Unordered different notices must reject the entire draft")
         let notice = header + "取件码123，地点甲柜。"
         XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(notice + "\n" + notice).first).pickupCode, "123")
     }
