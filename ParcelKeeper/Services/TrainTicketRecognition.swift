@@ -41,8 +41,21 @@ enum TrainTicketRecognition {
         value.range(of: #"[、/]"#, options: .regularExpression) != nil
             || value.range(of: #"[\p{Han}][\p{Han}*＊·]{0,15}[\s,，;；]+[\p{Han}][\p{Han}*＊·]{0,15}"#, options: .regularExpression) != nil
     }
+    private static let singleValueFieldGroups = [
+        "出发日期|乘车日期", "到达日期", "车次", "出发站|始发站", "到达站|终到站",
+        "发车时间|出发时间", "到达时间", "车厢", "座位", "席别|座席", "检票口", "乘车人|旅客|姓名"
+    ]
+
     // Structural multiplicity protection, not a local semantic interpretation of AI fields.
     static func rejectAmbiguity(_ text: String) throws {
+        let segmented = fieldLines(text)
+        // Count labels, not distinct values: repeated equal fields may still be two tickets.
+        // Synonyms belong to the same single-value field and must not bypass this guard.
+        for names in singleValueFieldGroups {
+            if matches("(?:^|[\\n；;])\\s*(?:" + names + ")\\s*[:：]", segmented).count > 1 {
+                throw TrainTicketRecognitionError.ambiguous
+            }
+        }
         let trains = matches(#"(?i)(?<![A-Z0-9])[GDCZTKYLS]\d{1,5}(?![A-Z0-9])"#, text)
         let trainLabels = matches(#"车次\s*[:：]"#, text)
         let passengers = matches(#"(?:乘车人|旅客|姓名)[ \t]*[:：]?[ \t]*([^\n]+)"#, fieldLines(text))

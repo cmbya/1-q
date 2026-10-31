@@ -47,6 +47,35 @@ final class TrainTicketRecognitionTests: XCTestCase {
         }
     }
 
+    func testRepeatedSingleValueFieldsRejectBeforeLocalSelection() throws {
+        let repeated = [
+            "乘车日期：2026-05-01", "到达日期：2026-05-02", "车次：1234",
+            "始发站：天津", "终到站：上海", "出发时间：12:00", "到达时间：22:00",
+            "车厢：03", "座位：05B", "座席：一等座", "检票口：7A", "姓名：张三",
+            "座位：05A"
+        ]
+        for field in repeated {
+            for separator in ["\n", " ", "；"] {
+                XCTAssertThrowsError(try TrainTicketRecognition.parse(Self.labeled + separator + field)) { error in
+                    guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(field): \(error)") }
+                }
+            }
+        }
+        XCTAssertNoThrow(try TrainTicketRecognition.parse(Self.labeled).validated())
+    }
+
+    func testRepeatedSeatStopsAIWithoutFallback() async {
+        do {
+            _ = try await TrainTicketRecognition.recognize(Self.inline + " 座位：05B", useAI: true) { _ in
+                XCTFail("Duplicate fields must reject before requesting AI")
+                return TrainTicketFields()
+            }
+            XCTFail("Must reject two seat fields")
+        } catch {
+            guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(error)") }
+        }
+    }
+
     func testPassengerListsRejectedButEnglishAndMaskedNamesPreserved() throws {
         for name in ["张三 李四", "张三，李四", "张三,李四", "张三、李四", "姜** 张**"] {
             let raw = Self.labeled.replacingOccurrences(of: "姜**", with: name)
