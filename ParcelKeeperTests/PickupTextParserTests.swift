@@ -72,12 +72,17 @@ final class PickupTextParserTests: XCTestCase {
 
     func testOverlongListItemsAreStructuralEvidenceNotValidCandidates() {
         let long = String(repeating: "A", count: 33)
-        for separator in [",", "，", "、", "/", ";", "；"] {
+        for separator in [",", "，", "、", ";", "；"] {
             for text in ["取件码123\(separator)\(long)", "取件码\(long)\(separator)123", "取件码123，取件码\(long)"] {
                 let result = parser.parse(text)
                 XCTAssertTrue(result.isAmbiguous, text)
                 XCTAssertEqual(result.candidates.map(\.code), ["123"], text)
             }
+        }
+        // Slash joins an identifier/URL token: reject the entire input, never
+        // weaken whole-token protection just to expose a candidate prefix.
+        for text in ["取件码123/\(long)", "取件码\(long)/123"] {
+            XCTAssertTrue(parser.parse(text).candidates.isEmpty, text)
         }
         for suffix in ["https://example.test/ABC", "www.example.test/ABC", "456号楼", "A座"] {
             let result = parser.parse("取件码123，" + suffix)

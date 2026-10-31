@@ -59,7 +59,9 @@ final class ShipmentRecognitionTests: XCTestCase {
             XCTAssertEqual(try store.snapshot().records[0].isCompleted, expected == .delivered)
         }
         let withoutState = try ShipmentShortcutParser.parse("快递单号：JT5539273200253 最新进展：请凭取件码完成取件")
-        XCTAssertEqual(withoutState.status, .readyForPickup)
+        XCTAssertEqual(ShipmentShortcutParser.status("请凭取件码完成取件"), .readyForPickup, "direct request classification")
+        XCTAssertEqual(withoutState.logisticsInfo, "请凭取件码完成取件", "labeled body must be preserved")
+        XCTAssertEqual(withoutState.status, .readyForPickup, "parsed info=\(withoutState.logisticsInfo ?? "nil") direct=\(String(describing: withoutState.logisticsInfo.flatMap(ShipmentShortcutParser.status)))")
     }
     func testAIPathDoesNotRequireLocalRecognitionOrOverrideAIState() async throws {
         let expected = ShipmentShortcutInput(trackingNumber: "JT5539273200253", carrierName: "极兔速递", logisticsInfo: "驿站已签收", status: .delivered, logisticsTime: nil)
