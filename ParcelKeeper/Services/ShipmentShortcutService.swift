@@ -157,7 +157,7 @@ enum ShipmentShortcutParser {
         let state = value("当前状态").flatMap(status)
         // A labeled progress field owns its body even without a timestamp;
         // do not let generic page/title filtering discard its status.
-        let observed = event?.state ?? info.flatMap(status)
+        let observed = event.flatMap { $0.state } ?? info.flatMap { status($0) }
         // The explicitly labeled current state wins over event wording.
         // Do not search the full query/history for a competing status.
         let suppliedTime = value("最新时间")
