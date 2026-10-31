@@ -1,3 +1,4 @@
+import AppIntents
 import Foundation
 import SwiftUI
 import WidgetKit
@@ -8,6 +9,15 @@ struct TrainTicketEntry: TimelineEntry {
     let ticket: TrainTicket?
     let message: String?
     let isStorageError: Bool
+    var eligibleTicketIDs: [UUID] = []
+    var mode: TrainWidgetMode = .automatic
+    var isBrowsing: Bool = false
+    var canResetBrowsing: Bool = false
+
+    var position: Int {
+        guard let id = ticket?.id, let index = eligibleTicketIDs.firstIndex(of: id) else { return 0 }
+        return index + 1
+    }
 }
 
 /// Reads one immutable shared snapshot. Widgets never create/migrate shared data.
@@ -33,30 +43,14 @@ struct TrainTicketProvider: TimelineProvider {
             let snapshot = try SharedPickupStore(appGroupID: groupID, accessMode: .existingSharedData).snapshot()
             let tickets = snapshot.trainTickets ?? []
             let binding = TrainTicketSelection.binding(for: slot, in: snapshot.trainWidgetBindings ?? [])
-            let horizon = now.addingTimeInterval(24 * 60 * 60)
-            // Fixed bindings deliberately retain the selected ticket after arrival.
-            // Automatic bindings change at arrival, never merely at departure.
-            let boundaries: [Date] = binding.mode == .automatic ? Array(Set(tickets.compactMap { ticket -> Date? in
-                guard !ticket.isArchived, !ticket.isEnded, !ticket.keepVisible,
-                      let arrival = ticket.fields.arrival, arrival > now, arrival <= horizon else { return nil }
-                return arrival
-            })).sorted() : []
-            let scheduled = Array(boundaries.prefix(20))
-            let entries = ([now] + scheduled).map { date in
-                entry(tickets: tickets, binding: binding, at: date)
-            }
-            // Prebuilt entries perform the switch even if WidgetKit delays a reload.
-            // If capped, request fresh data by the last covered boundary, not after
-            // an omitted arrival. Reload dates are system hints, not timers.
-            let refresh: Date
-            if binding.mode == .fixed {
-                refresh = now.addingTimeInterval(6 * 60 * 60)
-            } else if boundaries.count > scheduled.count, let coveredUntil = scheduled.last {
-                refresh = min(now.addingTimeInterval(6 * 60 * 60), coveredUntil)
-            } else {
-                refresh = min(now.addingTimeInterval(6 * 60 * 60), horizon)
-            }
-            return Timeline(entries: entries, policy: .after(refresh))
+            // Use the production selection API for both modes: starts reveal tickets,
+            // ends hide them even when fixed or manually browsing. The cap includes now.
+            let dates = TrainTicketSelection.timelineDates(in: tickets, now: now)
+            let entries = dates.map { entry(tickets: tickets, binding: binding, at: $0) }
+            // Periodically extend the rolling 24h window. If dates were capped, reload
+            // no later than its last covered boundary. WidgetKit scheduling is best effort.
+            let refresh = min(now.addingTimeInterval(6 * 60 * 60), dates.last ?? now)
+            return Timeline(entries: entries, policy: .after(refresh > now ? refresh : now.addingTimeInterval(6 * 60 * 60)))
         } catch {
             let failure = TrainTicketEntry(date: now, slot: slot, ticket: nil,
                 message: "无法读取共享数据，请打开 App 检查共享存储与初始化状态", isStorageError: true)
@@ -65,18 +59,20 @@ struct TrainTicketProvider: TimelineProvider {
     }
 
     private func entry(tickets: [TrainTicket], binding: TrainWidgetBinding, at date: Date) -> TrainTicketEntry {
+        let eligible = TrainTicketSelection.eligibleTickets(in: tickets, now: date)
         let selected = TrainTicketSelection.ticket(in: tickets, binding: binding, now: date)
         let message: String?
         if selected != nil {
             message = nil
         } else if binding.mode == .fixed {
-            message = binding.ticketID == nil
-                ? "尚未绑定火车票，请在 App 中为此组件选择一张票"
-                : "绑定火车票已失效，请打开 App 重新选择"
+            message = "暂无需要展示车票；固定车票未到展示时间、已结束或未绑定。切票将进入手动浏览。"
         } else {
-            message = "暂无可显示的火车票，请在 App 中添加或检查行程状态"
+            message = "暂无需要展示车票，请在 App 中添加或检查展示有效期。"
         }
-        return TrainTicketEntry(date: date, slot: slot, ticket: selected, message: message, isStorageError: false)
+        return TrainTicketEntry(date: date, slot: slot, ticket: selected, message: message,
+            isStorageError: false, eligibleTicketIDs: eligible.map(\.id), mode: binding.mode,
+            isBrowsing: binding.mode == .automatic && binding.browsingTicketID == selected?.id && selected != nil,
+            canResetBrowsing: binding.mode == .fixed || binding.browsingTicketID != nil)
     }
 }
 
@@ -87,27 +83,63 @@ struct TrainTicketWidgetView: View {
     let entry: TrainTicketEntry
 
     private var large: Bool { family == .systemLarge }
-    private var spacing: CGFloat { large ? 12 : 3 }
+    private var spacing: CGFloat { large ? 9 : 2 }
     private var textSize: CGFloat { large ? regularFont : compactFont }
+    private var modeLabel: String {
+        if entry.mode == .fixed { return "固定 · 切票转手动" }
+        return entry.isBrowsing ? "手动浏览" : "自动"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: spacing) {
             if let ticket = entry.ticket {
                 ticketContent(ticket)
             } else {
-                Label(entry.slot.title, systemImage: "tram.fill").font(.headline)
+                HStack {
+                    Label(entry.slot.title, systemImage: "tram.fill").font(.subheadline)
+                    Spacer(minLength: 2)
+                    Text(modeLabel).font(.caption2).foregroundStyle(.secondary)
+                }
                 Spacer(minLength: 0)
-                Label(entry.isStorageError ? "共享数据读取失败" : "未显示火车票",
-                      systemImage: entry.isStorageError ? "exclamationmark.triangle" : "ticket")
+                Text(entry.isStorageError ? "共享数据读取失败" : "暂无需要展示车票")
                     .font(.subheadline)
                 Text(entry.message ?? "请打开 App 检查")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(large ? 5 : 2)
                 Spacer(minLength: 0)
             }
+            Spacer(minLength: 0)
+            controls
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
+        // AppIntent buttons take precedence over this background/detail destination.
         .widgetURL(entry.ticket.flatMap { URL(string: "parcelkeeper://train/\($0.id.uuidString)") })
+    }
+
+    private var controls: some View {
+        HStack(spacing: large ? 10 : 5) {
+            Button(intent: BrowseTrainTicketWidgetIntent(slot: entry.slot, direction: -1, expectedTicketID: entry.ticket?.id)) {
+                Label("上一张", systemImage: "chevron.left")
+            }
+            .disabled(entry.isStorageError || entry.eligibleTicketIDs.count <= 1)
+            Text("\(entry.position)/\(entry.eligibleTicketIDs.count)")
+                .monospacedDigit()
+                .accessibilityLabel("第 \(entry.position) 张，共 \(entry.eligibleTicketIDs.count) 张有效车票")
+            Button(intent: BrowseTrainTicketWidgetIntent(slot: entry.slot, direction: 1, expectedTicketID: entry.ticket?.id)) {
+                Label("下一张", systemImage: "chevron.right")
+            }
+            .disabled(entry.isStorageError || entry.eligibleTicketIDs.count <= 1)
+            Spacer(minLength: 0)
+            Button(intent: ResetTrainTicketWidgetBrowsingIntent(slot: entry.slot)) {
+                Text("回到自动")
+            }
+            .disabled(entry.isStorageError || !entry.canResetBrowsing)
+        }
+        .font(.system(size: large ? 12 : 10))
+        .buttonStyle(.plain)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .accessibilityHint(entry.mode == .fixed ? "上一张或下一张将退出固定模式，进入手动浏览；回到自动显示首张有效车票" : "仅切换展示有效期内的车票，不修改票面")
     }
 
     private func ticketContent(_ ticket: TrainTicket) -> some View {
@@ -118,7 +150,9 @@ struct TrainTicketWidgetView: View {
                     .lineLimit(1).minimumScaleFactor(0.75)
                     .accessibilityLabel("车次 \(display(fields.trainNumber))")
                 Spacer(minLength: 4)
-                Text(entry.slot.title).font(.caption2).foregroundStyle(.secondary)
+                Text("\(entry.slot.title) · \(modeLabel)")
+                    .font(.system(size: large ? 11 : 9)).foregroundStyle(.secondary)
+                    .lineLimit(1).minimumScaleFactor(0.75)
             }
             HStack(alignment: .top, spacing: large ? 16 : 8) {
                 station(name: fields.departureStation, time: fields.departureTime,
@@ -136,16 +170,15 @@ struct TrainTicketWidgetView: View {
                 field("检票口", fields.gate)
                 field("乘客", fields.passenger).privacySensitive()
             }
-            if large { Spacer(minLength: 0) }
         }
         .accessibilityElement(children: .contain)
     }
 
     private func station(name: String, time: String, date: String, label: String) -> some View {
-        VStack(alignment: .leading, spacing: large ? 4 : 1) {
+        VStack(alignment: .leading, spacing: large ? 4 : 0) {
             Text("\(label) · \(display(name))")
                 .font(.system(size: textSize, weight: .medium))
-                .lineLimit(large ? 3 : 2).fixedSize(horizontal: false, vertical: true)
+                .lineLimit(large ? 2 : 1).minimumScaleFactor(0.75)
             Text(display(time)).font(large ? .title3.monospacedDigit() : .caption.monospacedDigit())
                 .lineLimit(1).minimumScaleFactor(0.8)
             Text(display(date)).font(.system(size: textSize)).foregroundStyle(.secondary)
@@ -156,10 +189,9 @@ struct TrainTicketWidgetView: View {
     }
 
     private func field(_ label: String, _ value: String) -> some View {
-        // Compact inline labels avoid six stacked label/value rows on medium.
         Text("\(label) \(display(value))")
             .font(.system(size: textSize))
-            .lineLimit(large ? 3 : 2).minimumScaleFactor(0.85)
+            .lineLimit(large ? 2 : 1).minimumScaleFactor(0.75)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityLabel("\(label) \(display(value))")
     }
@@ -176,7 +208,7 @@ struct TrainTicketWidgetA: Widget {
             TrainTicketWidgetView(entry: $0)
         }
         .configurationDisplayName(TrainWidgetSlot.a.title)
-        .description("在 App 中设置自动显示下一行程，或固定一张火车票；到达后自动切换。")
+        .description("有效期内自动显示车票，可上一张、下一张手动浏览或回到自动。")
         .supportedFamilies([.systemMedium, .systemLarge])
     }
 }
@@ -188,7 +220,7 @@ struct TrainTicketWidgetB: Widget {
             TrainTicketWidgetView(entry: $0)
         }
         .configurationDisplayName(TrainWidgetSlot.b.title)
-        .description("在 App 中独立绑定火车票；默认固定模式，不自动选择其他车票。")
+        .description("默认固定车票，仅有效期内展示；点击切票进入手动浏览，可回到自动。")
         .supportedFamilies([.systemMedium, .systemLarge])
     }
 }

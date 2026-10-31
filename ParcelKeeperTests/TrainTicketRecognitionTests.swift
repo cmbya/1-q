@@ -16,6 +16,33 @@ final class TrainTicketRecognitionTests: XCTestCase {
     检票口：6B
     乘车人：姜**
     """
+    static let inline = "订单详情 下单时间：2026-04-25 22:07 乘车日期：2026-05-01 车次：G311 出发站：北京西 发车时间：11:05 到达站：南宁东 到达日期：2026-05-01 到达时间：21:08 车厢：02 座位：05A 席别：二等座 检票口：6B 乘车人：姜**"
+
+    func testInlineOrderTimestampPreservesTravelFieldsAndStopsBeforeIdentity() throws {
+        let expected = try TrainTicketRecognition.parse(Self.labeled)
+        XCTAssertEqual(try TrainTicketRecognition.parse(Self.inline), expected)
+        XCTAssertEqual(try TrainTicketRecognition.parse(Self.inline + " 身份证号：123456789012345678"), expected)
+        let evidence = TrainTicketRecognition.travelEvidence(Self.inline)
+        XCTAssertFalse(evidence.contains("2026-04-25"))
+        XCTAssertFalse(evidence.contains("22:07"))
+        XCTAssertTrue(evidence.contains("2026-05-01"))
+        XCTAssertTrue(evidence.contains("11:05"))
+        let missingYear = Self.inline.replacingOccurrences(of: "2026-05-01", with: "5月1日")
+        XCTAssertEqual(try TrainTicketRecognition.parse(missingYear).departureDate, "")
+    }
+
+    func testPassengerListsRejectedButEnglishAndMaskedNamesPreserved() throws {
+        for name in ["张三 李四", "张三，李四", "张三,李四", "张三、李四", "姜** 张**"] {
+            let raw = Self.labeled.replacingOccurrences(of: "姜**", with: name)
+            XCTAssertThrowsError(try TrainTicketRecognition.parse(raw)) { error in
+                guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(error)") }
+            }
+        }
+        for name in ["John Smith", "姜**", "姜＊＊"] {
+            XCTAssertEqual(try TrainTicketRecognition.parse(Self.labeled.replacingOccurrences(of: "姜**", with: name)).passenger, name)
+        }
+    }
+
     func testLabeledAllFields() throws {
         let f = try TrainTicketRecognition.parse(Self.labeled)
         XCTAssertEqual(f.departureDate, "2026-05-01")
@@ -55,7 +82,7 @@ final class TrainTicketRecognitionTests: XCTestCase {
         XCTAssertNoThrow(try TrainTicketRecognition.parse(text).validated())
     }
     func testAmbiguousAndUnreliableRejected() {
-        for text in ["你好", Self.labeled + "\n车次：D123", Self.labeled + "\n乘车人：张三", Self.labeled + "\n" + Self.labeled] {
+        for text in ["你好", Self.labeled + "\n车次：D123", Self.labeled + "\n乘车人：张三", Self.labeled + "\n" + Self.labeled, Self.labeled + "\n02车05A号二等座\n03车06B号二等座"] {
             XCTAssertThrowsError(try TrainTicketRecognition.parse(text))
         }
     }
@@ -69,6 +96,8 @@ final class TrainTicketRecognitionTests: XCTestCase {
         let saved = try TrainTicketWriter.save(fields, to: store) { reloads += 1 }
         let after = try store.snapshot()
         XCTAssertEqual(after.trainTickets?.map(\.id), [saved.id])
+        XCTAssertEqual(saved.displayWindow?.enabled, false)
+        XCTAssertFalse(saved.isWidgetVisible(at: try XCTUnwrap(saved.fields.departure)))
         XCTAssertEqual(after.records, before.records)
         XCTAssertEqual(after.shipments, before.shipments)
         XCTAssertThrowsError(try TrainTicketWriter.save(fields, to: store) { reloads += 1 })
@@ -84,6 +113,22 @@ final class TrainTicketRecognitionTests: XCTestCase {
         XCTAssertThrowsError(try TrainTicketWriter.save(TrainTicketRecognition.parse(Self.labeled), to: store) {})
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
     }
+    func testAIDirectAlsoRejectsStructuralPassengerLists() async throws {
+        let raw = Self.labeled.replacingOccurrences(of: "姜**", with: "张三 李四")
+        do {
+            _ = try await TrainTicketRecognition.recognize(raw, useAI: true) { _ in
+                XCTFail("Structural ambiguity must stop before AI"); return TrainTicketFields()
+            }
+            XCTFail("Must reject passenger list")
+        } catch { guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(error)") } }
+        do {
+            _ = try await TrainTicketRecognition.recognize("未标记乘客的行程", useAI: true) { _ in
+                var fields = TrainTicketFields(); fields.passenger = "张三 李四"; return fields
+            }
+            XCTFail("Must reject multi-name AI field")
+        } catch { guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(error)") } }
+    }
+
     func testAIDirectBypassesLocalAndNoFallback() async throws {
         var calls = 0
         var expected = TrainTicketFields(); expected.trainNumber = "G999"

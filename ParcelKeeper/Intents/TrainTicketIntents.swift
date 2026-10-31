@@ -13,7 +13,8 @@ enum TrainTicketWriter {
         do { fields = try input.validated() }
         catch { throw TrainTicketRecognitionError.incomplete }
         try Task.checkCancellation()
-        let ticket = TrainTicket(fields: fields, isArchived: false, isEnded: false, keepVisible: false)
+        let ticket = TrainTicket(fields: fields, isArchived: false, isEnded: false, keepVisible: false,
+                                 displayWindow: TrainTicketDisplayWindow(enabled: false))
         try store.transaction { dataset in
             var tickets = dataset.trainTickets ?? []
             guard !tickets.contains(where: { $0.fields.duplicateIdentity == fields.duplicateIdentity }) else {
@@ -51,6 +52,6 @@ struct RecognizeTrainTicketIntent: AppIntent {
         }
         try Task.checkCancellation()
         _ = try TrainTicketWriter.save(fields, to: store)
-        return .result(dialog: "火车票已识别并新增。")
+        return .result(dialog: "火车票已识别并新增。小组件展示尚未开启，请在 App 中设置展示时间。")
     }
 }

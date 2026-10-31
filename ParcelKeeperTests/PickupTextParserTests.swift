@@ -62,10 +62,28 @@ final class PickupTextParserTests: XCTestCase {
     func testOverlongTokensAreRejectedWithoutPrefixTruncation() {
         for code in [String(repeating: "1", count: 33), "3－4－" + String(repeating: "6", count: 33)] {
             XCTAssertTrue(parser.parse("取件码：\(code)").candidates.isEmpty, code)
-            XCTAssertEqual(parser.parse("取件码001、\(code)").candidates.map(\.code), ["001"], code)
+            let list = parser.parse("取件码001、\(code)")
+            XCTAssertEqual(list.candidates.map(\.code), ["001"], code)
+            XCTAssertTrue(list.isAmbiguous, code)
         }
         let boundary = String(repeating: "0", count: 32)
         XCTAssertEqual(parser.parse("取件码\(boundary)").candidates.map(\.code), [boundary])
+    }
+
+    func testOverlongListItemsAreStructuralEvidenceNotValidCandidates() {
+        let long = String(repeating: "A", count: 33)
+        for separator in [",", "，", "、", "/", ";", "；"] {
+            for text in ["取件码123\(separator)\(long)", "取件码\(long)\(separator)123", "取件码123，取件码\(long)"] {
+                let result = parser.parse(text)
+                XCTAssertTrue(result.isAmbiguous, text)
+                XCTAssertEqual(result.candidates.map(\.code), ["123"], text)
+            }
+        }
+        for suffix in ["https://example.test/ABC", "www.example.test/ABC", "456号楼", "A座"] {
+            let result = parser.parse("取件码123，" + suffix)
+            XCTAssertFalse(result.isAmbiguous, suffix)
+            XCTAssertEqual(result.candidates.map(\.code), ["123"])
+        }
     }
 
     func testLockerExample() throws {

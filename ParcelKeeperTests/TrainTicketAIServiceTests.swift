@@ -95,11 +95,49 @@ final class TrainTicketAIServiceTests: XCTestCase {
         var object = try fields()
         object["seat"] = "05号下铺"
         object["seatClass"] = "软卧"
-        let raw = TrainTicketRecognitionTests.labeled + "\n卧铺信息：05号下铺 软卧"
+        let raw = TrainTicketRecognitionTests.labeled
+            .replacingOccurrences(of: "座位：05A", with: "座位：05号下铺")
+            .replacingOccurrences(of: "席别：二等座", with: "席别：软卧")
         network.responses = [(200, try response(object))]
         let draft = try await service.extractTrainTicket(raw)
         XCTAssertEqual(draft.seat, "05号下铺")
         XCTAssertEqual(draft.seatClass, "软卧")
+    }
+
+    func testInlineOrderFieldsAreNotDateOrTimeEvidence() async throws {
+        let raw = TrainTicketRecognitionTests.inline
+        network.responses = [(200, try response(fields()))]
+        let result = try await service.extractTrainTicket(raw)
+        XCTAssertEqual(result, try TrainTicketRecognition.parse(TrainTicketRecognitionTests.labeled))
+        for (key, value) in [("departureDate", "2026-04-25"), ("departureTime", "22:07"), ("arrivalDate", "2026-04-25"), ("arrivalTime", "22:07")] {
+            var object = try fields(); object[key] = value
+            network.responses = Array(repeating: (200, try response(object)), count: 2)
+            do { _ = try await service.extractTrainTicket(raw); XCTFail(key) }
+            catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("\(error)") } }
+        }
+        let missingYear = raw.replacingOccurrences(of: "2026-05-01", with: "5月1日")
+        var object = try fields(); object["arrivalDate"] = ""; object["departureDate"] = "2026-05-01"
+        network.responses = Array(repeating: (200, try response(object)), count: 2)
+        do { _ = try await service.extractTrainTicket(missingYear); XCTFail("Do not borrow order year") }
+        catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("\(error)") } }
+    }
+
+    func testPassengerListsRejectedBeforeNetworkAndEnglishNameAccepted() async throws {
+        for name in ["张三 李四", "张三,李四", "张三，李四", "张三、李四"] {
+            network.requests = []
+            do { _ = try await service.extractTrainTicket(TrainTicketRecognitionTests.labeled.replacingOccurrences(of: "姜**", with: name)); XCTFail(name) }
+            catch { guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(error)") } }
+            XCTAssertTrue(network.requests.isEmpty)
+        }
+        var object = try fields(); object["passenger"] = "John Smith"
+        network.responses = [(200, try response(object))]
+        let result = try await service.extractTrainTicket(TrainTicketRecognitionTests.labeled.replacingOccurrences(of: "姜**", with: "John Smith"))
+        XCTAssertEqual(result.passenger, "John Smith")
+        object["passenger"] = "张三 李四"
+        let raw = TrainTicketRecognitionTests.labeled.replacingOccurrences(of: "乘车人：姜**", with: "张三 李四")
+        network.responses = Array(repeating: (200, try response(object)), count: 2)
+        do { _ = try await service.extractTrainTicket(raw); XCTFail("Multi-name AI field") }
+        catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("\(error)") } }
     }
 
     func testCancellationDoesNotFallback() async throws {

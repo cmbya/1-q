@@ -15,7 +15,12 @@ enum TrainTicketRecognitionError: Error, LocalizedError {
 enum TrainTicketRecognition {
     static func recognize(_ text: String, useAI: Bool,
                           ai: (String) async throws -> TrainTicketFields) async throws -> TrainTicketFields {
-        if useAI { return try await ai(text) }
+        if useAI {
+            try rejectAmbiguity(text)
+            let fields = try await ai(text)
+            guard !hasMultiplePassengers(fields.passenger) else { throw TrainTicketRecognitionError.ambiguous }
+            return fields
+        }
         return try parse(text)
     }
     static func matches(_ pattern: String, _ text: String) -> [[String]] {
@@ -26,19 +31,30 @@ enum TrainTicketRecognition {
             }
         }
     }
+    // Split only explicit field envelopes, not spaces inside values (John Smith).
+    private static let fieldNames = "出发日期|乘车日期|到达日期|车次|出发站|始发站|到达站|终到站|发车时间|出发时间|到达时间|车厢|座位|席别|座席|检票口|乘车人|旅客|姓名|身份证号?|证件号码?|证件类型|手机号?|电话号码?|订单号?|下单时间|下单日期|订单时间|订单日期|支付时间|支付日期|付款时间|付款日期|出票时间|出票日期|购票时间|购票日期|查询时间|查询日期|生成时间|生成日期"
+    private static func fieldLines(_ text: String) -> String {
+        text.replacingOccurrences(of: "(?:" + fieldNames + ")\\s*[:：]", with: "\n$0", options: .regularExpression)
+    }
+    static func hasMultiplePassengers(_ value: String) -> Bool {
+        value.range(of: #"[、/]"#, options: .regularExpression) != nil
+            || value.range(of: #"[\p{Han}][\p{Han}*＊·]{0,15}[\s,，;；]+[\p{Han}][\p{Han}*＊·]{0,15}"#, options: .regularExpression) != nil
+    }
     // Structural multiplicity protection, not a local semantic interpretation of AI fields.
     static func rejectAmbiguity(_ text: String) throws {
         let trains = matches(#"(?i)(?<![A-Z0-9])[GDCZTKYLS]\d{1,5}(?![A-Z0-9])"#, text)
-        let passengers = matches(#"(?:乘车人|旅客|姓名)\s*[:：]?\s*([^\s，,；;]+)"#, text)
+        let passengers = matches(#"(?:乘车人|旅客|姓名)[ \t]*[:：]?[ \t]*([^\n]+)"#, fieldLines(text))
         let departureLabels = matches(#"(?:出发日期|乘车日期)\s*[:：]"#, text)
         let seatGroups = matches(#"\d{1,2}车\s*\d{1,3}[A-Fa-f]?号"#, text)
-        let passengerList = passengers.contains { $0[1].range(of: #"[、/]"#, options: .regularExpression) != nil }
+        let passengerList = passengers.contains { hasMultiplePassengers($0[1]) }
         if trains.count > 1 || passengers.count > 1 || departureLabels.count > 1 || seatGroups.count > 1 || passengerList { throw TrainTicketRecognitionError.ambiguous }
     }
     // Order/payment timestamps are not travel evidence. Never borrow their year.
     static func travelEvidence(_ text: String) -> String {
-        text.components(separatedBy: .newlines).filter {
-            $0.range(of: #"(?:下单|订单|支付|付款|出票|购票|查询|生成)(?:日期|时间)?\s*[:：]?"#, options: .regularExpression) == nil
+        // Segment inline labels first: an order timestamp must not discard the
+        // adjacent journey, nor contribute its year/time to AI evidence checks.
+        fieldLines(text).components(separatedBy: .newlines).filter {
+            $0.range(of: #"^\s*(?:下单|订单|支付|付款|出票|购票|查询|生成)(?:日期|时间)\s*[:：]?"#, options: .regularExpression) == nil
         }.joined(separator: "\n")
     }
     static func normalizedDate(_ value: String) -> String? {

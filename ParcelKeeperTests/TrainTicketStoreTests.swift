@@ -48,16 +48,16 @@ final class TrainTicketStoreTests: XCTestCase {
         let end = try XCTUnwrap(value.arrival)
         XCTAssertNil(TrainTicketSelection.ticket(in: [first], binding: auto, now: end))
         first.keepVisible = true
-        XCTAssertEqual(TrainTicketSelection.ticket(in: [first], binding: auto, now: end)?.id, first.id)
+        XCTAssertNil(TrainTicketSelection.ticket(in: [first], binding: auto, now: end))
         first.isEnded = true
         XCTAssertNil(TrainTicketSelection.ticket(in: [first], binding: auto, now: during))
         first.isEnded = false; first.keepVisible = false
         let fixed = TrainWidgetBinding(slot: .b, mode: .fixed, ticketID: first.id)
-        XCTAssertEqual(TrainTicketSelection.ticket(in: [first], binding: fixed, now: end)?.id, first.id)
+        XCTAssertNil(TrainTicketSelection.ticket(in: [first], binding: fixed, now: end))
         first.isArchived = true
         XCTAssertNil(TrainTicketSelection.ticket(in: [first], binding: fixed, now: during))
         first.isArchived = false; first.fields.arrivalDate = ""; first.fields.arrivalTime = ""
-        XCTAssertNotNil(TrainTicketSelection.ticket(in: [first], binding: auto, now: end))
+        XCTAssertNil(TrainTicketSelection.ticket(in: [first], binding: auto, now: end))
         XCTAssertEqual(TrainTicketSelection.binding(for: .a, in: []).mode, .automatic)
         XCTAssertEqual(TrainTicketSelection.binding(for: .b, in: []).mode, .fixed)
         XCTAssertNil(TrainTicketSelection.binding(for: .b, in: []).ticketID)
@@ -178,6 +178,118 @@ final class TrainTicketStoreTests: XCTestCase {
         XCTAssertThrowsError(try app.setTrainWidgetBinding(baseline, expected: baseline))
         XCTAssertEqual(try shared.snapshot().trainWidgetBindings, [changed])
     }
+    func testDisplayWindowSaveEditBatchAtomicityAndBackupValidation() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let start = try XCTUnwrap(fields().departure)
+        let window = TrainTicketDisplayWindow(startsAt: start)
+        _ = try app.saveTrainTicket(fields(), displayWindow: window)
+        var distinct = fields(); distinct.passenger = "李四"
+        _ = try app.saveTrainTicket(distinct)
+        let first = try XCTUnwrap(app.trainTickets.first)
+        var edited = first.fields; edited.gate = "A8"
+        _ = try app.saveTrainTicket(edited, existing: first)
+        XCTAssertEqual(app.trainTickets.first?.displayWindow, window)
+        XCTAssertEqual(app.trainTickets.first?.createdAt, first.createdAt)
+        var before = try shared.snapshot()
+        XCTAssertThrowsError(try app.setTrainTicketDisplayWindow(TrainTicketDisplayWindow(), for: app.trainTickets))
+        XCTAssertEqual(try shared.snapshot(), before)
+        let stale = app.trainTickets
+        try app.setTrainTicketEnded(try XCTUnwrap(app.trainTickets.last), ended: true)
+        before = try shared.snapshot()
+        XCTAssertThrowsError(try app.setTrainTicketDisplayWindow(TrainTicketDisplayWindow(enabled: false), for: stale))
+        XCTAssertEqual(try shared.snapshot(), before)
+        let current = app.trainTickets
+        try app.setTrainTicketDisplayWindow(window, for: current)
+        XCTAssertEqual(app.trainTickets.map(\.displayWindow), current.map { _ in Optional(window) })
+        XCTAssertEqual(app.trainTickets.map(\.id), current.map(\.id))
+        XCTAssertEqual(app.trainTickets.map(\.createdAt), current.map(\.createdAt))
+        XCTAssertEqual(app.trainTickets.map(\.isEnded), current.map(\.isEnded))
+        let saved = try shared.snapshot()
+        for key in [\TrainTicketFields.departureDate, \.departureTime, \.arrivalDate, \.arrivalTime, \.trainNumber] {
+            var incoming = saved
+            incoming.trainTickets?[0].fields[keyPath: key] += " "
+            XCTAssertThrowsError(try shared.previewBackup(JSONEncoder().encode(incoming)))
+        }
+        var invalid = saved
+        invalid.trainTickets?[0].displayWindow = TrainTicketDisplayWindow()
+        XCTAssertThrowsError(try shared.previewBackup(JSONEncoder().encode(invalid)))
+        XCTAssertEqual(try shared.snapshot(), saved)
+        let roundTrip = try JSONDecoder().decode(PickupDataset.self, from: shared.exportBackup())
+        XCTAssertEqual(roundTrip, saved)
+    }
+
+    func testBatchValidatesArrivalFallbackForEveryTicketBeforeWriting() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try app.saveTrainTicket(fields())
+        var noArrival = fields(); noArrival.passenger = "无到达时间"
+        noArrival.arrivalDate = ""; noArrival.arrivalTime = ""
+        _ = try app.saveTrainTicket(noArrival)
+        let start = try XCTUnwrap(fields().departure)
+        let before = try shared.snapshot()
+        XCTAssertThrowsError(try app.setTrainTicketDisplayWindow(TrainTicketDisplayWindow(startsAt: start), for: app.trainTickets))
+        XCTAssertEqual(try shared.snapshot(), before)
+        let explicit = TrainTicketDisplayWindow(startsAt: start, endsAt: start.addingTimeInterval(3600))
+        try app.setTrainTicketDisplayWindow(explicit, for: app.trainTickets)
+        XCTAssertTrue(app.trainTickets.allSatisfy { $0.isWidgetVisible(at: start) })
+        let saved = try shared.snapshot()
+        var badFields = fields(); badFields.gate = "not committed"
+        XCTAssertThrowsError(try app.saveTrainTicket(badFields, existing: app.trainTickets[0], displayWindow: TrainTicketDisplayWindow()))
+        XCTAssertEqual(try shared.snapshot(), saved)
+    }
+
+    func testBrowseZeroOrOneEligibleRejectsWithoutWriteAndExpiryRejectsStaleButton() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = try XCTUnwrap(fields().departure)
+        var before = try shared.snapshot()
+        XCTAssertThrowsError(try shared.browseTrainWidget(slot: .a, direction: 1, expectedTicketID: nil, now: now))
+        XCTAssertEqual(try shared.snapshot(), before)
+        let id = try app.saveTrainTicket(fields())
+        before = try shared.snapshot()
+        XCTAssertThrowsError(try shared.browseTrainWidget(slot: .a, direction: 1, expectedTicketID: id, now: now))
+        XCTAssertThrowsError(try shared.browseTrainWidget(slot: .a, direction: 1, expectedTicketID: id, now: try XCTUnwrap(fields().arrival)))
+        XCTAssertEqual(try shared.snapshot(), before)
+    }
+
+    func testBrowseUsesLockedSelectionWrapsRejectsStaleAndResetClearsFixed() throws {
+        let (root, shared, app) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        _ = try app.saveTrainTicket(fields())
+        var distinct = fields(); distinct.passenger = "李四"
+        _ = try app.saveTrainTicket(distinct)
+        let now = try XCTUnwrap(fields().departure)
+        let tickets = TrainTicketSelection.eligibleTickets(in: app.trainTickets, now: now)
+        try shared.browseTrainWidget(slot: .a, direction: -1, expectedTicketID: tickets[0].id, now: now)
+        var binding = TrainTicketSelection.binding(for: .a, in: try shared.snapshot().trainWidgetBindings ?? [])
+        XCTAssertEqual(binding.browsingTicketID, tickets[1].id)
+        XCTAssertEqual(binding.mode, .automatic)
+        XCTAssertNil(binding.ticketID)
+        let before = try shared.snapshot()
+        XCTAssertThrowsError(try shared.browseTrainWidget(slot: .a, direction: 1, expectedTicketID: tickets[0].id, now: now))
+        XCTAssertThrowsError(try shared.browseTrainWidget(slot: .a, direction: 0, expectedTicketID: tickets[1].id, now: now))
+        XCTAssertEqual(try shared.snapshot(), before)
+        try shared.browseTrainWidget(slot: .a, direction: 1, expectedTicketID: tickets[1].id, now: now)
+        binding = TrainTicketSelection.binding(for: .a, in: try shared.snapshot().trainWidgetBindings ?? [])
+        XCTAssertEqual(binding.browsingTicketID, tickets[0].id)
+        try app.setTrainWidgetBinding(TrainWidgetBinding(slot: .b, mode: .fixed, ticketID: tickets[1].id))
+        try shared.browseTrainWidget(slot: .b, direction: 1, expectedTicketID: tickets[1].id, now: now)
+        binding = TrainTicketSelection.binding(for: .b, in: try shared.snapshot().trainWidgetBindings ?? [])
+        XCTAssertEqual(binding.mode, .automatic)
+        XCTAssertEqual(binding.browsingTicketID, tickets[0].id)
+        try shared.resetTrainWidgetBrowsing(slot: .b)
+        binding = TrainTicketSelection.binding(for: .b, in: try shared.snapshot().trainWidgetBindings ?? [])
+        XCTAssertEqual(binding, TrainWidgetBinding(slot: .b, mode: .automatic))
+        try app.reload()
+        try app.deleteTrainTicket(id: tickets[0].id, expected: tickets[0])
+        binding = TrainTicketSelection.binding(for: .a, in: try shared.snapshot().trainWidgetBindings ?? [])
+        XCTAssertNil(binding.browsingTicketID)
+        let readOnly = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("absent"), containerURL: root, readOnly: true)
+        XCTAssertThrowsError(try readOnly.resetTrainWidgetBrowsing(slot: .a))
+        XCTAssertThrowsError(try readOnly.browseTrainWidget(slot: .a, direction: 1, expectedTicketID: tickets[1].id, now: now))
+    }
+
     func testInvalidSharedDataAndReadOnlyWritesDoNotMutate() throws {
         let (root, shared, app) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -1,6 +1,12 @@
 import Foundation
 import UserNotifications
 
+enum ReminderWriteAccess {
+    static func requireWritable(isHistoricalSnapshot: Bool) throws {
+        guard !isHistoricalSnapshot else { throw PickupStorageError.appGroupUnavailable }
+    }
+}
+
 /// Compensate a scheduled replacement when its persistence fails.
 /// A failed restoration must not leave the unsaved replacement active.
 enum ReminderCompensation {

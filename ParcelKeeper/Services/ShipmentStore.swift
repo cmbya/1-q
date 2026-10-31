@@ -317,7 +317,7 @@ final class ShipmentStore: ObservableObject {
 
     // All ticket comparisons and duplicate checks use the latest dataset under flock.
     @discardableResult
-    func saveTrainTicket(_ fields: TrainTicketFields, existing: TrainTicket? = nil) throws -> UUID {
+    func saveTrainTicket(_ fields: TrainTicketFields, existing: TrainTicket? = nil, displayWindow: TrainTicketDisplayWindow? = nil) throws -> UUID {
         let validated = try fields.validated()
         return try change { data in
             var tickets = data.trainTickets ?? []
@@ -329,6 +329,8 @@ final class ShipmentStore: ObservableObject {
                     throw PickupStorageError.invalidData("相同出发日期、车次、站点、乘车人及座位的火车票已存在。")
                 }
                 tickets[index].fields = validated
+                if let displayWindow { tickets[index].displayWindow = displayWindow }
+                try tickets[index].validatedDisplayWindow()
                 tickets[index].updatedAt = Date()
                 data.trainTickets = tickets
                 return existing.id
@@ -336,12 +338,33 @@ final class ShipmentStore: ObservableObject {
             guard !tickets.contains(where: { $0.fields.duplicateIdentity == validated.duplicateIdentity }) else {
                 throw PickupStorageError.invalidData("相同出发日期、车次、站点、乘车人及座位的火车票已存在。")
             }
-            let ticket = TrainTicket(fields: validated)
+            let ticket = TrainTicket(fields: validated, displayWindow: displayWindow)
+            try ticket.validatedDisplayWindow()
             tickets.append(ticket)
             data.trainTickets = tickets
             return ticket.id
         }
     }
+    func setTrainTicketDisplayWindow(_ window: TrainTicketDisplayWindow, for tickets: [TrainTicket]) throws {
+        guard !tickets.isEmpty else { return }
+        guard Set(tickets.map(\.id)).count == tickets.count else {
+            throw PickupStorageError.invalidData("批量选择包含重复车票。")
+        }
+        try change { data in
+            var latest = data.trainTickets ?? []
+            let now = Date()
+            // Validate every full expected snapshot and candidate before assigning once.
+            for expected in tickets {
+                guard let index = latest.firstIndex(where: { $0.id == expected.id }) else { throw PickupStorageError.notFound }
+                guard latest[index] == expected else { throw PickupStorageError.staleCompletion }
+                latest[index].displayWindow = window
+                try latest[index].validatedDisplayWindow()
+                latest[index].updatedAt = now
+            }
+            data.trainTickets = latest
+        }
+    }
+
     func deleteTrainTicket(id: UUID, expected: TrainTicket) throws {
         try change { data in
             guard let current = data.trainTickets?.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
@@ -349,7 +372,10 @@ final class ShipmentStore: ObservableObject {
             data.trainTickets?.removeAll { $0.id == id }
             // Preserve fixed mode: never silently fall back to another ticket.
             if var bindings = data.trainWidgetBindings {
-                for index in bindings.indices where bindings[index].ticketID == id { bindings[index].ticketID = nil }
+                for index in bindings.indices {
+                    if bindings[index].ticketID == id { bindings[index].ticketID = nil }
+                    if bindings[index].browsingTicketID == id { bindings[index].browsingTicketID = nil }
+                }
                 data.trainWidgetBindings = bindings
             }
         }

@@ -7,6 +7,7 @@ struct TrainTicketListView: View {
     @State private var presentedTicket: TrainTicketPresentation?
     @State private var showingAdd = false
     @State private var showingBindings = false
+    @State private var showingBatchStart = false
 
     init(selectedTicketID: Binding<UUID?> = .constant(nil)) {
         _selectedTicketID = selectedTicketID
@@ -27,7 +28,13 @@ struct TrainTicketListView: View {
                             ContentUnavailableView("还没有火车票", systemImage: "tram", description: Text("手动新增，或粘贴原文识别后核对保存。不会联网查询车票。"))
                         }
                     } else {
-                        ticketSection("待出行 / 继续展示", historical: false, now: context.date)
+                        Section {
+                            Button("批量设置展示开始时间") { showingBatchStart = true }
+                                .disabled(store.isHistoricalSnapshot)
+                            Text("每张票独立展示，不会合并同行或换乘车票。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        ticketSection("待出行", historical: false, now: context.date)
                         ticketSection("历史", historical: true, now: context.date)
                     }
                     Section { TrainTicketPrivacyNote() }
@@ -44,6 +51,7 @@ struct TrainTicketListView: View {
                 }
             }
             .sheet(isPresented: $showingAdd) { TrainTicketEditorView() }
+            .sheet(isPresented: $showingBatchStart) { TrainTicketBatchStartView(tickets: store.trainTickets) }
             .sheet(isPresented: $showingBindings) {
                 NavigationStack {
                     TrainTicketWidgetSettingsView()
@@ -90,6 +98,8 @@ struct TrainTicketListView: View {
                             .font(.caption)
                         Text("乘车人：\(ticket.fields.passenger.isEmpty ? "未填" : ticket.fields.passenger)")
                             .font(.caption).privacySensitive()
+                        Text(trainTicketWindowSummary(ticket, now: now))
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                     .foregroundStyle(.primary)
                 }
@@ -98,7 +108,7 @@ struct TrainTicketListView: View {
     }
 
     private func isHistory(_ ticket: TrainTicket, now: Date) -> Bool {
-        ticket.isArchived || ticket.isEnded || (!ticket.keepVisible && ticket.fields.arrival.map { $0 <= now } == true)
+        ticket.isArchived || ticket.isEnded || (ticket.fields.arrival.map { $0 <= now } == true)
     }
 }
 
@@ -107,7 +117,6 @@ private struct TrainTicketPresentation: Identifiable { let id: UUID }
 private func trainTicketStatus(_ ticket: TrainTicket, now: Date) -> String {
     if ticket.isArchived { return "已归档" }
     if ticket.isEnded { return "已手动结束" }
-    if ticket.keepVisible { return "继续展示（晚点等）" }
     if let arrival = ticket.fields.arrival, arrival <= now { return "计划行程已结束（非乘车确认）" }
     if let departure = ticket.fields.departure, departure <= now { return "已过计划发车时间" }
     return "待出行"
@@ -134,9 +143,12 @@ struct TrainTicketDetailView: View {
                     Section("票面信息") { TrainTicketFieldSummary(fields: ticket.fields) }
                     Section("展示状态") {
                         TimelineView(.periodic(from: .now, by: 60)) { context in
-                            Text(trainTicketStatus(ticket, now: context.date))
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(trainTicketStatus(ticket, now: context.date))
+                                Text(trainTicketWindowSummary(ticket, now: context.date))
+                            }
                         }
-                        Text("计划到达只用于展示排序，不表示您已经乘车或实际到达。")
+                        Text("计划到达用于行程分组，并在未自定义结束时间时决定展示结束。按时结束展示不表示您已经乘车或实际到达。晚点时可编辑车票，延长自定义展示结束时间。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     Section("管理") {
@@ -147,11 +159,8 @@ struct TrainTicketDetailView: View {
                         Button(ticket.isEnded ? "恢复为未结束" : "手动结束行程") {
                             performOnLatest { latest in try store.setTrainTicketEnded(latest, ended: !latest.isEnded) }
                         }
-                        Toggle("晚点等原因，继续展示", isOn: Binding(
-                            get: { ticket.keepVisible },
-                            set: { value in performOnLatest { latest in try store.setTrainTicketKeepVisible(latest, keepVisible: value) } }
-                        ))
-                        Text("继续展示不会自动取消归档或手动结束；需要时请先恢复相应状态。")
+                        Button("设置展示开始／结束时间（含晚点延长）") { editingTicket = ticket }
+                        Text("延长展示不会自动取消归档或手动结束；需要时请先恢复相应状态。")
                             .font(.footnote).foregroundStyle(.secondary)
                         Button("删除车票", role: .destructive) { deletingTicket = ticket }
                     }
@@ -224,6 +233,9 @@ struct TrainTicketEditorView: View {
     @EnvironmentObject private var store: ShipmentStore
     private let original: TrainTicket?
     @State private var fields: TrainTicketFields
+    @State private var displayWindow: TrainTicketDisplayWindow
+    @State private var customEnd: Bool
+    private let initialWindow: TrainTicketDisplayWindow
     @State private var rawText = ""
     @State private var busy = false
     @State private var recognitionTask: Task<Void, Never>?
@@ -236,10 +248,17 @@ struct TrainTicketEditorView: View {
     init(ticket: TrainTicket? = nil) {
         original = ticket
         _fields = State(initialValue: ticket?.fields ?? TrainTicketFields())
+        let window = ticket?.displayWindow ?? TrainTicketDisplayWindow(
+            enabled: ticket != nil, startsAt: ticket?.widgetStartsAt, endsAt: nil
+        )
+        initialWindow = window
+        _displayWindow = State(initialValue: window)
+        _customEnd = State(initialValue: window.endsAt != nil)
     }
 
     private var hasChanges: Bool {
         fields != (original?.fields ?? TrainTicketFields()) || !rawText.isEmpty
+            || displayWindow != initialWindow || customEnd != (initialWindow.endsAt != nil)
     }
 
     var body: some View {
@@ -277,6 +296,7 @@ struct TrainTicketEditorView: View {
                     field("检票口", hint: "以现场为准", value: $fields.gate)
                     field("乘车人", hint: "可选，注意隐私", value: $fields.passenger)
                 }
+                TrainTicketWindowEditor(window: $displayWindow, customEnd: $customEnd, arrival: fields.arrival)
                 if let message { Section("提示") { Text(message).foregroundStyle(.red).textSelection(.enabled) } }
                 Section { TrainTicketPrivacyNote() }
             }
@@ -302,7 +322,7 @@ struct TrainTicketEditorView: View {
             .confirmationDialog("识别结果将替换所有票面字段", isPresented: $replaceConfirmation, titleVisibility: .visible) {
                 Button("识别并替换草稿", role: .destructive) { recognize() }
                 Button("取消", role: .cancel) { }
-            } message: { Text("请确认已保留需要的手动输入。识别失败会保留现有草稿。") }
+            } message: { Text("请确认已保留需要的手动输入。识别只替换票面字段，不修改展示开关和开始／结束时间。识别失败会保留现有草稿。") }
             .onDisappear { cancelRecognition() }
         }
     }
@@ -351,11 +371,189 @@ struct TrainTicketEditorView: View {
         guard !busy, !store.isHistoricalSnapshot else { message = "当前不可保存。"; return }
         do {
             let validated = try fields.validated()
-            _ = try store.saveTrainTicket(validated, existing: original)
+            if let problem = trainTicketWindowValidation(displayWindow, customEnd: customEnd, arrival: validated.arrival) {
+                message = problem
+                return
+            }
+            _ = try store.saveTrainTicket(validated, existing: original, displayWindow: displayWindow)
             cancelRecognition()
             rawText = ""
             dismiss()
         } catch { message = "保存失败：\(error.localizedDescription)" }
+    }
+}
+
+private let trainTicketBeijingTimeZone = TimeZone(identifier: "Asia/Shanghai")!
+
+private func trainTicketDisplayDate(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "zh_CN")
+    formatter.timeZone = trainTicketBeijingTimeZone
+    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+    return formatter.string(from: date) + "（北京时间）"
+}
+
+private func trainTicketWindowSummary(_ ticket: TrainTicket, now: Date) -> String {
+    guard ticket.displayWindow?.enabled != false else { return "组件展示已关闭" }
+    guard let start = ticket.widgetStartsAt, let end = ticket.widgetEndsAt else {
+        return "组件暂不展示：请补全展示开始／结束时间或票面到达时间"
+    }
+    let status: String
+    if ticket.isArchived || ticket.isEnded { status = "归档／手动结束，不展示" }
+    else if now < start { status = "尚未开始展示" }
+    else if now >= end { status = "展示时间已结束（非乘车确认）" }
+    else { status = "在展示时间内" }
+    let endMode = ticket.displayWindow?.endsAt == nil ? "跟随票面到达" : "自定义结束"
+    return "\(status) · 开始 \(trainTicketDisplayDate(start)) · \(endMode) \(trainTicketDisplayDate(end))"
+}
+
+private func trainTicketWindowValidation(_ window: TrainTicketDisplayWindow, customEnd: Bool, arrival: Date?) -> String? {
+    guard window.enabled else { return nil }
+    guard let start = window.startsAt else { return "请明确选择并确认展示开始时间；不会自动使用今天或发车时间。" }
+    if customEnd && window.endsAt == nil { return "请明确选择并确认自定义展示结束时间。" }
+    guard let end = window.endsAt ?? arrival else {
+        return "已开启组件展示，但没有到达时间。请补全票面到达时间，或设置自定义展示结束时间；也可关闭展示后仅保存票面。"
+    }
+    guard end > start else { return "展示结束时间必须晚于开始时间。" }
+    return nil
+}
+
+private struct TrainTicketWindowEditor: View {
+    @Binding var window: TrainTicketDisplayWindow
+    @Binding var customEnd: Bool
+    let arrival: Date?
+    @State private var suggestedStart = Date()
+    @State private var suggestedEnd = Date()
+
+    var body: some View {
+        Section("此票组件展示时间") {
+            Toggle("允许此票在组件显示", isOn: $window.enabled)
+            Text("新票默认不展示；开启后须明确选择开始时间。自动、固定和手动浏览均遵循此票的展示时间。AI 只填写票面，不更改这里的设置。")
+                .font(.footnote).foregroundStyle(.secondary)
+            if window.enabled {
+                DatePicker("展示开始（北京时间）", selection: Binding(
+                    get: { window.startsAt ?? suggestedStart },
+                    set: { window.startsAt = $0 }
+                ), displayedComponents: [.date, .hourAndMinute])
+                if window.startsAt == nil {
+                    Text("上方为待确认时间，尚未设置。请调整日期时间或点击确认。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("确认上方时间为展示开始") { window.startsAt = suggestedStart }
+                } else if let start = window.startsAt {
+                    Text("已设置开始：\(trainTicketDisplayDate(start))").font(.footnote)
+                }
+                Toggle("自定义展示结束（可延长晚点）", isOn: Binding(
+                    get: { customEnd },
+                    set: { value in customEnd = value; if !value { window.endsAt = nil } }
+                ))
+                if customEnd {
+                    DatePicker("展示结束（北京时间）", selection: Binding(
+                        get: { window.endsAt ?? suggestedEnd },
+                        set: { window.endsAt = $0 }
+                    ), displayedComponents: [.date, .hourAndMinute])
+                    if window.endsAt == nil {
+                        Text("上方为待确认时间，尚未设置结束时间。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Button("确认上方时间为展示结束") { window.endsAt = suggestedEnd }
+                    }
+                } else {
+                    Text(arrival.map { "结束跟随票面到达：\(trainTicketDisplayDate($0))" } ?? "结束跟随票面到达：尚未填写到达时间，请补全或自定义结束时间。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let problem = trainTicketWindowValidation(window, customEnd: customEnd, arrival: arrival) {
+                    Text(problem).font(.footnote).foregroundStyle(.red)
+                }
+            }
+            Text("展示时间只控制组件，不代表实际乘车或实际到达。延长展示不会取消归档或手动结束。")
+                .font(.footnote).foregroundStyle(.secondary)
+        }
+        .environment(\.timeZone, trainTicketBeijingTimeZone)
+    }
+}
+
+private struct TrainTicketBatchStartView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: ShipmentStore
+    // Full snapshots from opening the sheet are passed to the atomic store operation.
+    @State private var tickets: [TrainTicket]
+    @State private var selectedIDs: Set<UUID> = []
+    @State private var startsAt = Date()
+    @State private var confirmed = false
+    @State private var message: String?
+
+    init(tickets: [TrainTicket]) {
+        _tickets = State(initialValue: tickets)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("选择独立车票") {
+                    ForEach(tickets) { ticket in
+                        Toggle(isOn: Binding(
+                            get: { selectedIDs.contains(ticket.id) },
+                            set: { value in
+                                if value { selectedIDs.insert(ticket.id) } else { selectedIDs.remove(ticket.id) }
+                                confirmed = false
+                            }
+                        )) {
+                            VStack(alignment: .leading) {
+                                Text("\(ticket.fields.departureDate) \(ticket.fields.trainNumber) \(ticket.fields.departureStation)→\(ticket.fields.arrivalStation)")
+                                Text("\(ticket.fields.passenger.isEmpty ? "乘车人未填" : ticket.fields.passenger) · \(ticket.fields.carriage)车 \(ticket.fields.seat)")
+                                    .font(.caption).privacySensitive()
+                                if ticket.fields.arrival == nil {
+                                    Text("无到达时间：须逐票设置自定义结束，不能参与此次批量设置。")
+                                        .font(.caption).foregroundStyle(.red)
+                                }
+                                if ticket.displayWindow?.endsAt != nil {
+                                    Text("已有自定义结束；确认后将恢复跟随票面到达。")
+                                        .font(.caption).foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                    }
+                }
+                Section("统一开始时间（北京时间）") {
+                    DatePicker("展示开始", selection: $startsAt, displayedComponents: [.date, .hourAndMinute])
+                        .onChange(of: startsAt) { _, _ in confirmed = false }
+                    Text("本次统一开启显示，结束恢复跟随各票到达时间。已有自定义结束时间也会被替换；不会取消归档或手动结束。缺少到达时间时整批不保存，请先逐票补全或设置自定义结束。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Toggle("确认使用上方开始时间，并为所选票开启显示、结束恢复跟随各票到达时间", isOn: $confirmed)
+                }
+                if let message { Section("提示") { Text(message).foregroundStyle(.red) } }
+            }
+            .environment(\.timeZone, trainTicketBeijingTimeZone)
+            .disabled(store.isHistoricalSnapshot)
+            .navigationTitle("批量设置展示开始")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { save() }
+                        .disabled(selectedIDs.isEmpty || !confirmed || store.isHistoricalSnapshot)
+                }
+            }
+        }
+    }
+
+    private func save() {
+        guard !store.isHistoricalSnapshot, confirmed, !selectedIDs.isEmpty else { return }
+        let selected = tickets.filter { selectedIDs.contains($0.id) }
+        guard selected.allSatisfy({ $0.fields.arrival != nil }) else {
+            message = "未保存任何车票：所选票中有未填到达时间的票。请逐票设置自定义结束时间，或补全到达时间后再批量设置。"
+            return
+        }
+        let window = TrainTicketDisplayWindow(enabled: true, startsAt: startsAt, endsAt: nil)
+        for ticket in selected {
+            if let problem = trainTicketWindowValidation(window, customEnd: false, arrival: ticket.fields.arrival) {
+                message = "未保存任何车票：\(ticket.fields.trainNumber) \(problem)"
+                return
+            }
+        }
+        do {
+            try store.setTrainTicketDisplayWindow(window, for: selected)
+            dismiss()
+        } catch { message = "整批保存失败，未覆盖车票，请重新打开后核对：\(error.localizedDescription)" }
     }
 }
 
@@ -364,8 +562,8 @@ struct TrainTicketWidgetSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Text("A、B 是独立的火车票组件，不影响取件组件。默认 A 自动选择待出行车票，B 固定且未绑定；可将 B 固定为另一张票。两槽均选自动时可能显示同一张票。固定模式只展示所选车票。")
-                Text("修改下方选项不会立即写入；每个槽位都需点击保存。")
+                Text("A、B 是独立的火车票组件，不影响取件组件。默认 A 自动选择待出行车票，B 固定且未绑定；可将 B 固定为另一张票。两槽均选自动时可能显示同一张票。固定模式只展示所选车票；中、大号组件可手动浏览独立车票，不会合并同行或换乘票。自动、固定及手动浏览都遵循每票的显示开关、开始和结束时间，归档或手动结束的票不展示。")
+                Text("修改下方选项不会立即写入；每个槽位都需点击保存。保存自动／固定设置会清除该槽当前手动浏览的车票。")
             }
             TrainTicketSlotEditor(slot: .a)
             TrainTicketSlotEditor(slot: .b)
@@ -384,6 +582,7 @@ private struct TrainTicketSlotEditor: View {
     @State private var ticketID: UUID?
     @State private var baselineMode: TrainWidgetMode = .automatic
     @State private var baselineTicketID: UUID?
+    @State private var baselineBrowsingTicketID: UUID?
     @State private var loaded = false
     @State private var message: String?
 
@@ -422,6 +621,7 @@ private struct TrainTicketSlotEditor: View {
         ticketID = binding.ticketID
         baselineMode = binding.mode
         baselineTicketID = binding.ticketID
+        baselineBrowsingTicketID = binding.browsingTicketID
         loaded = true
         message = nil
     }
@@ -429,7 +629,8 @@ private struct TrainTicketSlotEditor: View {
     private func save() {
         guard loaded, !store.isHistoricalSnapshot else { message = "当前不可保存。"; return }
         let current = TrainTicketSelection.binding(for: slot, in: store.trainWidgetBindings)
-        guard current.mode == baselineMode, current.ticketID == baselineTicketID else {
+        guard current.mode == baselineMode, current.ticketID == baselineTicketID,
+              current.browsingTicketID == baselineBrowsingTicketID else {
             message = "此槽位已在其他位置更改，未覆盖。请先重新读取，再确认并保存。"
             return
         }
@@ -438,16 +639,18 @@ private struct TrainTicketSlotEditor: View {
             return
         }
         do {
-            let binding = TrainWidgetBinding(slot: slot, mode: mode, ticketID: mode == .fixed ? ticketID : nil)
-            let expected = TrainWidgetBinding(slot: slot, mode: baselineMode, ticketID: baselineTicketID)
+            let binding = TrainWidgetBinding(slot: slot, mode: mode, ticketID: mode == .fixed ? ticketID : nil, browsingTicketID: nil)
+            let expected = TrainWidgetBinding(slot: slot, mode: baselineMode, ticketID: baselineTicketID, browsingTicketID: baselineBrowsingTicketID)
             try store.setTrainWidgetBinding(binding, expected: expected)
             let saved = TrainTicketSelection.binding(for: slot, in: store.trainWidgetBindings)
-            guard saved.mode == binding.mode, saved.ticketID == binding.ticketID else {
+            guard saved.mode == binding.mode, saved.ticketID == binding.ticketID,
+                  saved.browsingTicketID == binding.browsingTicketID else {
                 message = "设置未能确认，请重新读取后检查。"
                 return
             }
             baselineMode = saved.mode
             baselineTicketID = saved.ticketID
+            baselineBrowsingTicketID = saved.browsingTicketID
             mode = saved.mode
             ticketID = saved.ticketID
             message = "已保存。桌面组件更新可能需要一点时间。"

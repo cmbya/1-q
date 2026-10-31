@@ -167,7 +167,8 @@ final class AIService {
                 guard let number = object["trainNumber"], !number.isEmpty,
                       number.range(of: #"^(?:[GDCZTKYLSgdcztkyls]\d{1,5}|\d{1,5})$"#, options: .regularExpression) != nil,
                       !TrainTicketRecognition.matches("(?<![A-Za-z0-9])" + NSRegularExpression.escapedPattern(for: number) + "(?![A-Za-z0-9])", text).isEmpty,
-                      object["passenger"]!.range(of: #"^[\p{L}*＊· .-]{0,40}$"#, options: .regularExpression) != nil else { throw AIServiceError.invalidResponse }
+                      object["passenger"]!.range(of: #"^[\p{L}*＊· .-]{0,40}$"#, options: .regularExpression) != nil,
+                      !TrainTicketRecognition.hasMultiplePassengers(object["passenger"]!) else { throw AIServiceError.invalidResponse }
                 for (key, pattern) in [("departureStation", #"^[\p{Han}A-Za-z· .-]{0,64}$"#),
                                        ("arrivalStation", #"^[\p{Han}A-Za-z· .-]{0,64}$"#),
                                        ("carriage", #"^\d{0,3}$"#), ("seat", #"^(?:\d{1,3}[A-Fa-f]?(?:号)?(?:上铺|中铺|下铺)?|上铺|中铺|下铺|无座)?$"#)] {

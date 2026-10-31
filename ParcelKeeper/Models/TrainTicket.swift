@@ -73,6 +73,12 @@ struct TrainTicketFields: Codable, Equatable {
     }
 }
 
+struct TrainTicketDisplayWindow: Codable, Equatable {
+    var enabled: Bool = true
+    var startsAt: Date? = nil
+    var endsAt: Date? = nil
+}
+
 struct TrainTicket: Codable, Equatable, Identifiable {
     var id: UUID = UUID()
     var fields: TrainTicketFields
@@ -81,6 +87,38 @@ struct TrainTicket: Codable, Equatable, Identifiable {
     var keepVisible: Bool = false
     var createdAt: Date = Date()
     var updatedAt: Date = Date()
+    var displayWindow: TrainTicketDisplayWindow? = nil
+
+    var widgetStartsAt: Date? {
+        if let displayWindow { return displayWindow.startsAt }
+        guard let departure = fields.departure else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        return calendar.startOfDay(for: departure)
+    }
+    var widgetEndsAt: Date? { displayWindow?.endsAt ?? fields.arrival }
+
+    // Nil is a legacy shape, not permission to display indefinitely.
+    func validatedDisplayWindow() throws {
+        guard let window = displayWindow else { return }
+        guard [window.startsAt, window.endsAt].compactMap({ $0 }).allSatisfy({ $0.timeIntervalSinceReferenceDate.isFinite }) else {
+            throw PickupStorageError.invalidData("展示窗口日期必须有效。")
+        }
+        guard window.enabled else { return }
+        guard let start = window.startsAt, let end = widgetEndsAt,
+              end.timeIntervalSinceReferenceDate.isFinite, end > start else {
+            throw PickupStorageError.invalidData("请明确展示开始时间，并提供晚于开始的结束时间或到达时间。")
+        }
+    }
+
+    func isWidgetVisible(at now: Date) -> Bool {
+        guard !isArchived, !isEnded, displayWindow?.enabled != false,
+              now.timeIntervalSinceReferenceDate.isFinite,
+              let start = widgetStartsAt, let end = widgetEndsAt,
+              start.timeIntervalSinceReferenceDate.isFinite, end.timeIntervalSinceReferenceDate.isFinite,
+              end > start else { return false }
+        return start <= now && now < end
+    }
 }
 
 enum TrainWidgetSlot: String, Codable, CaseIterable, Identifiable {
@@ -96,19 +134,40 @@ struct TrainWidgetBinding: Codable, Equatable {
     var slot: TrainWidgetSlot
     var mode: TrainWidgetMode
     var ticketID: UUID? = nil
+    var browsingTicketID: UUID? = nil
 }
 
 enum TrainTicketSelection {
     static func binding(for slot: TrainWidgetSlot, in bindings: [TrainWidgetBinding]) -> TrainWidgetBinding {
         bindings.first { $0.slot == slot } ?? TrainWidgetBinding(slot: slot, mode: slot == .a ? .automatic : .fixed)
     }
-    static func ticket(in tickets: [TrainTicket], binding: TrainWidgetBinding, now: Date) -> TrainTicket? {
-        let active = tickets.filter { !$0.isArchived && !$0.isEnded }
-        if binding.mode == .fixed { return active.first { $0.id == binding.ticketID } }
-        return active.filter { $0.keepVisible || ($0.fields.arrival.map { $0 > now } ?? true) }.sorted {
+    static func eligibleTickets(in tickets: [TrainTicket], now: Date) -> [TrainTicket] {
+        tickets.filter { $0.isWidgetVisible(at: now) }.sorted {
             let left = $0.fields.departure ?? .distantFuture
             let right = $1.fields.departure ?? .distantFuture
             return left == right ? $0.id.uuidString < $1.id.uuidString : left < right
-        }.first
+        }
+    }
+
+    static func ticket(in tickets: [TrainTicket], binding: TrainWidgetBinding, now: Date) -> TrainTicket? {
+        let eligible = eligibleTickets(in: tickets, now: now)
+        if binding.mode == .fixed { return eligible.first { $0.id == binding.ticketID } }
+        if let browsing = eligible.first(where: { $0.id == binding.browsingTicketID }) { return browsing }
+        return eligible.first
+    }
+
+    // Includes now; at most 39 future boundaries within the next 24 hours.
+    // The widget owns refresh policy if more boundaries remain after this prefix.
+    static func timelineDates(in tickets: [TrainTicket], now: Date) -> [Date] {
+        guard now.timeIntervalSinceReferenceDate.isFinite else { return [now] }
+        let horizon = now.addingTimeInterval(24 * 60 * 60)
+        let boundaries = tickets.flatMap { ticket -> [Date] in
+            guard !ticket.isArchived, !ticket.isEnded, ticket.displayWindow?.enabled != false,
+                  let start = ticket.widgetStartsAt, let end = ticket.widgetEndsAt,
+                  start.timeIntervalSinceReferenceDate.isFinite, end.timeIntervalSinceReferenceDate.isFinite,
+                  end > start else { return [] }
+            return [start, end].filter { $0 > now && $0 <= horizon }
+        }
+        return [now] + Array(Set(boundaries).sorted().prefix(39))
     }
 }

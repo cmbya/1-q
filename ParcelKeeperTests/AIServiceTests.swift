@@ -209,6 +209,20 @@ final class AIServiceTests: XCTestCase {
         }
     }
 
+    func testSymbolCodesStayProtectedWithoutRejectingIndependentCodes() async throws {
+        try enableShipmentAI()
+        for code in ["ABC*12345678", "ABC#12345678", "ABC+12345678", "ABC_12345678"] {
+            for field in ["订单号", "运单号", "手机号", "電話號碼"] {
+                try await assertPickupRejected(field + "：" + code, code: code)
+            }
+            network.responses = [(200, response(code))]
+            let result = try await service.extract("订单号987654，取件码" + code)
+            XCTAssertEqual(result.code, code)
+        }
+        let long = String(repeating: "A", count: 33)
+        try await assertPickupRejected("取件码123、" + long, code: "123")
+    }
+
     func testPickupAIKeepsLabelsOutsideProtectedSpans() async throws {
         try enableShipmentAI()
         for text in ["https://example.test/other，取件码1234", "电话13800138000，取件码1234",

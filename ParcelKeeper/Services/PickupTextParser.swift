@@ -107,22 +107,24 @@ struct PickupTextParser {
         var codes: [String] = []
         var codeOccurrences = 0
         for match in codeMatches {
-            guard let code = value(match, 1), code.count <= 32,
+            guard let code = value(match, 1),
                   PickupFieldProtection.isWholeToken(match.range(at: 1), in: text, labeled: true),
                   PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected) else { continue }
             codeOccurrences += 1
-            if !codes.contains(code) { codes.append(code) }
+            if code.count <= 32, !codes.contains(code) { codes.append(code) }
             // Only consume a list item when it is a standalone token, never a
             // numeric prefix of an address such as “456号”.
             var position = NSMaxRange(match.range)
             while position < full.length,
                   let next = continuation?.firstMatch(in: text, options: [.anchored],
                                                       range: NSRange(location: position, length: full.length - position)),
-                  let extra = value(next, 1), extra.count <= 32,
+                  let extra = value(next, 1),
                   PickupFieldProtection.isWholeToken(next.range(at: 1), in: text, labeled: true),
                   PickupFieldProtection.allows(extra, range: next.range(at: 1), protected: protected) {
                 codeOccurrences += 1
-                if !codes.contains(extra) { codes.append(extra) }
+                // Invalid lengths still prove a list; never silently select its
+                // valid first item, and never expose an invalid candidate.
+                if extra.count <= 32, !codes.contains(extra) { codes.append(extra) }
                 position = NSMaxRange(next.range)
             }
         }

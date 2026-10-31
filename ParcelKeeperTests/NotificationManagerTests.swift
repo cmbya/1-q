@@ -4,6 +4,16 @@ import XCTest
 final class NotificationManagerTests: XCTestCase {
     private let now = Date(timeIntervalSinceReferenceDate: 10_000)
 
+    func testHistoricalReminderWriteIsRejectedBeforeSideEffects() {
+        var sideEffects = 0
+        XCTAssertThrowsError(try {
+            try ReminderWriteAccess.requireWritable(isHistoricalSnapshot: true)
+            sideEffects += 1
+        }())
+        XCTAssertEqual(sideEffects, 0)
+        XCTAssertNoThrow(try ReminderWriteAccess.requireWritable(isHistoricalSnapshot: false))
+    }
+
     private enum SchedulingFailure: LocalizedError {
         case rejected
         var errorDescription: String? { "模拟调度失败" }

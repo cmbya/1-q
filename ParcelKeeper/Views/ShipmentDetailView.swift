@@ -130,7 +130,7 @@ struct ShipmentDetailView: View {
                         }
                     }
 
-                    .disabled(reminderBusy)
+                    .disabled(reminderBusy || store.isHistoricalSnapshot)
 
                     Section("记录") {
                         LabeledContent("添加时间", value: shipment.createdAt.formatted(date: .abbreviated, time: .shortened))
@@ -148,7 +148,7 @@ struct ShipmentDetailView: View {
                         Button("删除这条快递", role: .destructive) {
                             showingDeleteConfirmation = true
                         }
-                        .disabled(reminderBusy)
+                        .disabled(reminderBusy || store.isHistoricalSnapshot)
                     }
                 }
                 .navigationTitle(shipment.carrierName)
@@ -192,6 +192,7 @@ struct ShipmentDetailView: View {
     }
 
     private func handleReminderToggle(_ enabled: Bool, shipment: Shipment) {
+        guard requireReminderWriteAccess() else { return }
         if enabled {
             scheduleReminder(shipment: shipment, date: reminderDate)
         } else {
@@ -216,18 +217,30 @@ struct ShipmentDetailView: View {
         DispatchQueue.main.async { reminderInitialized = true }
     }
 
+    private func requireReminderWriteAccess() -> Bool {
+        do {
+            try ReminderWriteAccess.requireWritable(isHistoricalSnapshot: store.isHistoricalSnapshot)
+            return true
+        } catch {
+            restoreReminderControls()
+            reminderError = "历史快照只读，未操作系统提醒。"
+            return false
+        }
+    }
+
     private func scheduleReminder(shipment: Shipment, date: Date) {
-        guard !reminderBusy else { return }
+        guard requireReminderWriteAccess(), !reminderBusy else { return }
         guard store.beginReminderOperation() else { restoreReminderControls(); reminderError = "提醒操作正在进行，请稍后重试。"; return }
         reminderBusy = true
         Task { @MainActor in
             defer { reminderBusy = false; store.endReminderOperation() }
+            guard requireReminderWriteAccess() else { return }
             guard await NotificationManager.shared.requestAuthorization() else {
                 restoreReminderControls()
                 reminderError = "没有通知权限，提醒未更改。请在系统设置中开启通知。"
                 return
             }
-            guard let current = store.shipment(id: shipmentID) else { return }
+            guard requireReminderWriteAccess(), let current = store.shipment(id: shipmentID) else { return }
             do {
                 try await NotificationManager.shared.scheduleReminder(for: current, at: date)
                 do {

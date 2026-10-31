@@ -139,7 +139,12 @@ final class SharedPickupStore {
             throw PickupStorageError.invalidData("重复的火车票 ID 或组件槽位")
         }
         // Historical business duplicates are legal; validate structure, not global uniqueness.
-        for ticket in tickets { _ = try ticket.fields.validated() }
+        for ticket in tickets {
+            guard try ticket.fields.validated() == ticket.fields else {
+                throw PickupStorageError.invalidData("火车票字段含首尾空白，请先规范化后再导入。")
+            }
+            try ticket.validatedDisplayWindow()
+        }
         // Missing fixed targets deliberately resolve to an empty widget (e.g. old backups).
         for shipment in data.shipments {
             let linked = data.records.filter { $0.shipmentID == shipment.id }
@@ -244,6 +249,46 @@ final class SharedPickupStore {
             }
             data.records[index].isCompleted = true
             data.records[index].updatedAt = Date()
+        }
+    }
+
+    // Widget callers own timeline reloads. Selection and expected-ID checking both
+    // happen under the dataset lock; stale buttons cannot advance a newer selection.
+    func browseTrainWidget(slot: TrainWidgetSlot, direction: Int, expectedTicketID: UUID?, now: Date = Date()) throws {
+        guard direction == -1 || direction == 1 else {
+            throw PickupStorageError.invalidData("切换方向必须为 -1 或 1。")
+        }
+        try transaction { data in
+            let tickets = data.trainTickets ?? []
+            let binding = TrainTicketSelection.binding(for: slot, in: data.trainWidgetBindings ?? [])
+            let current = TrainTicketSelection.ticket(in: tickets, binding: binding, now: now)
+            guard current?.id == expectedTicketID else { throw PickupStorageError.staleCompletion }
+            let eligible = TrainTicketSelection.eligibleTickets(in: tickets, now: now)
+            guard eligible.count > 1 else {
+                throw PickupStorageError.invalidData("当前没有其他可展示的车票。")
+            }
+            // Empty fixed bindings can enter browsing on either end of the list.
+            let next: Int
+            if let index = eligible.firstIndex(where: { $0.id == current?.id }) {
+                next = (index + direction + eligible.count) % eligible.count
+            } else {
+                next = direction == 1 ? 0 : eligible.count - 1
+            }
+            let updated = TrainWidgetBinding(slot: slot, mode: .automatic, ticketID: nil, browsingTicketID: eligible[next].id)
+            var bindings = data.trainWidgetBindings ?? []
+            if let index = bindings.firstIndex(where: { $0.slot == slot }) { bindings[index] = updated }
+            else { bindings.append(updated) }
+            data.trainWidgetBindings = bindings
+        }
+    }
+
+    func resetTrainWidgetBrowsing(slot: TrainWidgetSlot) throws {
+        try transaction { data in
+            let updated = TrainWidgetBinding(slot: slot, mode: .automatic, ticketID: nil, browsingTicketID: nil)
+            var bindings = data.trainWidgetBindings ?? []
+            if let index = bindings.firstIndex(where: { $0.slot == slot }) { bindings[index] = updated }
+            else { bindings.append(updated) }
+            data.trainWidgetBindings = bindings
         }
     }
 
