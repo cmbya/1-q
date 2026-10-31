@@ -26,6 +26,10 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
+        CFBundleURLTypes:
+          - CFBundleURLName: com.dinghao.ParcelKeeper.train
+            CFBundleURLSchemes:
+              - parcelkeeper
     dependencies:
       - target: ParcelKeeperWidget
         embed: true
@@ -59,6 +63,7 @@ targets:
       - path: ParcelKeeper/Services/AppGroupResolver.swift
       - path: ParcelKeeper/Models/WidgetSlotBinding.swift
       - path: ParcelKeeper/Models/PickupData.swift
+      - path: ParcelKeeper/Models/TrainTicket.swift
       - path: ParcelKeeper/Models/Shipment.swift
       - path: ParcelKeeper/Services/SharedPickupStore.swift
       - path: ParcelKeeper/Services/CarrierDetector.swift

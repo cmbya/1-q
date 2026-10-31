@@ -29,6 +29,9 @@ struct PickupDataset: Codable, Equatable {
     var shipments: [Shipment]
     // Stable default for legacy shipment creation, independent of group name.
     var expressGroupID: UUID? = nil
+    // Optional so pre-train datasets and memberwise initializers remain compatible.
+    var trainTickets: [TrainTicket]? = nil
+    var trainWidgetBindings: [TrainWidgetBinding]? = nil
 }
 
 struct BackupPreview {
@@ -37,10 +40,12 @@ struct BackupPreview {
     let conflictingRecordIDs: [UUID]
     let conflictingShipmentIDs: [UUID]
     let conflictingTrackingNumbers: [String]
+    var conflictingTrainTicketIDs: [UUID] = []
+    var conflictingTrainWidgetSlots: [TrainWidgetSlot] = []
     // Detect any concurrent change between preview and confirmation.
     let baseData: Data
     var hasConflicts: Bool {
-        !conflictingGroupIDs.isEmpty || !conflictingRecordIDs.isEmpty || !conflictingShipmentIDs.isEmpty || !conflictingTrackingNumbers.isEmpty
+        !conflictingGroupIDs.isEmpty || !conflictingRecordIDs.isEmpty || !conflictingShipmentIDs.isEmpty || !conflictingTrackingNumbers.isEmpty || !conflictingTrainTicketIDs.isEmpty || !conflictingTrainWidgetSlots.isEmpty
     }
 }
 

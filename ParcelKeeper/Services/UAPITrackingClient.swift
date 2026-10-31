@@ -41,13 +41,73 @@ enum UAPIError: LocalizedError, Equatable {
     }
 }
 
-/// Only the opt-in flag enters preferences. Credentials use a separate, device-only
+/// A timestamped server snapshot, not a locally decremented or realtime balance.
+struct UAPIUsageSnapshot: Codable, Equatable {
+    let remainingCredits: Int?
+    let chargedCredits: Int?
+    let updatedAt: Date
+    let requestStartedAt: Date
+
+    init?(response: HTTPURLResponse, requestStartedAt: Date = Date()) {
+        func integer(_ raw: String) -> Int? {
+            let value = raw.trimmingCharacters(in: .whitespaces)
+            guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+            return Int(value)
+        }
+        let buckets = (response.value(forHTTPHeaderField: "RateLimit") ?? "").split(separator: ",")
+        let quota = buckets.filter { $0.split(separator: ";").first?.trimmingCharacters(in: .whitespaces) == "\"billing-quota\"" }
+        var remaining: Int?
+        if quota.count == 1 {
+            let fields = quota[0].split(separator: ";").dropFirst().map { $0.trimmingCharacters(in: .whitespaces) }
+            let values = fields.filter { $0.hasPrefix("r=") }
+            let units = fields.filter { $0.hasPrefix("uapi-unit=") }
+            if values.count == 1, units == ["uapi-unit=\"credits\""] {
+                remaining = integer(String(values[0].dropFirst(2)))
+            }
+        }
+        let charged = response.value(forHTTPHeaderField: "UAPI-Credits-Charged").flatMap(integer)
+        guard remaining != nil || charged != nil else { return nil }
+        self.remainingCredits = remaining
+        self.chargedCredits = charged
+        self.updatedAt = Date()
+        self.requestStartedAt = requestStartedAt
+    }
+}
+
+/// Only opt-in and non-secret usage snapshots enter preferences. Credentials use a separate, device-only
 /// Keychain service (the existing AIKeychainStore never syncs or backs up its item).
 final class UAPISettingsService {
     private let defaults: UserDefaults
     private let keys: any AIKeyStore
     private static let lock = NSRecursiveLock()
     private let enabledKey = "uapi.enabled"
+    private let usageKey = "uapi.usage"
+    private let generationKey = "uapi.usageGeneration"
+
+    func usageSnapshot() -> UAPIUsageSnapshot? {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard let data = defaults.data(forKey: usageKey) else { return nil }
+        return try? JSONDecoder().decode(UAPIUsageSnapshot.self, from: data)
+    }
+    func usageGeneration() -> String {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        if let value = defaults.string(forKey: generationKey) { return value }
+        let value = UUID().uuidString
+        defaults.set(value, forKey: generationKey)
+        return value
+    }
+    func recordUsage(_ response: HTTPURLResponse, generation: String, requestStartedAt: Date = Date()) {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard generation == usageGeneration(),
+              let snapshot = UAPIUsageSnapshot(response: response, requestStartedAt: requestStartedAt),
+              usageSnapshot().map({ $0.requestStartedAt <= requestStartedAt }) ?? true,
+              let data = try? JSONEncoder().encode(snapshot) else { return }
+        defaults.set(data, forKey: usageKey)
+    }
+    private func resetUsage() {
+        defaults.removeObject(forKey: usageKey)
+        defaults.set(UUID().uuidString, forKey: generationKey)
+    }
 
     init(defaults: UserDefaults = .standard, keys: any AIKeyStore = AIKeychainStore(service: "ParcelKeeper.UAPI")) {
         self.defaults = defaults
@@ -71,10 +131,12 @@ final class UAPISettingsService {
         let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.validKey(value) else { throw UAPIError.invalidKey }
         do { try keys.save(value) } catch { throw UAPIError.keychain }
+        resetUsage()
     }
     func removeKey() throws {
         Self.lock.lock(); defer { Self.lock.unlock() }
         do { try keys.delete() } catch { throw UAPIError.keychain }
+        resetUsage()
         defaults.set(false, forKey: enabledKey)
     }
     private static func validKey(_ key: String) -> Bool {
@@ -87,10 +149,10 @@ final class UAPISettingsService {
         return value
     }
     // Intentionally not exposed by settings/UI or included in any result/backup.
-    fileprivate func requestKey() throws -> String {
+    fileprivate func requestCredential() throws -> (key: String, generation: String) {
         Self.lock.lock(); defer { Self.lock.unlock() }
         guard isEnabled(), let key = try storedKey() else { throw UAPIError.notConfigured }
-        return key
+        return (key, usageGeneration())
     }
 }
 
@@ -108,7 +170,7 @@ final class UAPITrackingClient: UAPITrackingQuerying {
     func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult {
         do {
             try Task.checkCancellation()
-            let key = try settings.requestKey()
+            let credential = try settings.requestCredential()
             // Validate, never repair a supplied identifier before dispatch.
             guard (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw UAPIError.invalidTrackingNumber }
             if let phone, phone.utf8.count != 4 || !phone.utf8.allSatisfy({ (48...57).contains($0) }) { throw UAPIError.invalidPhone }
@@ -121,12 +183,15 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             guard let url = components.url else { throw UAPIError.invalidTrackingNumber }
             var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
             request.httpMethod = "GET"
-            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            request.setValue("Bearer \(credential.key)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             // Exactly one charged request. AISecureNetwork refuses all redirects.
+            let startedAt = Date()
             let (data, response) = try await network.data(for: request)
-            try Task.checkCancellation()
             guard let http = response as? HTTPURLResponse else { throw UAPIError.invalidResponse }
+            // Billing headers remain useful even on quota errors or invalid logistics bodies.
+            settings.recordUsage(http, generation: credential.generation, requestStartedAt: startedAt)
+            try Task.checkCancellation()
             switch http.statusCode {
             case 200: break
             case 204, 404: throw UAPIError.noData

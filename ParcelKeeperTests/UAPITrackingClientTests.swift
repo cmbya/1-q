@@ -167,6 +167,74 @@ final class UAPITrackingClientTests: XCTestCase {
         XCTAssertFalse(UAPIError.noData.stopsBatch)
         XCTAssertFalse(UAPIError.unavailable.stopsBatch)
     }
+    func testCreditHeadersPersistWithoutAnotherRequest() async throws {
+        try enable(); try payload()
+        network.headers = ["RateLimit": "\"billing-key-rate\";r=3;t=1,\"billing-quota\";r=2800;uapi-unit=\"credits\";t=86400,\"billing-balance\";r=860;uapi-unit=\"cents\"", "UAPI-Credits-Charged": "40"]
+        _ = try await query()
+        let usage = try XCTUnwrap(settings.usageSnapshot())
+        XCTAssertEqual(usage.remainingCredits, 2800)
+        XCTAssertEqual(usage.chargedCredits, 40)
+        XCTAssertEqual(network.requests.count, 1)
+        XCTAssertEqual(UAPISettingsService(defaults: defaults, keys: keys).usageSnapshot(), usage)
+        XCTAssertFalse(String(describing: defaults.persistentDomain(forName: suite)).contains("synthetic-uapi-key"))
+    }
+
+    func testCreditHeadersOnQuotaFailureAndMissingHeaders() async throws {
+        try enable(); try payload()
+        network.code = 402
+        network.headers = ["RateLimit": "\"billing-quota\";r=0;uapi-unit=\"credits\"", "UAPI-Credits-Charged": "0"]
+        await assertError(.quota)
+        let previous = try XCTUnwrap(settings.usageSnapshot())
+        XCTAssertEqual(previous.remainingCredits, 0)
+        network.code = 200; network.headers = [:]
+        _ = try await query()
+        XCTAssertEqual(settings.usageSnapshot(), previous)
+    }
+
+    func testCreditParserRejectsInvalidOrAmbiguousNumbers() {
+        for header in ["\"billing-balance\";r=860;uapi-unit=\"cents\"", "\"billing-key-rate\";r=3", "\"billing-quota\";r=-1;uapi-unit=\"credits\"", "\"billing-quota\";r=1.5;uapi-unit=\"credits\"", "\"billing-quota\";r=9999999999999999999999999;uapi-unit=\"credits\"", "\"billing-quota\";r=8;uapi-unit=\"cents\"", "\"billing-quota\";r=8;r=9;uapi-unit=\"credits\"", "\"billing-quota\";r=8;uapi-unit=\"credits\",\"billing-quota\";r=9;uapi-unit=\"credits\""] {
+            let response = HTTPURLResponse(url: URL(string: "https://uapis.cn")!, statusCode: 200, httpVersion: nil, headerFields: ["RateLimit": header])!
+            XCTAssertNil(UAPIUsageSnapshot(response: response))
+        }
+    }
+
+    func testChangingKeyClearsUsageAndRejectsOldInFlightResponse() async throws {
+        try enable(); try payload()
+        let generation = settings.usageGeneration()
+        network.headers = ["RateLimit": "\"billing-quota\";r=80;uapi-unit=\"credits\""]
+        _ = try await query()
+        XCTAssertNotNil(settings.usageSnapshot())
+        try settings.saveKey("new-synthetic-key")
+        XCTAssertNil(settings.usageSnapshot())
+        let response = HTTPURLResponse(url: URL(string: "https://uapis.cn")!, statusCode: 200, httpVersion: nil, headerFields: network.headers)!
+        settings.recordUsage(response, generation: generation)
+        XCTAssertNil(settings.usageSnapshot())
+        _ = try await query()
+        XCTAssertNotNil(settings.usageSnapshot())
+        try settings.removeKey()
+        XCTAssertNil(settings.usageSnapshot())
+    }
+
+    func testOlderResponseCannotOverwriteNewerSnapshotAndPartialHeadersStayUnknown() throws {
+        try enable()
+        let generation = settings.usageGeneration()
+        func response(_ remaining: Int) -> HTTPURLResponse {
+            HTTPURLResponse(url: URL(string: "https://uapis.cn")!, statusCode: 200, httpVersion: nil,
+                            headerFields: ["RateLimit": "\"billing-quota\";r=\(remaining);uapi-unit=\"credits\""])!
+        }
+        settings.recordUsage(response(40), generation: generation, requestStartedAt: Date(timeIntervalSince1970: 200))
+        settings.recordUsage(response(80), generation: generation, requestStartedAt: Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(settings.usageSnapshot()?.remainingCredits, 40)
+        let partial = HTTPURLResponse(url: URL(string: "https://uapis.cn")!, statusCode: 200, httpVersion: nil,
+                                      headerFields: ["UAPI-Credits-Charged": "0"])!
+        settings.recordUsage(partial, generation: generation)
+        XCTAssertNil(settings.usageSnapshot()?.remainingCredits)
+        XCTAssertEqual(settings.usageSnapshot()?.chargedCredits, 0)
+        keys.failure = true
+        XCTAssertThrowsError(try settings.saveKey("replacement"))
+        XCTAssertEqual(settings.usageSnapshot()?.chargedCredits, 0)
+    }
+
     func testMalformedAndCancellationDoNotLeakProviderErrors() async throws {
         try enable()
         network.body = Data("not json".utf8); await assertError(.invalidResponse)

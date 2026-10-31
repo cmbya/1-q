@@ -57,6 +57,7 @@ struct PickupSlotBundle: WidgetBundle {
     var body: some Widget {
         FirstFiveSlots().body
         LastFiveSlots().body
+        TrainSlots().body
     }
 }
 struct FirstFiveSlots: WidgetBundle {

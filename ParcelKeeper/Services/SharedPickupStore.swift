@@ -132,6 +132,15 @@ final class SharedPickupStore {
               Set(data.records.compactMap(\.shipmentID)).count == data.records.compactMap(\.shipmentID).count else {
             throw PickupStorageError.invalidData("重复 ID、空字段或无效关联")
         }
+        let tickets = data.trainTickets ?? []
+        let bindings = data.trainWidgetBindings ?? []
+        guard Set(tickets.map(\.id)).count == tickets.count,
+              Set(bindings.map(\.slot)).count == bindings.count else {
+            throw PickupStorageError.invalidData("重复的火车票 ID 或组件槽位")
+        }
+        // Historical business duplicates are legal; validate structure, not global uniqueness.
+        for ticket in tickets { _ = try ticket.fields.validated() }
+        // Missing fixed targets deliberately resolve to an empty widget (e.g. old backups).
         for shipment in data.shipments {
             let linked = data.records.filter { $0.shipmentID == shipment.id }
             guard linked.count == 1, linked[0].code == shipment.pickupCode, linked[0].source == shipment.note else {
@@ -263,6 +272,12 @@ final class SharedPickupStore {
                 conflictingRecordIDs: incoming.records.filter { r in current.records.contains { ($0.id == r.id && $0 != r) || (r.shipmentID != nil && $0.shipmentID == r.shipmentID && $0.id != r.id) } || current.groups.contains { $0.id == r.id } || current.shipments.contains { $0.id == r.id && r.shipmentID != $0.id } }.map(\.id),
                 conflictingShipmentIDs: incoming.shipments.filter { s in current.shipments.contains { $0.id == s.id && $0 != s } || current.groups.contains { $0.id == s.id } || current.records.contains { $0.id == s.id && $0.shipmentID != s.id } }.map(\.id),
                 conflictingTrackingNumbers: conflicts,
+                conflictingTrainTicketIDs: (incoming.trainTickets ?? []).filter { ticket in
+                    (current.trainTickets ?? []).contains { $0.id == ticket.id && $0 != ticket }
+                }.map(\.id),
+                conflictingTrainWidgetSlots: (incoming.trainWidgetBindings ?? []).filter { binding in
+                    (current.trainWidgetBindings ?? []).contains { $0.slot == binding.slot && $0 != binding }
+                }.map(\.slot),
                 baseData: try encoder.encode(current))
         }
     }
@@ -308,6 +323,21 @@ final class SharedPickupStore {
                 }
             }
             merge(&current.groups, incoming.groups)
+            // Absence in an old backup never clears newly introduced train data.
+            if let incomingTickets = incoming.trainTickets {
+                var tickets = current.trainTickets ?? []
+                merge(&tickets, incomingTickets)
+                current.trainTickets = tickets
+            }
+            if let incomingBindings = incoming.trainWidgetBindings {
+                var bindings = current.trainWidgetBindings ?? []
+                for binding in incomingBindings {
+                    if let index = bindings.firstIndex(where: { $0.slot == binding.slot }) {
+                        if policy == .replaceExisting { bindings[index] = binding }
+                    } else { bindings.append(binding) }
+                }
+                current.trainWidgetBindings = bindings
+            }
             // Merge never changes an existing default; fill an unset default from the backup.
             if current.expressGroupID == nil { current.expressGroupID = incoming.expressGroupID }
             for shipment in incoming.shipments {

@@ -6,6 +6,8 @@ final class ShipmentStore: ObservableObject {
     @Published private(set) var shipments: [Shipment] = []
     @Published private(set) var groups: [PickupGroup] = []
     @Published private(set) var pickupRecords: [PickupRecord] = []
+    @Published private(set) var trainTickets: [TrainTicket] = []
+    @Published private(set) var trainWidgetBindings: [TrainWidgetBinding] = []
     @Published var lastErrorMessage: String?
     @Published private(set) var reminderOperationInProgress = false
     func beginReminderOperation() -> Bool {
@@ -80,6 +82,8 @@ final class ShipmentStore: ObservableObject {
         }
         groups = data.groups.sorted { $0.sortOrder < $1.sortOrder }
         pickupRecords = data.records
+        trainTickets = data.trainTickets ?? []
+        trainWidgetBindings = data.trainWidgetBindings ?? []
     }
     @discardableResult private func change<T>(_ action: (inout PickupDataset) throws -> T) throws -> T {
         guard let storage = storage else { throw PickupStorageError.appGroupUnavailable }
@@ -89,6 +93,7 @@ final class ShipmentStore: ObservableObject {
         }
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
+        for slot in TrainWidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         // Preserve the committed snapshot even if a subsequent read fails.
         do { try reload() } catch {
             apply(committed)
@@ -310,6 +315,82 @@ final class ShipmentStore: ObservableObject {
     } }
     func pendingPickupRecords(groupID: UUID) -> [PickupRecord] { pickupRecords.filter { $0.groupID == groupID && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
 
+    // All ticket comparisons and duplicate checks use the latest dataset under flock.
+    @discardableResult
+    func saveTrainTicket(_ fields: TrainTicketFields, existing: TrainTicket? = nil) throws -> UUID {
+        let validated = try fields.validated()
+        return try change { data in
+            var tickets = data.trainTickets ?? []
+            if let existing {
+                guard let index = tickets.firstIndex(where: { $0.id == existing.id }) else { throw PickupStorageError.notFound }
+                guard tickets[index] == existing else { throw PickupStorageError.staleCompletion }
+                if validated.duplicateIdentity != existing.fields.duplicateIdentity,
+                   tickets.contains(where: { $0.id != existing.id && $0.fields.duplicateIdentity == validated.duplicateIdentity }) {
+                    throw PickupStorageError.invalidData("相同出发日期、车次、站点、乘车人及座位的火车票已存在。")
+                }
+                tickets[index].fields = validated
+                tickets[index].updatedAt = Date()
+                data.trainTickets = tickets
+                return existing.id
+            }
+            guard !tickets.contains(where: { $0.fields.duplicateIdentity == validated.duplicateIdentity }) else {
+                throw PickupStorageError.invalidData("相同出发日期、车次、站点、乘车人及座位的火车票已存在。")
+            }
+            let ticket = TrainTicket(fields: validated)
+            tickets.append(ticket)
+            data.trainTickets = tickets
+            return ticket.id
+        }
+    }
+    func deleteTrainTicket(id: UUID, expected: TrainTicket) throws {
+        try change { data in
+            guard let current = data.trainTickets?.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+            guard expected.id == id, current == expected else { throw PickupStorageError.staleCompletion }
+            data.trainTickets?.removeAll { $0.id == id }
+            // Preserve fixed mode: never silently fall back to another ticket.
+            if var bindings = data.trainWidgetBindings {
+                for index in bindings.indices where bindings[index].ticketID == id { bindings[index].ticketID = nil }
+                data.trainWidgetBindings = bindings
+            }
+        }
+    }
+    private func updateTrainTicket(_ expected: TrainTicket, mutation: (inout TrainTicket) -> Void) throws {
+        try change { data in
+            guard var tickets = data.trainTickets,
+                  let index = tickets.firstIndex(where: { $0.id == expected.id }) else { throw PickupStorageError.notFound }
+            guard tickets[index] == expected else { throw PickupStorageError.staleCompletion }
+            mutation(&tickets[index])
+            tickets[index].updatedAt = Date()
+            data.trainTickets = tickets
+        }
+    }
+    func setTrainTicketArchived(_ ticket: TrainTicket, archived: Bool) throws {
+        try updateTrainTicket(ticket) { $0.isArchived = archived }
+    }
+    func setTrainTicketEnded(_ ticket: TrainTicket, ended: Bool) throws {
+        try updateTrainTicket(ticket) { $0.isEnded = ended }
+    }
+    func setTrainTicketKeepVisible(_ ticket: TrainTicket, keepVisible: Bool) throws {
+        try updateTrainTicket(ticket) { $0.keepVisible = keepVisible }
+    }
+    func setTrainWidgetBinding(_ binding: TrainWidgetBinding, expected: TrainWidgetBinding? = nil) throws {
+        try change { data in
+            if let expected {
+                guard expected.slot == binding.slot,
+                      TrainTicketSelection.binding(for: binding.slot, in: data.trainWidgetBindings ?? []) == expected else {
+                    throw PickupStorageError.staleCompletion
+                }
+            }
+            if let id = binding.ticketID {
+                guard (data.trainTickets ?? []).contains(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+            }
+            var bindings = data.trainWidgetBindings ?? []
+            if let index = bindings.firstIndex(where: { $0.slot == binding.slot }) { bindings[index] = binding }
+            else { bindings.append(binding) }
+            data.trainWidgetBindings = bindings
+        }
+    }
+
     func makeBackupFile() -> URL? {
         do {
             guard let storage = storage else { throw PickupStorageError.appGroupUnavailable }
@@ -327,6 +408,7 @@ final class ShipmentStore: ObservableObject {
         let committed = try storage.importBackup(preview, policy: policy)
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
+        for slot in TrainWidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         do { try reload() } catch {
             apply(committed)
             lastErrorMessage = "备份已导入，但刷新失败：\(error.localizedDescription)"
