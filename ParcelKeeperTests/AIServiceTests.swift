@@ -49,6 +49,26 @@ final class AIServiceTests: XCTestCase {
         let envelope: [String: Any] = ["choices": [["message": ["content": String(data: content, encoding: .utf8)!]]]]
         return String(data: try! JSONSerialization.data(withJSONObject: envelope), encoding: .utf8)!
     }
+    func testWrappedLockerAndShortDrinkCodesKeepAIProvenance() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        for (raw, code) in [("请凭取件码 (98522212) 到丰巢取件", "98522212"), ("取茶号：【A001】", "A001"), ("取餐号：7", "7"), ("取餐號：（01）", "01")] {
+            network.responses = [(200, response(code))]
+            let result = try await service.extract(raw)
+            XCTAssertEqual(result.code, code)
+        }
+    }
+
+    func testWrappedCodesCannotBypassSensitiveFieldsOrMultipleCodeChecks() async throws {
+        try service.saveConfiguration(config(), privacyConfirmed: true)
+        try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)
+        for (raw, code) in [("订单号：取餐号 (12345)", "12345"), ("取件码 (98522212]", "98522212"), ("取餐号：(001)，(002)", "001"), ("取件码(123)，(456]", "123"), ("取餐号(001).ABC", "001"), ("今日共1个快递待取", "1"), ("取茶号001 取餐号002", "001")] {
+            network.responses = Array(repeating: (200, response(code)), count: 3)
+            do { _ = try await service.extract(raw); XCTFail("Unsafe result accepted: \(raw)") }
+            catch { guard case AIServiceError.allModelsFailed = error else { return XCTFail("\(error)") } }
+        }
+    }
+
     func testPickupPromptPersistenceValidationAndResetAreIndependent() throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         let oldJSON = defaults.data(forKey: "ai.configuration")

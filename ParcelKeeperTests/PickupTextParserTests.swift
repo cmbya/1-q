@@ -4,6 +4,31 @@ import XCTest
 final class PickupTextParserTests: XCTestCase {
     private let parser = PickupTextParser()
 
+    func testDeliveryAndDrinkLabelsWithPairedWrappers() {
+        for label in ["取件码", "取件碼", "取货码", "取餐码", "取餐号", "取餐號", "取茶号", "取茶碼", "取咖啡码", "提货码"] {
+            for (open, close) in [("", ""), ("(", ")"), ("（", "）"), ("[", "]"), ("【", "】")] {
+                let raw = "\(label)：\(open)98522212\(close)，今日共1个待取。"
+                XCTAssertEqual(parser.parse(raw).candidates.map(\.code), ["98522212"], raw)
+            }
+        }
+        for code in ["7", "01", "001", "A001", "3-4-1366", "00A-1#"] {
+            XCTAssertEqual(parser.parse("取餐号 (\(code))").candidates.map(\.code), [code])
+        }
+        let exact = "商品待取件提醒\n您的商品已存放至丰巢快递柜，请凭取件码 (98522212) 及时取件，今日共1个快递待取。"
+        XCTAssertEqual(parser.parse(exact).candidates.first?.code, "98522212")
+        XCTAssertEqual(parser.parse(exact).candidates.first?.location, "丰巢快递柜")
+        for raw in ["取件码 (98522212]", "取餐号（01", "取餐号(001)ABC", "订单号：取餐号 (12345)", "验证码：123456", "https://example.test/取件码(12345678)"] {
+            XCTAssertTrue(parser.parse(raw).candidates.isEmpty, raw)
+        }
+        XCTAssertTrue(parser.parse("取件码(123)，取件码(456)").isAmbiguous)
+        XCTAssertTrue(parser.parse("取件码(123)，(456)").isAmbiguous)
+        XCTAssertTrue(parser.parse("取件码(123,456)").candidates.isEmpty)
+        let malformedSecond = parser.parse("取件码(123)，(456]")
+        XCTAssertEqual(malformedSecond.candidates.map(\.code), ["123"])
+        XCTAssertTrue(malformedSecond.isAmbiguous)
+        XCTAssertTrue(parser.parse("取餐号(001).ABC").candidates.isEmpty)
+    }
+
     func testCainiaoHyphenLabelAndContentBracket() throws {
         let text = "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密，享号码保护服务，点击查看详情>>"
         let result = parser.parse(text)

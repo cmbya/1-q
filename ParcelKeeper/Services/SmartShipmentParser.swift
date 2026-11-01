@@ -53,7 +53,7 @@ enum SmartShipmentParser {
     private static func extractPickupCode(from input: String) -> String {
         let text = PickupFieldProtection.singleNotification(input)
             .replacingOccurrences(of: #"[－﹣‐‑‒–—−]"#, with: "-", options: .regularExpression)
-        let pattern = #"(?:取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼)\s*[：:为為是]?\s*((?>"# + PickupFieldProtection.tokenPattern + "))"
+        let pattern = PickupFieldProtection.labeledCodePattern.replacingOccurrences(of: PickupFieldProtection.labelPattern, with: "(?:" + PickupFieldProtection.labelPattern + "|凭证码|憑證碼|核销码|核銷碼)")
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return "" }
         let protected = PickupFieldProtection.ranges(in: text)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).filter { match in
@@ -65,6 +65,7 @@ enum SmartShipmentParser {
         // Preserve the existing plain/hyphen length limits, extending only the
         // supported in-code symbols. Never shorten an unsupported whole token.
         guard code.range(of: #"^(?:[A-Za-z0-9_#*+]{1,5}(?:-[A-Za-z0-9_#*+]{1,6}){1,2}|[A-Za-z0-9_#*+]{3,12})$"#, options: .regularExpression) != nil,
+              PickupFieldProtection.validWrapping(match.range(at: 1), in: text),
               PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected),
               PickupFieldProtection.isWholeToken(match.range(at: 1), in: text, labeled: true),
               !PickupFieldProtection.hasAdjacentListItem(to: match.range(at: 1), in: text) else { return "" }

@@ -17,6 +17,29 @@ final class PickupIntentTests: XCTestCase {
         try FileManager.default.removeItem(at: directory)
     }
 
+    func testWrappedLockerAndDrinkNumbersPersistThroughLocalShortcut() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        for (raw, expected) in [("您的商品已存放至丰巢快递柜，请凭取件码 (98522212) 及时取件，今日共1个快递待取。", "98522212"), ("【瑞幸】取餐号：7", "7"), ("【喜茶】取茶号：（A001）", "A001"), ("【菜鸟】取件码【3-4-1366】", "3-4-1366")] {
+            _ = try await service.recognize(text: raw, groupID: id) { candidate, _ in
+                XCTAssertEqual(candidate.code, expected)
+            }
+        }
+        XCTAssertEqual(try store.snapshot().records.map(\.code), ["98522212", "7", "A001", "3-4-1366"])
+    }
+
+    func testMalformedWrappedListsNeverPersistFirstCode() async throws {
+        let id = try XCTUnwrap(service.groups().first?.id)
+        for raw in ["取件码(123)，(456]", "取餐号(001).ABC", "订单号：取餐号 (12345)"] {
+            do {
+                _ = try await service.recognize(text: raw, groupID: id) { _, _ in
+                    XCTFail("Unsafe text must not reach confirmation")
+                }
+                XCTFail("Unsafe text accepted: \(raw)")
+            } catch PickupIntentError.confirmationRequired {} catch PickupIntentError.noCandidate {}
+        }
+        XCTAssertTrue(try store.snapshot().records.isEmpty)
+    }
+
     func testCainiaoWithoutAIAndAIFailureNeverFallsBack() async throws {
         let id = try XCTUnwrap(service.groups().first?.id)
         try await service.recognize(text: "您购买的宝贝已送达菜鸟驿站\n包裹待签收【取件码-3-4-1366】，手机号已加密", groupID: id) { candidate, _ in

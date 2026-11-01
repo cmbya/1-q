@@ -6,6 +6,32 @@ import Foundation
 enum PickupFieldProtection {
     private static let pattern = #"(?:https?://|www\.)[^\s，。；！？]+|(?:(?:订单|訂單|运单|運單|物流单|物流單|快递单|快遞單|手机|手機|电话|電話)(?:号码|號碼|编号|編號|号|號)?|单(?:号码|號碼|编号|編號|号|號)|單(?:号码|號碼|编号|編號|号|號))\s*[:：\-－﹣‐‑‒–—−]?\s*(?:取件码|取件碼|取货码|取貨碼|取餐码|取餐碼|提货码|提貨碼|凭证码|憑證碼|核销码|核銷碼)?\s*(?:是|为|為)?\s*[:：\-－﹣‐‑‒–—−]?\s*[A-Za-z0-9+._/#*\-－﹣‐‑‒–—−]+"#
 
+    static let labelPattern = #"(?:取件[码碼号號]|取[货貨][码碼号號]|提[货貨][码碼号號]|取餐[码碼号號]|取茶[码碼号號]|取咖啡[码碼号號]|自取[码碼号號]|取餐编号|取餐編號)"#
+    static let labelPrefix = labelPattern + #"\s*(?:是|为|為)?\s*[:：\-－﹣‐‑‒–—−]?\s*"#
+    static let labeledCodePattern = labelPrefix + #"[（(\[【「『]?\s*((?>"# + tokenPattern + #"))\s*[）)\]】」』]?"#
+
+    static func isExplicitlyLabeled(_ range: NSRange, in text: String) -> Bool {
+        guard let span = Range(range, in: text) else { return false }
+        let prefix = String(text[..<span.lowerBound])
+        return prefix.range(of: labelPrefix + #"[（(\[【「『]?\s*$"#, options: .regularExpression) != nil
+    }
+
+    static func validWrapping(_ range: NSRange, in text: String) -> Bool {
+        guard let span = Range(range, in: text) else { return false }
+        let before = text[..<span.lowerBound].last(where: { !$0.isWhitespace })
+        let after = text[span.upperBound...].first(where: { !$0.isWhitespace })
+        let pairs: [Character: Character] = ["(": ")", "（": "）", "[": "]", "【": "】", "「": "」", "『": "』"]
+        if let before, let close = pairs[before] {
+            guard after == close,
+                  let closing = text[span.upperBound...].firstIndex(where: { !$0.isWhitespace }) else { return false }
+            let enclosed = NSRange(span.lowerBound..<text.index(after: closing), in: text)
+            return isWholeToken(enclosed, in: text, labeled: true)
+        }
+        // Bare labels may occur inside a surrounding notification bracket;
+        // only an opening bracket directly enclosing the code requires pairing.
+        return true
+    }
+
     static let tokenPattern = #"[A-Za-z0-9][A-Za-z0-9_#*+\-－﹣‐‑‒–—−]*"#
 
     static func singleNotification(_ text: String) -> String {
@@ -52,13 +78,15 @@ enum PickupFieldProtection {
             return allows(String(part[captured]), range: candidate, protected: protected)
                 && isWholeToken(candidate, in: text)
         }
-        return validItem(suffix, pattern: #"^\s*[,，、/;；]\s*("# + item + ")", offset: range.location + range.length)
-            || validItem(prefix, pattern: "(" + item + #")\s*[,，、/;；]\s*$"#, offset: 0)
+        return validItem(suffix, pattern: #"^\s*[）)\]】」』]?\s*[,，、/;；]\s*[（(\[【「『]?\s*("# + item + ")", offset: range.location + range.length)
+            || validItem(prefix, pattern: "(" + item + #")\s*[）)\]】」』]?\s*[,，、/;；]\s*[（(\[【「『]?\s*$"#, offset: 0)
     }
 
     static func ranges(in text: String) -> [NSRange] {
         guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return [] }
-        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).map(\.range)
+        let wrappedIdentifier = #"(?:订单|訂單|运单|運單|物流单|物流單|快递单|快遞單|手机|手機|电话|電話|验证码|驗證碼)(?:号码|號碼|编号|編號|号|號)?\s*[:：\-]?\s*(?:"# + labelPattern + #")?\s*(?:是|为|為)?\s*[:：\-]?\s*[（(\[【「『]?\s*[A-Za-z0-9+._/#*\-－﹣‐‑‒–—−]+"#
+        let additional = (try? NSRegularExpression(pattern: wrappedIdentifier))?.matches(in: text, range: NSRange(text.startIndex..., in: text)).map(\.range) ?? []
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).map(\.range) + additional
     }
 
     static func allows(_ code: String, range: NSRange, protected: [NSRange]) -> Bool {
@@ -102,12 +130,13 @@ struct PickupTextParser {
         }
         // Do not parse labels embedded in links or contact/order identifiers.
         let protected = PickupFieldProtection.ranges(in: text)
-        let codeMatches = matches(#"(?:取件码|取货码|取餐码|提货码)\s*(?:是|为)?\s*[:：\-－—]?\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-])"#)
-        let continuation = try? NSRegularExpression(pattern: #"\G\s*[,，、/;；]\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-\p{Han}])"#)
+        let codeMatches = matches(PickupFieldProtection.labeledCodePattern)
+        let continuation = try? NSRegularExpression(pattern: #"\G\s*[,，、/;；]\s*[（(\[【「『]?\s*((?>[A-Za-z0-9][A-Za-z0-9_#*+\-]*))(?![A-Za-z0-9_#*+\-\p{Han}])\s*[）)\]】」』]?"#)
         var codes: [String] = []
         var codeOccurrences = 0
         for match in codeMatches {
             guard let code = value(match, 1),
+                  PickupFieldProtection.validWrapping(match.range(at: 1), in: text),
                   PickupFieldProtection.isWholeToken(match.range(at: 1), in: text, labeled: true),
                   PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected) else { continue }
             codeOccurrences += 1
@@ -124,12 +153,13 @@ struct PickupTextParser {
                 codeOccurrences += 1
                 // Invalid lengths still prove a list; never silently select its
                 // valid first item, and never expose an invalid candidate.
-                if extra.count <= 32, !codes.contains(extra) { codes.append(extra) }
+                if PickupFieldProtection.validWrapping(next.range(at: 1), in: text),
+                   extra.count <= 32, !codes.contains(extra) { codes.append(extra) }
                 position = NSMaxRange(next.range)
             }
         }
         let sources = matches(#"【([^【】\n]{1,30})】"#).compactMap { value($0, 1) }
-            .filter { $0.range(of: #"(?:取件|取货|取餐|提货)码"#, options: .regularExpression) == nil }
+            .filter { $0.range(of: PickupFieldProtection.labelPattern, options: .regularExpression) == nil && !codes.contains($0) }
         let locations = matches(#"(?:送达|至|到|地点\s*[:：]|地址\s*[:：])\s*([^，,。；;！!？?\n]+?)(?:包裹待签收|取件|取货|取餐|领取|【|[，,。；;！!？?\n]|$)"#)
             .compactMap { value($0, 1)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }

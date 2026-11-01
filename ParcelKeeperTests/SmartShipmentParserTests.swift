@@ -2,6 +2,21 @@ import XCTest
 @testable import ParcelKeeper
 
 final class SmartShipmentParserTests: XCTestCase {
+    func testWrappedLockerCodeKeepsWholeToken() throws {
+        let text = "运单号：YT1234567890123 待取件，请凭取件码 (98522212) 取件"
+        XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(text).first).pickupCode, "98522212")
+    }
+
+    func testWrappedCodesKeepLegacyLabelsAndRejectUnsafeLists() throws {
+        let header = "运单号：YT1234567890123 待取件，"
+        for label in ["取件码", "凭证码", "核销码"] {
+            XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + label + "【001】").first).pickupCode, "001")
+        }
+        for text in ["取件码(123)，(456]", "取件码(001).ABC", "订单号：取件码 (12345)", "取件码(12345678]"] {
+            XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(header + text).first).pickupCode, "", text)
+        }
+    }
+
     func testValidCodeBesideURLAndLongSymbolSuffixRemainOneParcel() throws {
         let header = "运单号：YT1234567890123 待取件，取件码："
         for tail in ["，https://example.test/detail", "，www.example.test/detail"] {
