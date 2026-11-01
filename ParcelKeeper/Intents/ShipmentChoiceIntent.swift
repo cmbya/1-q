@@ -19,7 +19,7 @@ struct ShipmentChoiceEntity: AppEntity {
         DisplayRepresentation(title: "\(carrierName) · \(trackingNumber)", subtitle: "\(summary)")
     }
     static func choices(in shipments: [Shipment]) -> [ShipmentChoiceEntity] {
-        shipments.filter { $0.status != .archived }.sorted {
+        shipments.filter(TrackingRefreshService.isPending).sorted {
             $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
         }.map(Self.init)
     }
@@ -55,7 +55,7 @@ struct RefreshSelectedShipmentIntent: AppIntent {
     }
     func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let completed = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: phone,
-            expectedTrackingNumber: shipment.trackingNumber)
+            expectedTrackingNumber: shipment.trackingNumber, pendingOnly: true)
         let message = completed ? "物流已更新，本次新增签收。" : "物流已更新。"
         return .result(value: message, dialog: "\(message)")
     }
