@@ -60,7 +60,7 @@ extension TrackingRefreshTests {
         var other = shipment!; other.id = UUID(); other.trackingNumber = "SF1234567890123"
         try storage.transaction { data in
             data.shipments.append(other)
-            data.records.append(PickupRecord(groupID: data.groups[0].id, code: "other", shipmentID: other.id))
+            data.records.append(PickupRecord(groupID: data.groups[0].id, code: other.pickupCode, source: other.note, shipmentID: other.id))
         }
     }
     func testInvalidPhoneAndKeychainFailureNeverDispatch() async throws {

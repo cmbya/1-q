@@ -26,7 +26,13 @@ final class PendingShipmentWidgetTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("none"), containerURL: root)
         let first = ticket(at: 1), second = ticket(at: 2)
-        try store.transaction { $0.shipments = [first, second] }
+        try store.transaction { data in
+            data.shipments = [first, second]
+            let group = try XCTUnwrap(data.expressGroupID)
+            data.records = [first, second].map {
+                PickupRecord(groupID: group, code: $0.pickupCode, source: $0.note, shipmentID: $0.id)
+            }
+        }
         try store.browsePendingShipment(direction: 1, expectedID: first.id)
         XCTAssertEqual(PendingShipmentSelection.selected(in: try store.snapshot())?.id, second.id)
         XCTAssertThrowsError(try store.browsePendingShipment(direction: 1, expectedID: first.id))
