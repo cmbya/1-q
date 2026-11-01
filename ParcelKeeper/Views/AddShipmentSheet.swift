@@ -75,7 +75,9 @@ struct AddShipmentSheet: View {
                 Section("UAPI查询") {
                     Toggle("保存后查询物流", isOn: $queryAfterSaving)
                     if queryAfterSaving {
-                        TextField("收件人手机尾号（可选）", text: $queryPhone).keyboardType(.numberPad)
+                        TextField("收件人手机尾号（查询时为本票保存）", text: $queryPhone).keyboardType(.numberPad)
+                        Text("尾号仅存本机钥匙串，后续自动复用；查询失败也保留。不进入JSON备份，可在快递详情修改或清除。")
+                            .font(.footnote)
                         Text("需先在设置配置UAPI，可能消耗积分。查询失败仍保留已保存的快递。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }

@@ -37,6 +37,11 @@ struct ContentView: View {
                 }
         }
         .onOpenURL { url in
+            if url.scheme == "parcelkeeper", url.host == "shipments", url.path.isEmpty {
+                store.refreshOnForeground()
+                selectedTab = 0
+                return
+            }
             guard url.scheme == "parcelkeeper", url.host == "train",
                   url.pathComponents.count == 2,
                   let id = UUID(uuidString: url.lastPathComponent) else { return }

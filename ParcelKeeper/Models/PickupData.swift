@@ -32,6 +32,8 @@ struct PickupDataset: Codable, Equatable {
     // Optional so pre-train datasets and memberwise initializers remain compatible.
     var trainTickets: [TrainTicket]? = nil
     var trainWidgetBindings: [TrainWidgetBinding]? = nil
+    // Optional preference: missing/stale IDs fall back to the first pending ticket.
+    var pendingShipmentBrowsingID: UUID? = nil
 }
 
 struct BackupPreview {

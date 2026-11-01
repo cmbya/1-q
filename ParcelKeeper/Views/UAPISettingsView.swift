@@ -59,7 +59,7 @@ struct UAPISettingsView: View {
         .confirmationDialog("允许向 UAPI 发送物流查询信息？", isPresented: $consent, titleVisibility: .visible) {
             Button("同意并启用") { run { try settings.setEnabled(true, privacyConfirmed: true); enabled = true; message = "已启用。" } }
             Button("取消", role: .cancel) {}
-        } message: { Text("每次查询会发送单号及本次提供的手机尾号，并可能消耗账户积分。") }
+        } message: { Text("每次查询会发送单号及本次提供或本票已保存的手机尾号，并可能消耗账户积分。尾号保存在本机钥匙串，可在快递详情清除，不进入JSON备份。") }
     }
     private func run(_ action: () throws -> Void) {
         do { try action() } catch { message = error.localizedDescription }

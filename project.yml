@@ -68,6 +68,7 @@ targets:
       - path: ParcelKeeper/Services/SharedPickupStore.swift
       - path: ParcelKeeper/Services/CarrierDetector.swift
       - path: ParcelKeeper/Services/PickupTextParser.swift
+      - path: ParcelKeeper/Services/PendingShipmentSelection.swift
     info:
       path: ParcelKeeperWidget/Info.plist
       properties:

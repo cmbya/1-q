@@ -26,6 +26,20 @@ struct TrackingRefreshService {
     let client: any UAPITrackingQuerying
     var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    var phones = ShipmentPhoneStore()
+
+    func savedPhone(id: UUID) throws -> String? {
+        guard let shipment = try store.snapshot().shipments.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+        return try phones.read(for: shipment)
+    }
+    /// Nil clears this ticket; refresh(nil) instead reuses its saved value.
+    func setPhone(id: UUID, phone: String?) throws {
+        let lease = try store.acquireTrackingQuery(id: id)
+        defer { lease.release() }
+        guard let shipment = try store.snapshot().shipments.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+        if let phone { try phones.save(phone, for: shipment) }
+        else { try phones.clear(for: shipment) }
+    }
     static func live() throws -> TrackingRefreshService {
         TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient())
     }
@@ -49,7 +63,12 @@ struct TrackingRefreshService {
         guard let before = try store.snapshot().shipments.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
         guard before.status != .archived else { throw ShipmentShortcutError.statusConflict }
         let number = try ShipmentShortcutParser.number(before.trackingNumber)
-        let result = try await client.query(trackingNumber: number, carrierCode: before.uapiCarrierCode, phone: phone, refresh: true)
+        // Save before the charged request: a Keychain failure must not turn a
+        // successful query into a reported failure. Nil reuses this ticket only.
+        if let phone { try phones.save(phone, for: before) }
+        let queryPhone: String?
+        if let phone { queryPhone = phone } else { queryPhone = try phones.read(for: before) }
+        let result = try await client.query(trackingNumber: number, carrierCode: before.uapiCarrierCode, phone: queryPhone, refresh: true)
         try Task.checkCancellation()
         guard result.trackingNumber == number else { throw UAPIError.invalidResponse }
         let delivered = try store.transaction { data -> Bool in

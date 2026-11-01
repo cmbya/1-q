@@ -14,6 +14,7 @@ struct ShipmentDetailView: View {
     @State private var reminderInitialized = false
     @State private var reminderError: String?
     @State private var queryPhone = ""
+    @State private var hasSavedPhone = false
     @State private var querying = false
     @State private var queryMessage: String?
 
@@ -54,12 +55,35 @@ struct ShipmentDetailView: View {
                     }
 
                     Section("UAPI查询") {
-                        TextField("收件人手机尾号（可选，仅本次使用）", text: $queryPhone)
+                        LabeledContent("本票手机尾号", value: hasSavedPhone ? "已保存" : "未保存")
+                        TextField("手机尾号（留空复用已保存值）", text: $queryPhone)
                             .keyboardType(.numberPad)
+                            .disabled(querying || store.isHistoricalSnapshot)
+                        Text("填写后自动为本票保存，后续刷新及快捷指令复用。仅存本机钥匙串，不进入JSON备份。网络查询失败也会保留填写值。")
+                            .font(.footnote)
+                        Button("保存／修改尾号（不查询）") {
+                            do {
+                                try TrackingRefreshService.live().setPhone(id: shipmentID, phone: queryPhone)
+                                queryPhone = ""
+                                hasSavedPhone = true
+                                queryMessage = "本票手机尾号已保存。"
+                            } catch { queryMessage = error.localizedDescription }
+                        }.disabled(querying || store.isHistoricalSnapshot || queryPhone.isEmpty)
+                        Button("清除本票已保存尾号", role: .destructive) {
+                            do {
+                                try TrackingRefreshService.live().setPhone(id: shipmentID, phone: nil)
+                                queryPhone = ""
+                                hasSavedPhone = false
+                                queryMessage = "本票保存的手机尾号已清除。"
+                            } catch { queryMessage = error.localizedDescription }
+                        }.disabled(querying || store.isHistoricalSnapshot)
                         Button(querying ? "正在查询" : "刷新物流") {
                             querying = true
                             Task { @MainActor in
-                                defer { querying = false }
+                                defer {
+                                    querying = false
+                                    if let saved = try? TrackingRefreshService.live().savedPhone(id: shipmentID) { hasSavedPhone = !saved.isEmpty }
+                                }
                                 do {
                                     _ = try await TrackingRefreshService.live().refresh(id: shipmentID, phone: queryPhone.isEmpty ? nil : queryPhone)
                                     try store.reload()
@@ -157,6 +181,8 @@ struct ShipmentDetailView: View {
                     reminderEnabled = shipment.reminderDate != nil
                     reminderDate = shipment.reminderDate ?? Date().addingTimeInterval(8 * 60 * 60)
                     reminderInitialized = true
+                    do { hasSavedPhone = try TrackingRefreshService.live().savedPhone(id: shipmentID) != nil }
+                    catch { queryMessage = "无法读取已保存尾号：\(error.localizedDescription)" }
                 }
                 .confirmationDialog("确定删除这条快递吗？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
                     Button("删除", role: .destructive) {

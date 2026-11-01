@@ -7,10 +7,12 @@ final class TrackingRefreshTests: XCTestCase {
         var failure: Error?
         var calls = 0
         var queriedNumbers: [String] = []
+        var queriedPhones: [String?] = []
         var result = UAPITrackingResult(trackingNumber: "YT1234567890123", carrierName: "圆通速递", carrierCode: "yuantong", status: .delivered, logisticsInfo: "本人签收", logisticsTime: Date(timeIntervalSinceReferenceDate: 2000), queryInfo: "完整查询信息", queriedAt: Date(timeIntervalSinceReferenceDate: 3000))
         func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult {
             calls += 1
             queriedNumbers.append(trackingNumber)
+            queriedPhones.append(phone)
             try onQuery?()
             if let failure { throw failure }
             return result

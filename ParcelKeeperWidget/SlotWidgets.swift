@@ -58,6 +58,7 @@ struct PickupSlotBundle: WidgetBundle {
         FirstFiveSlots().body
         LastFiveSlots().body
         TrainSlots().body
+        PendingShipmentWidget()
     }
 }
 struct FirstFiveSlots: WidgetBundle {

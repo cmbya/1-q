@@ -175,6 +175,7 @@ struct ParcelKeeperDiagnosticBundle: WidgetBundle {
         diagnosisWidgets()
         productionSlots()
         TrainSlots().body
+        PendingShipmentWidget()
     }
     // Actual A–J configurations/providers/views, not D3 substitutes.
     @WidgetBundleBuilder
