@@ -65,11 +65,18 @@ struct TrackingRefreshService {
         guard !pendingOnly || Self.isPending(before) else { throw ShipmentShortcutError.statusConflict }
         let number = try ShipmentShortcutParser.number(before.trackingNumber)
         if let expectedTrackingNumber, number != expectedTrackingNumber { throw PickupStorageError.stalePreview }
-        // Save before the charged request: a Keychain failure must not turn a
-        // successful query into a reported failure. Nil reuses this ticket only.
-        if let phone { try phones.save(phone, for: before) }
+        // Shortcut optional text can arrive as "" instead of nil. Only an
+        // entirely blank input means omitted; never repair nonblank credentials.
+        let suppliedPhone: String?
+        if let phone, !phone.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            suppliedPhone = phone
+        } else {
+            suppliedPhone = nil
+        }
+        // Save before the charged request. Blank input reuses, never clears.
+        if let suppliedPhone { try phones.save(suppliedPhone, for: before) }
         let queryPhone: String?
-        if let phone { queryPhone = phone } else { queryPhone = try phones.read(for: before) }
+        if let suppliedPhone { queryPhone = suppliedPhone } else { queryPhone = try phones.read(for: before) }
         let result = try await client.query(trackingNumber: number, carrierCode: before.uapiCarrierCode, phone: queryPhone, refresh: true)
         try Task.checkCancellation()
         guard result.trackingNumber == number else { throw UAPIError.invalidResponse }

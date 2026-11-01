@@ -2,6 +2,49 @@ import XCTest
 @testable import ParcelKeeper
 
 extension TrackingRefreshTests {
+    func testBlankRefreshPhoneReusesSavedSuffixAcrossEntrypoints() async throws {
+        let keys = PhoneKeys(); let client = Client(); client.failure = UAPIError.noData
+        var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
+        service.phones = ShipmentPhoneStore(keys: keys)
+        try service.setPhone(id: shipment.id, phone: "0123")
+        let inputs: [String?] = [nil, "", " ", "\t\n", "　"]
+        for input in inputs {
+            do {
+                _ = try await service.refresh(id: shipment.id, phone: input,
+                    expectedTrackingNumber: shipment.trackingNumber, pendingOnly: true)
+                XCTFail("Mock must fail after dispatch")
+            } catch UAPIError.noData {}
+            do {
+                _ = try await service.refresh(trackingNumber: shipment.trackingNumber, phone: input)
+                XCTFail("Mock must fail after dispatch")
+            } catch UAPIError.noData {}
+        }
+        XCTAssertEqual(client.queriedPhones, Array(repeating: Optional("0123"), count: 10))
+        XCTAssertEqual(try service.savedPhone(id: shipment.id), "0123")
+    }
+    func testBlankRefreshWithoutSavedPhoneDispatchesNil() async throws {
+        let keys = PhoneKeys(); let client = Client(); client.failure = UAPIError.noData
+        var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
+        service.phones = ShipmentPhoneStore(keys: keys)
+        for input in ["", " \n"] {
+            do { _ = try await service.refresh(id: shipment.id, phone: input); XCTFail() }
+            catch UAPIError.noData {}
+        }
+        XCTAssertEqual(client.queriedPhones, [nil, nil])
+        XCTAssertTrue(keys.values.isEmpty)
+    }
+    func testInvalidNonblankPhoneDoesNotOverwriteSavedSuffix() async throws {
+        let keys = PhoneKeys(); let client = Client()
+        var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
+        service.phones = ShipmentPhoneStore(keys: keys)
+        try service.setPhone(id: shipment.id, phone: "0123")
+        for input in ["123", "12345", "１２３４", "12a4", " 1234", "1234\n"] {
+            do { _ = try await service.refresh(id: shipment.id, phone: input); XCTFail(input) }
+            catch UAPIError.invalidPhone {}
+        }
+        XCTAssertEqual(client.calls, 0)
+        XCTAssertEqual(try service.savedPhone(id: shipment.id), "0123")
+    }
     final class PhoneKeys: AIKeyStore {
         var values: [String: String] = [:]
         var fail = false
