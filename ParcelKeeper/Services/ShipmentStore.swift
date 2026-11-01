@@ -17,6 +17,8 @@ final class ShipmentStore: ObservableObject {
     }
     func endReminderOperation() { reminderOperationInProgress = false }
     private var storage: SharedPickupStore?
+    var shipmentPhones = ShipmentPhoneStore()
+    var reloadWidget: (String) -> Void = { WidgetCenter.shared.reloadTimelines(ofKind: $0) }
     var isHistoricalSnapshot: Bool { storage?.isReadOnly == true }
 
     // Configure ParcelKeeperAppGroup in Info.plist and matching entitlements for every target.
@@ -94,6 +96,7 @@ final class ShipmentStore: ObservableObject {
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         for slot in TrainWidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
+        reloadWidget(PendingShipmentSelection.kind)
         // Preserve the committed snapshot even if a subsequent read fails.
         do { try reload() } catch {
             apply(committed)
@@ -142,15 +145,35 @@ final class ShipmentStore: ObservableObject {
         catch { lastErrorMessage = error.localizedDescription; return false }
     }
     func deleteThrowing(id: UUID) throws {
-        try change { d in
-            guard d.shipments.contains(where: { $0.id == id }) else { throw PickupStorageError.notFound }
-            d.shipments.removeAll { $0.id == id }; d.records.removeAll { $0.shipmentID == id }
+        try deleteShipments(ids: [id])
+    }
+    private func deleteShipments(ids: Set<UUID>) throws {
+        guard let storage else { throw PickupStorageError.appGroupUnavailable }
+        var leases: [SharedPickupStore.TrackingQueryLease] = []
+        defer { leases.forEach { $0.release() } }
+        // Use the same lease as refresh/setPhone, before taking the dataset lock.
+        for id in ids.sorted(by: { $0.uuidString < $1.uuidString }) {
+            leases.append(try storage.acquireTrackingQuery(id: id))
+        }
+        try change { data in
+            let targets = data.shipments.filter { ids.contains($0.id) }
+            guard targets.count == ids.count else { throw PickupStorageError.notFound }
+            // Clear first. On Keychain failure keep records accessible for retry.
+            // JSON and Keychain cannot commit atomically: a later disk failure may
+            // require re-entering a cleared suffix, but must never orphan a secret.
+            for target in targets {
+                if (try? ShipmentShortcutParser.number(target.trackingNumber)) != nil {
+                    try shipmentPhones.clear(for: target)
+                }
+            }
+            data.shipments.removeAll { ids.contains($0.id) }
+            data.records.removeAll { $0.shipmentID.map { ids.contains($0) } ?? false }
         }
     }
     func delete(id: UUID) { do { try deleteThrowing(id: id) } catch { lastErrorMessage = error.localizedDescription } }
     func delete(at offsets: IndexSet, in filteredShipments: [Shipment]) {
         let ids = Set(offsets.map { filteredShipments[$0].id })
-        perform { d in d.shipments.removeAll { ids.contains($0.id) }; d.records.removeAll { $0.shipmentID.map { ids.contains($0) } ?? false } }
+        reportWriteError { try deleteShipments(ids: ids) }
     }
     private func updateThrowing(id: UUID, mutation: (inout Shipment) -> Void) throws {
         try change { data in
@@ -435,6 +458,7 @@ final class ShipmentStore: ObservableObject {
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         for slot in TrainWidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
+        reloadWidget(PendingShipmentSelection.kind)
         do { try reload() } catch {
             apply(committed)
             lastErrorMessage = "备份已导入，但刷新失败：\(error.localizedDescription)"

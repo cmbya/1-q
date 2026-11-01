@@ -3,6 +3,13 @@ import Foundation
 /// Presentation preference only; no network calls or shipment mutations.
 enum PendingShipmentSelection {
     static let kind = "PendingShipmentWidget"
+    static func isBrowsing(in data: PickupDataset) -> Bool {
+        guard let id = data.pendingShipmentBrowsingID else { return false }
+        return eligible(data.shipments).contains { $0.id == id }
+    }
+    static func normalizeBrowsing(in data: inout PickupDataset) {
+        if !isBrowsing(in: data) { data.pendingShipmentBrowsingID = nil }
+    }
     static func eligible(_ shipments: [Shipment]) -> [Shipment] {
         shipments.filter { $0.status != .delivered && $0.status != .archived }.sorted {
             $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt

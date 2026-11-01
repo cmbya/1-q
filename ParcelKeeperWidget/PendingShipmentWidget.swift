@@ -25,7 +25,7 @@ struct PendingShipmentProvider: TimelineProvider {
             let data = try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData).snapshot()
             return .init(date: Date(), shipment: PendingShipmentSelection.selected(in: data),
                          ids: PendingShipmentSelection.eligible(data.shipments).map(\.id),
-                         browsing: data.pendingShipmentBrowsingID != nil, error: false)
+                         browsing: PendingShipmentSelection.isBrowsing(in: data), error: false)
         } catch {
             return .init(date: Date(), shipment: nil, ids: [], browsing: false, error: true)
         }

@@ -223,6 +223,7 @@ final class SharedPickupStore {
         return try locked {
             var data = try readOrMigrate()
             let result = try mutation(&data)
+            PendingShipmentSelection.normalizeBrowsing(in: &data)
             try write(data)
             return result
         }
