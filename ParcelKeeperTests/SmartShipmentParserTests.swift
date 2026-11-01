@@ -2,6 +2,16 @@ import XCTest
 @testable import ParcelKeeper
 
 final class SmartShipmentParserTests: XCTestCase {
+    func testWrappedPickupFieldsAreNotSecondTrackingNumbers() {
+        let tracking = "YT1234567890123"
+        for label in ["取件码", "取餐号", "取茶号", "凭证码", "核销码"] {
+            for (open, close) in [("(", ")"), ("（", "）"), ("【", "】"), ("(", "]")] {
+                XCTAssertEqual(ShipmentShortcutParser.numbers(in: "运单号：\(tracking) 待取件，\(label)\(open)98522212\(close)"), [tracking])
+            }
+        }
+        XCTAssertEqual(Set(ShipmentShortcutParser.numbers(in: "运单号：\(tracking) 另一运单AB123456 取件码(98522212)")), Set([tracking, "AB123456"]))
+    }
+
     func testWrappedLockerCodeKeepsWholeToken() throws {
         let text = "运单号：YT1234567890123 待取件，请凭取件码 (98522212) 取件"
         XCTAssertEqual(try XCTUnwrap(SmartShipmentParser.parse(text).first).pickupCode, "98522212")
