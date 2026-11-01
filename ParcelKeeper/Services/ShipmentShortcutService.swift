@@ -157,15 +157,24 @@ enum ShipmentShortcutParser {
         let state = value("当前状态").flatMap(status)
         // A labeled progress field owns its body even without a timestamp;
         // do not let generic page/title filtering discard its status.
-        let observed = event.flatMap { $0.state } ?? info.flatMap { status($0) }
+        let observed: ShipmentStatus?
+        if let eventState = event?.state {
+            observed = eventState
+        } else if let info {
+            observed = status(info)
+        } else {
+            observed = nil
+        }
         // The explicitly labeled current state wins over event wording.
         // Do not search the full query/history for a competing status.
         let suppliedTime = value("最新时间")
         let time = suppliedTime.flatMap(date)
         if suppliedTime != nil && time == nil { throw ShipmentShortcutError.invalidText }
         if let time, let eventTime = event?.time, time != eventTime { throw ShipmentShortcutError.ambiguous }
+        let resolvedStatus: ShipmentStatus?
+        if let state { resolvedStatus = state } else { resolvedStatus = observed }
         return .init(trackingNumber: trackingNumber, carrierName: value("快递公司"),
-                     logisticsInfo: event?.info ?? info, status: state ?? observed, logisticsTime: event?.time ?? time,
+                     logisticsInfo: event?.info ?? info, status: resolvedStatus, logisticsTime: event?.time ?? time,
                      hasExplicitCurrentStatus: state != nil)
     }
 
