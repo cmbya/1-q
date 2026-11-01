@@ -56,13 +56,14 @@ struct TrackingRefreshService {
         return try await refresh(id: shipment.id, phone: phone)
     }
     /// Returns whether this update newly completed a shipment.
-    func refresh(id: UUID, phone: String? = nil) async throws -> Bool {
+    func refresh(id: UUID, phone: String? = nil, expectedTrackingNumber: String? = nil) async throws -> Bool {
         try Task.checkCancellation()
         let lease = try store.acquireTrackingQuery(id: id)
         defer { lease.release() }
         guard let before = try store.snapshot().shipments.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
         guard before.status != .archived else { throw ShipmentShortcutError.statusConflict }
         let number = try ShipmentShortcutParser.number(before.trackingNumber)
+        if let expectedTrackingNumber, number != expectedTrackingNumber { throw PickupStorageError.stalePreview }
         // Save before the charged request: a Keychain failure must not turn a
         // successful query into a reported failure. Nil reuses this ticket only.
         if let phone { try phones.save(phone, for: before) }

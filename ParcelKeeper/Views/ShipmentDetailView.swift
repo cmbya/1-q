@@ -93,7 +93,7 @@ struct ShipmentDetailView: View {
                             }
                         }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
                         if let time = shipment.lastQueriedAt {
-                            LabeledContent("最后查询", value: time.formatted(date: .abbreviated, time: .shortened))
+                            LabeledContent("最后查询", value: ShipmentDateDisplay.string(time))
                         }
                         if let queryMessage { Text(queryMessage).font(.footnote) }
                     }
@@ -113,7 +113,7 @@ struct ShipmentDetailView: View {
                         Section("最新物流信息") {
                             Text(info).textSelection(.enabled)
                             if let time = shipment.logisticsTime {
-                                LabeledContent("物流发生时间", value: time.formatted(date: .abbreviated, time: .shortened))
+                                LabeledContent("物流发生时间", value: ShipmentDateDisplay.string(time))
                             }
                         }
                     }
@@ -157,9 +157,9 @@ struct ShipmentDetailView: View {
                     .disabled(reminderBusy || store.isHistoricalSnapshot)
 
                     Section("记录") {
-                        LabeledContent("添加时间", value: shipment.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        LabeledContent("添加时间", value: ShipmentDateDisplay.string(shipment.createdAt))
                         if let lastCheckedAt = shipment.lastCheckedAt {
-                            LabeledContent("最后查看", value: lastCheckedAt.formatted(date: .abbreviated, time: .shortened))
+                            LabeledContent("最后查看", value: ShipmentDateDisplay.string(lastCheckedAt))
                         }
                         Button {
                             saveEdit { try store.markCheckedThrowing(id: shipmentID) }

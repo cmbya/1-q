@@ -1,5 +1,17 @@
 import Foundation
 
+/// Chinese presentation only; preserve device timezone and stored instants.
+enum ShipmentDateDisplay {
+    static func string(_ date: Date, timeZone: TimeZone = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy年M月d日 HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
 struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var id: UUID
     var trackingNumber: String

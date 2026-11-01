@@ -34,7 +34,7 @@ struct UAPISettingsView: View {
                     LabeledContent("剩余积分（资源包）", value: usage.remainingCredits.map { "\($0) 积分" } ?? "本次未返回")
                     LabeledContent("本次查询消耗", value: usage.chargedCredits.map { "\($0) 积分" } ?? "本次未返回")
                     LabeledContent("更新于") {
-                        Text(usage.updatedAt, format: .dateTime.year().month().day().hour().minute().second())
+                        Text(ShipmentDateDisplay.string(usage.updatedAt))
                     }
                 } else {
                     Text("暂未获取积分信息")

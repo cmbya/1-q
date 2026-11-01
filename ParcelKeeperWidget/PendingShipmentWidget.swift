@@ -88,11 +88,11 @@ struct PendingShipmentWidgetView: View {
                 Text(shipment.logisticsInfo.flatMap { $0.isEmpty ? nil : $0 } ?? "暂无物流信息，请在 App 中刷新")
                     .font(.caption).lineLimit(large ? 7 : 2).privacySensitive()
                 if let time = shipment.logisticsTime {
-                    Text("物流更新：\(time.formatted(date: .abbreviated, time: .shortened))")
+                    Text("物流更新：\(ShipmentDateDisplay.string(time))")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 if large, let time = shipment.lastQueriedAt {
-                    Text("最近查询：\(time.formatted(date: .abbreviated, time: .shortened))")
+                    Text("最近查询：\(ShipmentDateDisplay.string(time))")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
             } else {

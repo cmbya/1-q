@@ -19,7 +19,7 @@ struct ShipmentRow: View {
             if let info = shipment.logisticsInfo, !info.isEmpty {
                 Text(info).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
                 if let time = shipment.logisticsTime {
-                    Text(time.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.secondary)
+                    Text(ShipmentDateDisplay.string(time)).font(.caption2).foregroundStyle(.secondary)
                 }
             }
 
