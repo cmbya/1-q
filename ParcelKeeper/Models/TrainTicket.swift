@@ -1,5 +1,31 @@
 import Foundation
 
+/// UI conversion only; stored fields retain their canonical formats.
+enum TrainDateInput {
+    private static func formatter(_ format: String) -> DateFormatter {
+        let result = DateFormatter()
+        result.locale = Locale(identifier: "zh_CN")
+        result.calendar = Calendar(identifier: .gregorian)
+        result.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        result.dateFormat = format
+        result.isLenient = false
+        return result
+    }
+    static func parsed(_ raw: String, isDate: Bool) -> Date? {
+        let input = isDate ? raw + " 12:00" : "2000-01-01 " + raw
+        let f = formatter("yyyy-MM-dd HH:mm")
+        guard let date = f.date(from: input), f.string(from: date) == input else { return nil }
+        return date
+    }
+    static func value(_ date: Date, isDate: Bool) -> String {
+        formatter(isDate ? "yyyy-MM-dd" : "HH:mm").string(from: date)
+    }
+    static func displayDay(_ raw: String) -> String {
+        guard let date = parsed(raw, isDate: true) else { return raw }
+        return formatter("yyyy年M月d日").string(from: date)
+    }
+}
+
 struct TrainTicketFields: Codable, Equatable {
     var departureDate: String = ""
     var trainNumber: String = ""

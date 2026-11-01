@@ -9,6 +9,7 @@ struct ParcelKeeperApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
+                .environment(\.locale, Locale(identifier: "zh_CN"))
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
                     do { try store.reload() }

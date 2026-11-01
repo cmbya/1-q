@@ -181,7 +181,7 @@ struct TrainTicketWidgetView: View {
                 .lineLimit(large ? 2 : 1).minimumScaleFactor(0.75)
             Text(display(time)).font(large ? .title3.monospacedDigit() : .caption.monospacedDigit())
                 .lineLimit(1).minimumScaleFactor(0.8)
-            Text(display(date)).font(.system(size: textSize)).foregroundStyle(.secondary)
+            Text(display(TrainDateInput.displayDay(date))).font(.system(size: textSize)).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

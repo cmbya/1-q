@@ -277,17 +277,17 @@ struct TrainTicketEditorView: View {
                     NavigationLink("编辑火车票 AI 提示词") { TrainTicketPromptView() }
                 }
                 Section("必填信息") {
-                    field("发车日期 *", hint: "yyyy-MM-dd（含年份）", value: $fields.departureDate)
+                    TrainDateField("发车日期 *", value: $fields.departureDate, isDate: true)
                     field("车次 *", hint: "如 G123", value: $fields.trainNumber)
                     field("出发站 *", hint: "如 北京南", value: $fields.departureStation)
-                    field("发车时间 *", hint: "HH:mm", value: $fields.departureTime)
+                    TrainDateField("发车时间 *", value: $fields.departureTime, isDate: false)
                     field("到达站 *", hint: "如 上海虹桥", value: $fields.arrivalStation)
                     Text("日期不会自动补为今天。原文缺少年份时请核对并完整填写发车日期，再保存。所有时间按中国标准时间（北京时间）。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("其他票面信息") {
-                    field("到达日期（辅助）", hint: "yyyy-MM-dd", value: $fields.arrivalDate)
-                    field("到达时间", hint: "HH:mm", value: $fields.arrivalTime)
+                    TrainDateField("到达日期（辅助）", value: $fields.arrivalDate, isDate: true)
+                    TrainDateField("到达时间", value: $fields.arrivalTime, isDate: false)
                     Text("到达日期和到达时间需要同时填写或同时留空。跨日行程请填写真实到达日期。")
                         .font(.footnote).foregroundStyle(.secondary)
                     field("车厢", hint: "如 03", value: $fields.carriage)
@@ -389,7 +389,7 @@ private func trainTicketDisplayDate(_ date: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "zh_CN")
     formatter.timeZone = trainTicketBeijingTimeZone
-    formatter.dateFormat = "yyyy-MM-dd HH:mm"
+    formatter.dateFormat = "yyyy年M月d日 HH:mm"
     return formatter.string(from: date) + "（北京时间）"
 }
 
