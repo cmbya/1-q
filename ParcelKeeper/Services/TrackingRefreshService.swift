@@ -165,6 +165,10 @@ struct TrackingRefreshService {
     }
     /// Returns whether this update newly completed a shipment.
     func refresh(id: UUID, phone: String? = nil, expectedTrackingNumber: String? = nil, pendingOnly: Bool = false, mode: TrackingRefreshMode = .automatic) async throws -> Bool {
+        let logID = UUID()
+        DiagnosticLog.shared.record(.trackingStarted, operation: logID)
+        var logSucceeded = false
+        defer { DiagnosticLog.shared.record(logSucceeded ? .trackingFinished : .trackingFailed, operation: logID, reason: logSucceeded ? nil : .unknown) }
         try Task.checkCancellation()
         let lease = try store.acquireTrackingQuery(id: id)
         defer { lease.release() }
@@ -250,6 +254,7 @@ struct TrackingRefreshService {
             return oldStatus != .delivered && current.status == .delivered
         }
         reloadWidgets()
+        logSucceeded = true
         return delivered
         } catch {
             // Never replace the original exception if recording the safe diagnostic fails.

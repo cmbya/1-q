@@ -30,6 +30,11 @@ function environment() {
 const url = (callback, fn = 'order_list_m', host = 'api.m.jd.com') => `https://${host}/api?functionId=${fn}&callback=${encodeURIComponent(callback)}`;
 function run(name, test) { tests.push([name,test]); }
 const tests = [];
+run('diagnostic readiness and request observation preserve callbacks', () => {
+  const {c,messages}=environment(); assert.equal(c.__mallObserverReady,true);
+  c.cb=v=>v; const s=new c.HTMLScriptElement(); s.src=url('cb'); c.document.appendChild(s);
+  assert.ok(c.__mallRequestsObserved>0); c.cb({body:{orderList:[]}}); assert.equal(messages.length,1);
+});
 run('existing callback keeps this, args, result; URL unchanged', () => {
   const {c,messages} = environment(); let seen;
   c.jd = {done: function(...args) { seen = [this,args]; return 42; }};

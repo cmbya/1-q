@@ -385,6 +385,10 @@ enum MallWebParser {
     private var detailOrderID: String?
     private var queryDeadline: Date?
     private(set) var diagnosticMessage = "尚未读取网页。"
+    private var logOperation = UUID()
+    private func log(_ event: DiagnosticEvent, reason: DiagnosticReason? = nil, counts: [DiagnosticMetric: Int] = [:]) {
+        DiagnosticLog.shared.record(event, operation: logOperation, reason: reason, counts: counts)
+    }
     private let isolatedContext: Bool
     init(platform: MallPlatform, cookies: [TaobaoTrialCookie], isolatedContext: Bool = false) {
         self.platform = platform; self.cookies = cookies; self.isolatedContext = isolatedContext
@@ -414,6 +418,10 @@ enum MallWebParser {
         guard MallSession.hasLoginCredentials(current, platform: platform) else { throw MallWebError.authentication }
     }
     func fetchOrders() async throws -> [MallCandidate] {
+        logOperation = UUID()
+        log(.mallFetchStarted)
+        var completed = false
+        defer { if !completed { log(.mallFetchFailed, reason: .unknown) } }
         try await prepare()
         defer { cleanup() }
         try load(platform.ordersURL)
@@ -437,6 +445,8 @@ enum MallWebParser {
             return detail
         }
         diagnosticMessage = listDiagnostic + "\n" + result.message + " 下单日期未知或范围外未导入\(unverifiedDate)单。"
+        completed = true
+        log(.mallFetchFinished, counts: [.candidates: result.candidates.count, .accepted: result.attempted, .rejected: result.failed])
         return result.candidates
     }
     func query(orderID: String, trackingNumber: String, sourceURL: String? = nil) async throws -> UAPITrackingResult {
@@ -504,7 +514,8 @@ enum MallWebParser {
         queryDeadline = nil; detailOrderID = nil
     }
     private func load(_ url: URL) throws {
-        guard platform.allowed(url), let web else { throw MallWebError.unsupported }
+        log(.mallPageLoad)
+        guard platform.allowed(url), let web else { log(.mallNavigationRejected, reason: .url); throw MallWebError.unsupported }
         captures.removeAll(); failure = nil
         generation = UUID().uuidString
         let controller = web.configuration.userContentController
@@ -514,11 +525,11 @@ enum MallWebParser {
     }
     private func tick() async throws -> (URL, String) {
         try Task.checkCancellation()
-        if let queryDeadline, Date() >= queryDeadline { throw MallWebError.timeout }
+        if let queryDeadline, Date() >= queryDeadline { log(.mallTimeout, reason: .timeout); throw MallWebError.timeout }
         try await Task.sleep(nanoseconds: 500_000_000)
         guard UIApplication.shared.applicationState == .active else { throw MallWebError.unsupported }
-        if let failure { throw failure }
-        guard let web, let url = web.url, platform.allowed(url) else { throw MallWebError.unsupported }
+        if let failure { log(.mallFetchFailed, reason: failure == .authentication ? .authentication : failure == .verification ? .verification : .unsupported); throw failure }
+        guard let web, let url = web.url, platform.allowed(url) else { log(.mallNavigationRejected, reason: .url); throw MallWebError.unsupported }
         let text: String
         do { text = try await web.evaluateJavaScript("document.body ? document.body.innerText.slice(0,100000) : ''") as? String ?? "" }
         catch { throw MallWebError.unsupported }
@@ -575,6 +586,7 @@ enum MallWebParser {
             }
             seenResponseCount = captures.count
             if attempt % 6 == 0 || attempt % 6 == 5 {
+                log(.mallCollectionProgress, counts: [.round: attempt, .responses: captures.count, .rows: capturedOrderIDs.count, .candidates: collected.count])
                 do {
                   if let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript) {
                     let report = try JDOrderSelection.inspectDOM(snapshot, recentMonth: recentMonth)
@@ -596,11 +608,13 @@ enum MallWebParser {
             if let total, capturedOrderIDs.count >= total, attempt >= 5 { break }
             if captures.count >= 20 || collected.count >= 200 { break }
         }
-        guard recognized else { throw MallWebError.timeout }
-        diagnosticMessage += " 已到采集上限或平台总数；非全量保证。逐单最多尝试24单、取得8票，日期未知不会导入。"
+        guard recognized else { log(.mallTimeout, reason: .timeout, counts: [.responses: captures.count]); throw MallWebError.timeout }
+        diagnosticMessage += " 已到采集上限或平台总数；非全量保证。逐单最多核实24单、取得8票即止，日期未知不会导入。"
+        log(.mallCollectionFinished, counts: [.rows: capturedOrderIDs.count, .candidates: collected.count, .responses: captures.count])
         return collected
     }
     private func observeDetail(orderID: String, url: URL? = nil) async throws -> MallWebDetail {
+        log(.mallDetailStarted)
         diagnosticMessage = "阶段：逐单物流页面；尚未取得匹配运单与轨迹。"
         let target = try url ?? MallWebParser.detailURL(platform: platform, orderID: orderID)
         if platform == .jd { _ = try JDOrderSelection.logisticsURL(target.absoluteString, orderID: orderID) }
@@ -640,6 +654,7 @@ enum MallWebParser {
                 clicked = (try await web?.evaluateJavaScript(Self.logisticsClickScript) as? Bool) == true
             }
         }
+        log(.mallTimeout, reason: .timeout)
         throw MallWebError.timeout
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -657,14 +672,30 @@ enum MallWebParser {
         }
         decisionHandler(.allow)
     }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failure = .unsupported }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failure = .unsupported }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failure = .unsupported }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        log(.mallPageFinished)
+        Task { @MainActor [weak self, weak webView] in
+            guard let self, let webView else { return }
+            do {
+                let ready = try await webView.evaluateJavaScript("window.__mallObserverReady === true") as? Bool ?? false
+                guard self.web === webView else { return }
+                let observed = try await webView.evaluateJavaScript("window.__mallRequestsObserved || 0") as? Int ?? 0
+                self.log(ready ? .mallScriptReady : .mallScriptFailed, reason: ready ? nil : .unsupported, counts: [.accepted: observed])
+            } catch { self.log(.mallScriptFailed, reason: .unsupported) }
+        }
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        log(.mallNavigationFailed, reason: .network, counts: [.errorCode: (error as NSError).code]); failure = .unsupported
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        log(.mallNavigationFailed, reason: .network, counts: [.errorCode: (error as NSError).code]); failure = .unsupported
+    }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { log(.mallProcessTerminated); failure = .unsupported }
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "mallResponse", message.frameInfo.isMainFrame,
               let current = web?.url, platform.allowed(current),
-              let frame = message.frameInfo.request.url, platform.allowed(frame), frame.host == current.host else { return }
-        guard let envelope = message.body as? [String: Any], envelope["generation"] as? String == generation else { return }
+              let frame = message.frameInfo.request.url, platform.allowed(frame), frame.host == current.host else { log(.mallBridgeRejected, reason: .frame); return }
+        guard let envelope = message.body as? [String: Any], envelope["generation"] as? String == generation else { log(.mallBridgeRejected, reason: .generation); return }
         do {
             let packet = try MallWebParser.message(message.body)
             guard platform.allowed(packet.url) else { throw MallWebError.unsupported }
@@ -673,18 +704,24 @@ enum MallWebParser {
             let listPage = current.path == platform.ordersURL.path
             let accepted = jd ? functionID == (listPage ? "order_list_m" : "get_logistics_list_by_order_m") :
                 (platform == .pdd && listPage && packet.url.path.hasSuffix("/aristotle/order_list_v4"))
-            guard accepted else { return }
+            guard accepted else { log(.mallResponseRejected, reason: .interface); return }
             if jd && !listPage {
                 // A live page URL is not evidence of response ownership.
-                guard let expected = detailOrderID, MallWebParser.jdRequestOrderID(packet.url) == expected else { return }
+                guard let expected = detailOrderID, MallWebParser.jdRequestOrderID(packet.url) == expected else { log(.mallResponseRejected, reason: .ownership); return }
                 if let id = (packet.root["body"] as? [String: Any])?["orderId"] {
                     guard String(describing: id) == expected else { throw MallWebError.identityMismatch }
                 }
             }
             let limit = platform == .jd && listPage ? 20 : 4
-            guard captures.count < limit else { return }
+            guard captures.count < limit else { log(.mallResponseRejected, reason: .limit); return }
             captures.append(packet.root)
-        } catch { failure = .unsupported }
+            let body = packet.root["body"] as? [String: Any]
+            let rows = body?["orderList"] as? [[String: Any]] ?? []
+            log(.mallResponseAccepted, counts: [.responses: captures.count, .rows: rows.count,
+                .hasProgress: rows.filter { $0["progressInfo"] is [String: Any] }.count,
+                .hasType: rows.filter { ($0["progressInfo"] as? [String: Any])?["progressId"] is String }.count,
+                .hasLink: rows.filter { ($0["progressInfo"] as? [String: Any])?["progressLink"] is String }.count])
+        } catch { log(.mallResponseRejected, reason: .envelope); failure = .unsupported }
     }
     private static let logisticsClickScript = #"""
     (() => {

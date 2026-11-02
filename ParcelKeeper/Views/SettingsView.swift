@@ -70,6 +70,11 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("诊断") {
+                    NavigationLink("本地诊断日志") { DiagnosticLogView() }
+                    Text("记录运行阶段和固定错误原因，不记录凭据或原始个人内容；可查看、复制、分享和清除，不自动上传。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 Section("关于") {
                     LabeledContent("版本", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知")
                     Text("支持文本识别、取件码管理、桌面组件以及UAPI物流查询。UAPI需在设置中配置密钥并启用，查询可能消耗账户积分。")

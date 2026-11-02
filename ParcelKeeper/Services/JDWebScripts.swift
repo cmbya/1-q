@@ -7,6 +7,7 @@ enum JDWebScripts {
     (() => {
       if (window !== window.top) return;
       let sent = 0;
+      window.__mallRequestsObserved = 0;
       const generation = window.__mallGeneration;
       const parsed = raw => {
         try {
@@ -30,12 +31,18 @@ enum JDWebScripts {
       };
       const original = window.fetch;
       if (original) window.fetch = function(...args) {
+        try { if (accepted(typeof args[0] === 'string' ? args[0] : args[0]?.url)) window.__mallRequestsObserved = Math.min(2000,window.__mallRequestsObserved+1); } catch (_) {}
         const promise = original.apply(this,args);
         promise.then(response => {
           if (!accepted(response.url)) return;
           response.clone().text().then(body => report(response.url,body)).catch(() => {});
         }).catch(() => {});
         return promise;
+      };
+      const open = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function(method,url,...rest) {
+        try { if(accepted(url)) window.__mallRequestsObserved=Math.min(2000,window.__mallRequestsObserved+1); } catch (_) {}
+        return open.apply(this,[method,url,...rest]);
       };
       const send = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.send = function(...args) {
@@ -83,6 +90,7 @@ enum JDWebScripts {
         try {
           const u = parsed(raw);
           if (!u || u.hostname !== 'api.m.jd.com') return;
+          window.__mallRequestsObserved=Math.min(2000,window.__mallRequestsObserved+1);
           const callbacks = u.searchParams.getAll('callback');
           if (callbacks.length !== 1 || callbacks[0].length > 200 || !/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(callbacks[0])) return;
           const parts = callbacks[0].split('.');
@@ -116,6 +124,7 @@ enum JDWebScripts {
           for (const node of record.addedNodes || []) inspect(node);
         }
       }).observe(document,{subtree:true,childList:true,attributes:true,attributeFilter:['src']});
+      window.__mallObserverReady = true;
     })();
     """#
 }
