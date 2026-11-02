@@ -197,7 +197,7 @@ final class DiagnosticLog {
                     }
                 } catch {
                     let failure = error as NSError
-                    guard failure.domain == NSCocoaErrorDomain && failure.code == NSFileNoSuchFileError else { throw error }
+                    guard failure.domain == NSCocoaErrorDomain && (failure.code == NSFileNoSuchFileError || failure.code == NSFileReadNoSuchFileError) else { throw error }
                 }
             }
             let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
@@ -221,7 +221,7 @@ final class DiagnosticLog {
             issue = nil
         } catch {
             let error = error as NSError
-            if error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            if error.domain == NSCocoaErrorDomain && (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
                 status = .missing
                 issue = nil
             } else { status = .ioFailure; issue = .read }
