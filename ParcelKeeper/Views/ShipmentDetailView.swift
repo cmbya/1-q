@@ -54,12 +54,48 @@ struct ShipmentDetailView: View {
                         }
                     }
 
-                    Section("UAPI查询") {
+                    Section("物流刷新与来源") {
+                        LabeledContent("添加来源", value: ShipmentRefreshPresentation.origin(shipment))
+                        LabeledContent("当前物流来源", value: ShipmentRefreshPresentation.source(shipment))
+                        Picker("默认查询渠道", selection: Binding(
+                            get: { shipment.refreshChannel == "uapi" ? "uapi" : "automatic" },
+                            set: { channel in
+                                guard !querying, !store.isHistoricalSnapshot else { return }
+                                do {
+                                    try TrackingRefreshService.live().setRefreshChannel(id: shipmentID, channel: channel == "uapi" ? "uapi" : nil)
+                                    try store.reload()
+                                } catch { queryMessage = error.localizedDescription; try? store.reload() }
+                            }
+                        )) {
+                            Text("跟随添加来源").tag("automatic")
+                            Text("UAPI（可能消耗积分）").tag("uapi")
+                        }
+                        .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        Text("跟随来源：淘宝关联票使用淘宝，原UAPI／未关联票沿用UAPI。商城失败不会自动转收费查询；修改渠道不会改变添加来源。")
+                            .font(.footnote)
+                        Button(querying ? "正在查询" : "刷新物流（按默认渠道）") {
+                            refreshLogistics(mode: .automatic)
+                        }
+                        .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        LabeledContent("上次成功查询", value: shipment.lastQueriedAt.map { ShipmentDateDisplay.string($0) } ?? "尚无成功查询")
+                        if let error = shipment.lastRefreshError, !error.isEmpty {
+                            Text("最近刷新失败：\(error)").font(.footnote).foregroundStyle(.red)
+                            Text("失败未覆盖已有物流；以下可能是上次成功数据，并非实时结果。")
+                                .font(.footnote)
+                        }
+                        if shipment.logisticsInfo?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                            Text("暂无物流轨迹；显示的状态不代表实时物流。")
+                                .font(.footnote)
+                        }
+                        if let queryMessage { Text(queryMessage).font(.footnote) }
+                    }
+
+                    Section("UAPI备用查询（可能消耗积分）") {
                         LabeledContent("本票手机尾号", value: hasSavedPhone ? "已保存" : "未保存")
                         TextField("手机尾号（留空复用已保存值）", text: $queryPhone)
                             .keyboardType(.numberPad)
                             .disabled(querying || store.isHistoricalSnapshot)
-                        Text("填写后自动为本票保存，后续刷新及快捷指令复用。仅存本机钥匙串，不进入JSON备份。网络查询失败也会保留填写值。")
+                        Text("以下尾号仅供UAPI使用，商城查询不使用此尾号。填写后在UAPI查询时为本票保存，后续UAPI刷新及快捷指令复用。仅存本机钥匙串，不进入JSON备份。网络查询失败也会保留填写值。")
                             .font(.footnote)
                         Button("保存／修改尾号（不查询）") {
                             do {
@@ -77,25 +113,11 @@ struct ShipmentDetailView: View {
                                 queryMessage = "本票保存的手机尾号已清除。"
                             } catch { queryMessage = error.localizedDescription }
                         }.disabled(querying || store.isHistoricalSnapshot)
-                        Button(querying ? "正在查询" : "刷新物流") {
-                            querying = true
-                            Task { @MainActor in
-                                defer {
-                                    querying = false
-                                    if let saved = try? TrackingRefreshService.live().savedPhone(id: shipmentID) { hasSavedPhone = !saved.isEmpty }
-                                }
-                                do {
-                                    _ = try await TrackingRefreshService.live().refresh(id: shipmentID, phone: queryPhone.isEmpty ? nil : queryPhone)
-                                    try store.reload()
-                                    queryPhone = ""
-                                    queryMessage = "物流已更新。"
-                                } catch { queryMessage = error.localizedDescription; try? store.reload() }
-                            }
+                        Button(querying ? "正在查询" : "仅本次使用UAPI备用刷新（可能消耗积分）") {
+                            refreshLogistics(mode: .uapi)
                         }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        if let time = shipment.lastQueriedAt {
-                            LabeledContent("最后查询", value: ShipmentDateDisplay.string(time))
-                        }
-                        if let queryMessage { Text(queryMessage).font(.footnote) }
+                        Text("这是单次明确选择，不修改默认渠道或添加来源。")
+                            .font(.footnote)
                     }
 
                     Section("状态") {
@@ -206,6 +228,37 @@ struct ShipmentDetailView: View {
             get: { reminderError != nil },
             set: { if !$0 { reminderError = nil } }
         )) { Button("知道了", role: .cancel) {} } message: { Text(reminderError ?? "") }
+    }
+
+    private func refreshLogistics(mode: TrackingRefreshMode) {
+        guard !querying, !store.isHistoricalSnapshot, let current = shipment,
+              current.status != .archived else { return }
+        let legacyUAPIOrigin = current.originPlatform == nil || current.originPlatform == "manual" || current.originPlatform == "uapi"
+        let usesUAPI = mode == .uapi || (mode == .automatic &&
+            (current.refreshChannel == "uapi" || (legacyUAPIOrigin && current.taobaoOrderID == nil)))
+        let suppliedPhone = usesUAPI && !queryPhone.isEmpty ? queryPhone : nil
+        querying = true
+        Task { @MainActor in
+            defer {
+                querying = false
+                if let saved = try? TrackingRefreshService.live().savedPhone(id: shipmentID) {
+                    hasSavedPhone = !saved.isEmpty
+                }
+            }
+            do {
+                let service = try TrackingRefreshService.live()
+                let completed = try await service.refresh(id: shipmentID, phone: suppliedPhone,
+                    expectedTrackingNumber: CarrierDetector.sanitize(current.trackingNumber), mode: mode)
+                let latest = try ShipmentRefreshPresentation.snapshot(service, id: shipmentID,
+                    number: CarrierDetector.sanitize(current.trackingNumber))
+                try store.reload()
+                if usesUAPI { queryPhone = "" }
+                queryMessage = ShipmentRefreshPresentation.result(latest, newlyDelivered: completed)
+            } catch {
+                queryMessage = error.localizedDescription
+                try? store.reload()
+            }
+        }
     }
 
     private func saveEdit(_ operation: () throws -> Void) {

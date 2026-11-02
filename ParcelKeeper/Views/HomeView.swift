@@ -13,6 +13,7 @@ struct HomeView: View {
     @State private var successFeedbackTrigger = 0
     @State private var refreshingLogistics = false
     @State private var refreshMessage: String?
+    @State private var refreshMode: TrackingRefreshMode = .automatic
 
     private var filteredShipments: [Shipment] {
         store.shipments.filter { shipment in
@@ -50,6 +51,13 @@ struct HomeView: View {
                 ScrollView {
                     LazyVStack(spacing: 16) {
                         header
+                        Picker("刷新渠道", selection: $refreshMode) {
+                            Text("按每票默认渠道").tag(TrackingRefreshMode.automatic)
+                            Text("仅商城（不调用UAPI）").tag(TrackingRefreshMode.platformOnly)
+                            Text("强制UAPI（消耗额度）").tag(TrackingRefreshMode.uapi)
+                        }.disabled(refreshingLogistics)
+                        Text("默认：淘宝关联走淘宝，其他普通快递走UAPI；平台失败不自动转UAPI。")
+                            .font(.caption).foregroundStyle(.secondary)
                         pasteCard
                         summaryGrid
                         filterBar
@@ -67,7 +75,7 @@ struct HomeView: View {
                         Task { @MainActor in
                             defer { refreshingLogistics = false }
                             do {
-                                let report = try await TrackingRefreshService.live().refreshPending()
+                                let report = try await TrackingRefreshService.live().refreshPending(mode: refreshMode)
                                 try store.reload()
                                 refreshMessage = report.message
                             } catch { refreshMessage = error.localizedDescription; try? store.reload() }

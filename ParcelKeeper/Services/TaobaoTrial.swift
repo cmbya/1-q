@@ -77,6 +77,7 @@ struct TaobaoTrialCandidate: Identifiable {
     let number: String
     let carrier: String
     let title: String
+    var orderID: String = ""
 }
 struct TaobaoTrialReport {
     var candidates: [TaobaoTrialCandidate] = []
@@ -234,8 +235,10 @@ final class TaobaoTrialClient {
             do {
                 let response = try await call("mtop.taobao.logistics.detailorlist.query", payload: ["orderId": order.id])
                 for item in try TaobaoTrialParser.waybills(response) {
-                    if !report.candidates.contains(where: { $0.number == item.number }) {
-                        report.candidates.append(.init(number: item.number, carrier: item.carrier, title: order.title))
+                    if let existing = report.candidates.first(where: { $0.number == item.number }) {
+                        guard existing.orderID == order.id else { throw TaobaoTrialError.shape }
+                    } else {
+                        report.candidates.append(.init(number: item.number, carrier: item.carrier, title: order.title, orderID: order.id))
                     }
                 }
             } catch is CancellationError { throw CancellationError() }

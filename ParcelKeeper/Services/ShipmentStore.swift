@@ -140,6 +140,34 @@ final class ShipmentStore: ObservableObject {
                 data.records.append(record)
             }
     }
+    /// Explicit confirmed import: bind an existing unique ticket without replacing user fields.
+    @discardableResult func importTaobao(_ candidate: TaobaoTrialCandidate) throws -> UUID {
+        let number = try ShipmentShortcutParser.number(candidate.number)
+        guard candidate.orderID.range(of: #"^[0-9]{6,32}$"#, options: .regularExpression) != nil else { throw PickupStorageError.stalePreview }
+        guard let storage else { throw PickupStorageError.appGroupUnavailable }
+        let matches = try storage.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }
+        guard matches.count <= 1 else { throw ShipmentShortcutError.ambiguous }
+        if let previous = matches.first {
+            let lease = try storage.acquireTrackingQuery(id: previous.id)
+            defer { lease.release() }
+            return try change { data in
+                let indices = data.shipments.indices.filter { CarrierDetector.sanitize(data.shipments[$0].trackingNumber) == number }
+                guard indices.count == 1, let index = indices.first, data.shipments[index].id == previous.id else { throw PickupStorageError.stalePreview }
+                let current = data.shipments[index]
+                guard current.originPlatform == nil || current.originPlatform == "taobao",
+                      current.taobaoOrderID == nil || current.taobaoOrderID == candidate.orderID else { throw PickupStorageError.stalePreview }
+                data.shipments[index].originPlatform = "taobao"
+                data.shipments[index].taobaoOrderID = candidate.orderID
+                return current.id
+            }
+        }
+        let detection = CarrierDetector.detect(number, context: candidate.carrier)
+        var shipment = Shipment(trackingNumber: number, carrierName: detection.carrier.name, carrierCode: detection.carrier.code, note: candidate.title)
+        shipment.originPlatform = "taobao"
+        shipment.taobaoOrderID = candidate.orderID
+        try addThrowing(shipment)
+        return shipment.id
+    }
     @discardableResult func add(_ shipment: Shipment) -> Bool {
         do { try addThrowing(shipment); return true }
         catch { lastErrorMessage = error.localizedDescription; return false }

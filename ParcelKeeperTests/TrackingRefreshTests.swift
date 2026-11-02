@@ -53,18 +53,25 @@ final class TrackingRefreshTests: XCTestCase {
         do { _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id); XCTFail() }
         catch { XCTAssertTrue(try storage.snapshot().shipments.isEmpty) }
     }
+    /// Failure diagnostics may change; all business data must remain byte-equivalent.
+    private func withoutRefreshDiagnostics(_ backup: Data) throws -> Data {
+        var dataset = try JSONDecoder().decode(PickupDataset.self, from: backup)
+        for index in dataset.shipments.indices { dataset.shipments[index].lastRefreshError = nil }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(dataset)
+    }
     func testNetworkFailureAndOlderResultPreserveData() async throws {
         let client = Client()
         let service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
         let before = try storage.exportBackup()
         client.failure = UAPIError.unavailable
         do { _ = try await service.refresh(id: shipment.id); XCTFail() } catch {}
-        XCTAssertEqual(try storage.exportBackup(), before)
+        XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(before))
         client.failure = nil
         try storage.transaction { $0.shipments[0].logisticsTime = Date(timeIntervalSinceReferenceDate: 4000) }
         let newer = try storage.exportBackup()
         do { _ = try await service.refresh(id: shipment.id); XCTFail() } catch {}
-        XCTAssertEqual(try storage.exportBackup(), newer)
+        XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(newer))
     }
     func testUnknownStatusPreservesStateAndCompletedRecordsAreNotBatched() async throws {
         let client = Client()
@@ -86,10 +93,10 @@ final class TrackingRefreshTests: XCTestCase {
         }
         let before = try storage.exportBackup()
         do { _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id); XCTFail() } catch {}
-        XCTAssertEqual(try storage.exportBackup(), before)
+        XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(before))
         client.result = UAPITrackingResult(trackingNumber: "SF1234567890123", carrierName: "错误", carrierCode: "shunfeng", status: .delivered, logisticsInfo: "已签收", logisticsTime: nil, queryInfo: "错误全文", queriedAt: Date())
         do { _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id); XCTFail() } catch {}
-        XCTAssertEqual(try storage.exportBackup(), before)
+        XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(before))
     }
     func testOldModelAndNewFieldsBackupCompatibility() throws {
         let encoded = try JSONEncoder().encode(shipment!)
@@ -148,6 +155,8 @@ final class TrackingRefreshTests: XCTestCase {
             var after = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == old.id })
             XCTAssertNotNil(after.lastQueryAttemptAt)
             after.lastQueryAttemptAt = old.lastQueryAttemptAt
+            XCTAssertNotNil(after.lastRefreshError)
+            after.lastRefreshError = old.lastRefreshError
             XCTAssertEqual(after, old)
         }
     }

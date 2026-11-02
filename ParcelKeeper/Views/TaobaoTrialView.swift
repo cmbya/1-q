@@ -133,7 +133,7 @@ struct TaobaoTrialView: View {
             Section("手动同步") {
                 Button(busy ? "正在读取" : "读取待收货单号（不调用UAPI）") { fetch() }
                     .disabled(busy || !hasSession)
-                Text("导入初始状态沿用现有“运输中”，仅作占位，不代表已核实物流；之后可手动查询UAPI。")
+                Text("确认后保存淘宝订单关联并尝试读取物流；无轨迹时默认“运输中”仍仅作占位，不代表已核实。后续按来源刷新，UAPI仅手动备用。")
                     .font(.footnote)
                 Text("首版只读取第一页，最多处理8个待收货订单，可能遗漏其他订单；不是全量同步。缺少运单号不会用订单号替代。")
                     .font(.footnote)
@@ -149,7 +149,7 @@ struct TaobaoTrialView: View {
                             VStack(alignment: .leading) {
                                 Text(candidate.title).lineLimit(2)
                                 Text(candidate.carrier + " · " + candidate.number).font(.caption)
-                                if store.contains(trackingNumber: candidate.number) { Text("已存在，将跳过，不覆盖").font(.caption) }
+                                if store.contains(trackingNumber: candidate.number) { Text("已存在：确认后补淘宝关联，不覆盖备注／取件码；随后尝试更新淘宝物流").font(.caption) }
                             }
                         }
                     }
@@ -205,17 +205,38 @@ struct TaobaoTrialView: View {
     }
     private func importSelected(_ report: TaobaoTrialReport) {
         guard !store.isHistoricalSnapshot else { message = "只读历史数据，不能导入。"; return }
-        var added = 0, skipped = 0, failed = 0
-        for candidate in report.candidates where selected.contains(candidate.id) {
-            let detection = CarrierDetector.detect(candidate.number, context: candidate.carrier)
-            do {
-                let shipment = Shipment(trackingNumber: candidate.number, carrierName: detection.carrier.name,
-                    carrierCode: detection.carrier.code, note: candidate.title)
-                try store.addThrowing(shipment); added += 1
-            } catch ShipmentStore.ShipmentWriteError.duplicateTrackingNumber { skipped += 1 }
-            catch { failed += 1 }
+        let candidates = report.candidates.filter { selected.contains($0.id) }
+        busy = true
+        let id = UUID(); operationID = id
+        task = Task { @MainActor in
+            defer { if operationID == id { busy = false; operationID = nil; task = nil } }
+            var added = 0, bound = 0, failed = 0, refreshed = 0
+            var errors: [String] = []
+            var platformStopped = false
+            let started = ProcessInfo.processInfo.systemUptime
+            for candidate in candidates {
+                if Task.isCancelled || operationID != id { return }
+                do {
+                    let existed = store.contains(trackingNumber: candidate.number)
+                    let ticketID = try store.importTaobao(candidate)
+                    if existed { bound += 1 } else { added += 1 }
+                    // Link/import first, then fetch actual trace without UAPI fallback.
+                    if !platformStopped && ProcessInfo.processInfo.systemUptime - started < 20 {
+                        do {
+                            _ = try await TrackingRefreshService.live().refresh(id: ticketID, mode: .platformOnly)
+                            refreshed += 1
+                        } catch is CancellationError { return }
+                        catch {
+                            errors.append(candidate.number + "：" + error.localizedDescription)
+                            if let failure = error as? TaobaoTrackingError, failure.stopsBatch { platformStopped = true }
+                        }
+                    } else { errors.append(candidate.number + "：已保存关联，因登录验证或时间限制未请求物流，请稍后刷新。") }
+                } catch { failed += 1; errors.append(candidate.number + "：关联或保存失败，未覆盖原记录。") }
+            }
+            try? store.reload()
+            guard operationID == id else { return }
+            message = "新增\(added)票，已有记录关联\(bound)票，导入失败\(failed)票；淘宝物流更新\(refreshed)票。未调用UAPI。" + (errors.isEmpty ? "" : "\n" + errors.joined(separator: "\n"))
+            selected = []
         }
-        message = "新增\(added)票，已存在跳过\(skipped)票，失败\(failed)票。原有记录未覆盖，未调用UAPI。"
-        selected = []
     }
 }

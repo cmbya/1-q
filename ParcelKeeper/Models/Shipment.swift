@@ -32,6 +32,13 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var lastQueriedAt: Date?
     // Batch scheduling only; a failed attempt must not change successful query data.
     var lastQueryAttemptAt: Date?
+    // Optional source metadata remains compatible with old JSON and the widget target.
+    var originPlatform: String?
+    // nil follows originPlatform; "uapi" explicitly overrides the source channel.
+    var refreshChannel: String?
+    var taobaoOrderID: String?
+    var logisticsSource: String?
+    var lastRefreshError: String?
 
     init(
         id: UUID = UUID(),
@@ -50,7 +57,12 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         queryInfo: String? = nil,
         uapiCarrierCode: String? = nil,
         lastQueriedAt: Date? = nil,
-        lastQueryAttemptAt: Date? = nil
+        lastQueryAttemptAt: Date? = nil,
+        originPlatform: String? = nil,
+        refreshChannel: String? = nil,
+        taobaoOrderID: String? = nil,
+        logisticsSource: String? = nil,
+        lastRefreshError: String? = nil
     ) {
         self.id = id
         self.trackingNumber = trackingNumber
@@ -69,6 +81,11 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         self.uapiCarrierCode = uapiCarrierCode
         self.lastQueriedAt = lastQueriedAt
         self.lastQueryAttemptAt = lastQueryAttemptAt
+        self.originPlatform = originPlatform
+        self.refreshChannel = refreshChannel
+        self.taobaoOrderID = taobaoOrderID
+        self.logisticsSource = logisticsSource
+        self.lastRefreshError = lastRefreshError
     }
 }
 
