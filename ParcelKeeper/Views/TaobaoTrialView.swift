@@ -157,7 +157,16 @@ struct TaobaoTrialView: View {
                         .disabled(busy || selected.isEmpty || store.isHistoricalSnapshot)
                 }
             }
-            if let message { Section("结果") { Text(message).font(.footnote) } }
+            if let message {
+                Section("结果") {
+                    Text(message.components(separatedBy: "\n")[0]).font(.footnote)
+                    DisclosureGroup("查看结果／错误详情") {
+                        Text(message).font(.footnote).textSelection(.enabled)
+                    }
+                    ShareLink(item: message) { Label("分享诊断详情", systemImage: "square.and.arrow.up") }
+                    Button("复制诊断详情") { UIPasteboard.general.string = message }
+                }
+            }
         }
         .navigationTitle("淘宝导入（试验）")
         .onAppear {

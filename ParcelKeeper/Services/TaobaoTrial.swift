@@ -3,7 +3,7 @@ import CryptoKit
 
 // Experimental client endpoints; these are NOT Open Platform OAuth APIs.
 enum TaobaoTrialError: LocalizedError {
-    case login, verification, shape, network, credentials, emptyWaybill
+    case login, verification, shape, network, credentials, emptyWaybill, business
     var errorDescription: String? {
         switch self {
         case .login: return "淘宝登录或令牌已失效，请打开登录页重新确认。"
@@ -12,6 +12,7 @@ enum TaobaoTrialError: LocalizedError {
         case .network: return "淘宝网络请求失败，未自动重试。"
         case .credentials: return "淘宝会话无法安全保存或读取，未使用明文回退。"
         case .emptyWaybill: return "该订单没有返回可用运单号，未导入。"
+        case .business: return "淘宝物流或订单业务请求未成功，请根据返回码定位；未当作结构变化或空结果。"
         }
     }
 }
@@ -88,7 +89,7 @@ enum TaobaoTrialParser {
         guard let ret = root["ret"] as? [String], !ret.isEmpty else { throw TaobaoTrialError.shape }
         if ret.contains(where: { $0.contains("USER_VALIDATE") || $0.contains("RGV") || $0.contains("VALIDATE") }) { throw TaobaoTrialError.verification }
         if ret.contains(where: { $0.contains("SESSION") || $0.contains("TOKEN") || $0.contains("LOGIN") }) { throw TaobaoTrialError.login }
-        guard ret.allSatisfy({ $0 == "SUCCESS" || $0.hasPrefix("SUCCESS::") }) else { throw TaobaoTrialError.shape }
+        guard ret.allSatisfy({ $0 == "SUCCESS" || $0.hasPrefix("SUCCESS::") }) else { throw TaobaoTrialError.business }
     }
     static func orders(_ root: [String: Any]) throws -> [TaobaoTrialOrder] {
         try check(root)
@@ -145,6 +146,9 @@ final class TaobaoTrialClient {
     private var stage = "订单列表"
     private var lastStatus: Int?
     private var lastRoot: [String: Any]?
+    private var lastTransport = "无"
+    private var lastAttempt = 1
+    private var lastByteCount: Int?
     init(cookies: [TaobaoTrialCookie], network: any AINetworking = AISecureNetwork()) {
         self.cookies = cookies; self.network = network
     }
@@ -154,6 +158,7 @@ final class TaobaoTrialClient {
         guard let body = String(data: data, encoding: .utf8) else { throw TaobaoTrialError.shape }
         for attempt in 0...1 {
             lastStatus = nil; lastRoot = nil
+            lastTransport = "无"; lastAttempt = attempt + 1; lastByteCount = nil
             try Task.checkCancellation()
             let applicable = cookies.filter { $0.applies(to: endpoint) }
             let token = applicable.first(where: { $0.name == "_m_h5_tk" })?.value.components(separatedBy: "_").first ?? ""
@@ -161,18 +166,30 @@ final class TaobaoTrialClient {
             let source = "\(token)&\(timestamp)&12574478&\(body)"
             let sign = Insecure.MD5.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
             var url = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
-            url.queryItems = ["appKey": "12574478", "t": timestamp, "sign": sign, "api": api, "v": "1.0",
-                              "type": "originaljson", "dataType": "originaljson", "data": body].map { URLQueryItem(name: $0.key, value: $0.value) }
+            var parameters = ["appKey": "12574478", "t": timestamp, "sign": sign, "api": api, "v": "1.0",
+                              "type": "originaljson", "dataType": "originaljson", "data": body]
+            let isLogistics = api == "mtop.taobao.logistics.detailorlist.query"
+            if isLogistics {
+                parameters.merge(["jsv": "2.7.0", "needLogin": "true", "LoginRequest": "true",
+                    "timeout": "20000", "ttid": "#t#ip##_h5_web_default", "preventFallback": "true"]) { _, new in new }
+            }
+            url.queryItems = parameters.map { URLQueryItem(name: $0.key, value: $0.value) }
             var request = URLRequest(url: url.url!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
             request.setValue(applicable.map { "\($0.name)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
-            request.setValue("https://main.m.taobao.com/", forHTTPHeaderField: "Referer")
+            request.setValue(isLogistics ? "https://market.m.taobao.com/app/dinamic/pc-trade-logistics/home.html" : "https://main.m.taobao.com/", forHTTPHeaderField: "Referer")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             let bytes: Data; let response: URLResponse
             do { (bytes, response) = try await network.data(for: request) }
             catch is CancellationError { throw CancellationError() }
-            catch { throw TaobaoTrialError.network }
+            catch {
+                let failure = error as NSError
+                let domain = failure.domain == NSURLErrorDomain ? "NSURLErrorDomain" : "其他网络错误"
+                lastTransport = "\(domain)/\(failure.code)"
+                throw TaobaoTrialError.network
+            }
             try Task.checkCancellation()
             lastStatus = (response as? HTTPURLResponse)?.statusCode
+            lastByteCount = bytes.count
             guard bytes.count <= 2_000_000 else { throw TaobaoTrialError.network }
             lastRoot = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any]
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
@@ -199,7 +216,7 @@ final class TaobaoTrialClient {
         do { return try await fetchReport() }
         catch is CancellationError { throw CancellationError() }
         catch let reason as TaobaoTrialError {
-            throw TaobaoTrialDiagnostic(stage: stage, reason: reason, status: lastStatus, root: lastRoot)
+            throw TaobaoTrialDiagnostic(stage: stage, reason: reason, status: lastStatus, root: lastRoot, transport: lastTransport, attempt: lastAttempt, byteCount: lastByteCount)
         }
     }
     private func fetchReport() async throws -> TaobaoTrialReport {
