@@ -11,6 +11,8 @@ struct TrackingRefreshReport {
     /// Number of tickets dispatched to each source (successes and failures).
     var taobaoCount = 0
     var uapiCount = 0
+    var jdCount = 0
+    var pddCount = 0
     struct Failure {
         let trackingNumber: String
         let reason: String
@@ -22,7 +24,7 @@ struct TrackingRefreshReport {
     var stoppedReason: String?
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
-        value += " 淘宝派发\(taobaoCount)票，UAPI派发\(uapiCount)票（实际收费以接口为准）。"
+        value += " 淘宝派发\(taobaoCount)票，京东派发\(jdCount)票，拼多多派发\(pddCount)票，UAPI派发\(uapiCount)票（实际收费以接口为准）。"
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
         if let stoppedReason { value += " \(stoppedReason)" }
         for failure in failures { value += "\n\(failure.trackingNumber)：\(failure.reason)" }
@@ -39,18 +41,33 @@ struct TrackingRefreshService {
     var phones = ShipmentPhoneStore()
     var taobaoClient: any TaobaoTrackingQuerying = TaobaoTrackingClient()
 
-    private enum Route: Equatable { case taobao, uapi }
+    var mallClient: any MallTrackingQuerying = MallTrackingClient()
+
+    private enum Route: Equatable {
+        case taobao, uapi, mall(String)
+        var platform: String? {
+            switch self {
+            case .taobao: return "taobao"
+            case .mall(let platform): return platform
+            case .uapi: return nil
+            }
+        }
+        var source: String { platform ?? "uapi" }
+    }
+    private static func platformRoute(_ shipment: Shipment) throws -> Route {
+        if let platform = shipment.originPlatform, platform == "jd" || platform == "pdd" { return .mall(platform) }
+        if isTaobao(shipment) { return .taobao }
+        throw TaobaoTrackingError.unsupported
+    }
     private static func isTaobao(_ shipment: Shipment) -> Bool {
         shipment.originPlatform == "taobao" || shipment.taobaoOrderID != nil
     }
     private static func route(_ shipment: Shipment, mode: TrackingRefreshMode) throws -> Route {
         if mode == .uapi { return .uapi }
-        if mode == .platformOnly {
-            guard isTaobao(shipment) else { throw TaobaoTrackingError.unsupported }
-            return .taobao
-        }
+        if mode == .platformOnly { return try platformRoute(shipment) }
         if shipment.refreshChannel == "uapi" { return .uapi }
         guard shipment.refreshChannel == nil else { throw TaobaoTrackingError.unsupported }
+        if let platform = shipment.originPlatform, platform == "jd" || platform == "pdd" { return .mall(platform) }
         if isTaobao(shipment) { return .taobao }
         // Missing origin is the legacy/manual UAPI path, not a platform fallback.
         guard shipment.originPlatform == nil || shipment.originPlatform == "manual" || shipment.originPlatform == "uapi" else {
@@ -69,7 +86,22 @@ struct TrackingRefreshService {
         reloadWidgets()
     }
 
-    private static func safeReason(_ error: Error) -> String {
+    private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let platform, platform == "jd" || platform == "pdd" {
+            let name = platform == "jd" ? "京东" : "拼多多"
+            let detail: String
+            if let failure = error as? MallWebError {
+                switch failure {
+                case .authentication: detail = "登录已失效，请在 App 重新登录。"
+                case .verification: detail = "需要验证，请在 App 完成验证。"
+                case .unsupported: detail = "订单关联或页面格式不受支持，请重新绑定并检查。"
+                case .identityMismatch: detail = "订单或运单身份不匹配，未更新。"
+                case .noTrace: detail = "暂无可用物流轨迹，保留上次结果。"
+                case .timeout: detail = "页面查询超时，请稍后重试。"
+                }
+            } else { detail = safeReason(error) }
+            return "\(name)物流刷新：\(detail)"
+        }
         if let failure = error as? TaobaoTrackingError {
             switch failure {
             case .missingBinding: return "淘宝订单关联缺失，请重新绑定后刷新。"
@@ -96,6 +128,7 @@ struct TrackingRefreshService {
         current.id == before.id &&
         CarrierDetector.sanitize(current.trackingNumber) == CarrierDetector.sanitize(before.trackingNumber) &&
         current.originPlatform == before.originPlatform && current.taobaoOrderID == before.taobaoOrderID &&
+        current.platformOrderID == before.platformOrderID &&
         current.refreshChannel == before.refreshChannel && current.carrierCode == before.carrierCode &&
         current.uapiCarrierCode == before.uapiCarrierCode &&
         (current.carrierCode != CarrierDetector.unknown.code ||
@@ -150,6 +183,10 @@ struct TrackingRefreshService {
                 throw TaobaoTrackingError.missingBinding
             }
             result = try await taobaoClient.query(orderID: orderID, trackingNumber: number)
+        case .mall(let platform):
+            guard let orderID = before.platformOrderID,
+                  Shipment.validPlatformOrderID(orderID, platform: platform) else { throw MallWebError.unsupported }
+            result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number)
         case .uapi:
         // Shortcut optional text can arrive as "" instead of nil. Only an
         // entirely blank input means omitted; never repair nonblank credentials.
@@ -168,6 +205,7 @@ struct TrackingRefreshService {
         try Task.checkCancellation()
         guard result.trackingNumber == number else {
             if route == .taobao { throw TaobaoTrackingError.identityMismatch }
+            if case .mall = route { throw MallWebError.identityMismatch }
             throw UAPIError.invalidResponse
         }
         let delivered = try store.transaction { data -> Bool in
@@ -190,7 +228,7 @@ struct TrackingRefreshService {
             current.lastQueriedAt = result.queriedAt
             if !result.carrierName.isEmpty { current.carrierName = result.carrierName }
             if route == .uapi, !result.carrierCode.isEmpty { current.uapiCarrierCode = result.carrierCode }
-            current.logisticsSource = route == .taobao ? "taobao" : "uapi"
+            current.logisticsSource = route.source
             current.lastRefreshError = nil
             if let state = result.status { current.status = state }
             current.updatedAt = Date()
@@ -225,7 +263,7 @@ struct TrackingRefreshService {
                           data.shipments[index].logisticsSource == before.logisticsSource,
                           let linkedID,
                           data.records.contains(where: { $0.id == linkedID && $0.shipmentID == id }) else { return }
-                    data.shipments[index].lastRefreshError = Self.safeReason(error)
+                    data.shipments[index].lastRefreshError = Self.safeReason(error, platform: (try? Self.route(before, mode: mode))?.platform ?? before.originPlatform)
                 }
                 reloadWidgets()
             }
@@ -240,7 +278,7 @@ struct TrackingRefreshService {
         }.map(\.id)
         var report = TrackingRefreshReport()
         let started = uptime()
-        var platformStopped = false
+        var blockedPlatforms: Set<String> = []
         for (offset, id) in ids.enumerated() {
             try Task.checkCancellation()
             // Do not run an unbounded network loop inside a Shortcuts invocation.
@@ -251,9 +289,9 @@ struct TrackingRefreshService {
             }
             // Recheck before each request; another process may have completed/deleted it.
             guard let latest = try store.snapshot().shipments.first(where: { $0.id == id }), Self.isPending(latest) else { continue }
-            if mode == .platformOnly, !Self.isTaobao(latest) { report.skipped += 1; continue }
+            if mode == .platformOnly, (try? Self.platformRoute(latest)) == nil { report.skipped += 1; continue }
             let route = try? Self.route(latest, mode: mode)
-            if platformStopped, route == .taobao { report.skipped += 1; continue }
+            if let platform = route?.platform, blockedPlatforms.contains(platform) { report.skipped += 1; continue }
             do {
                 // Persist only scheduling metadata before awaiting; shared across invocations.
                 let shouldQuery = try store.transaction { data -> Bool in
@@ -266,14 +304,20 @@ struct TrackingRefreshService {
                 guard shouldQuery else { continue }
                 if route == .taobao { report.taobaoCount += 1 }
                 if route == .uapi { report.uapiCount += 1 }
+                if route == .mall("jd") { report.jdCount += 1 }
+                if route == .mall("pdd") { report.pddCount += 1 }
                 if try await refresh(id: id, expectedTrackingNumber: CarrierDetector.sanitize(latest.trackingNumber), pendingOnly: true, mode: mode) { report.newlyDelivered += 1 }
                 report.succeeded += 1
             } catch is CancellationError { throw CancellationError() }
             catch UAPIError.cancelled { throw UAPIError.cancelled }
             catch {
-                let reason = Self.safeReason(error)
+                let reason = Self.safeReason(error, platform: route?.platform ?? latest.originPlatform)
                 if let failure = error as? TaobaoTrackingError, failure.stopsBatch {
-                    platformStopped = true
+                    blockedPlatforms.insert("taobao")
+                    report.stoppedReason = reason
+                }
+                if let failure = error as? MallWebError, failure.stopsBatch, let platform = route?.platform {
+                    blockedPlatforms.insert(platform)
                     report.stoppedReason = reason
                 }
                 let number = (try? ShipmentShortcutParser.number(latest.trackingNumber)) ?? "无效运单号"

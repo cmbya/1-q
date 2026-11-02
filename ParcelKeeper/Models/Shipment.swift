@@ -39,6 +39,18 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var taobaoOrderID: String?
     var logisticsSource: String?
     var lastRefreshError: String?
+    // JD/PDD order identity is separate from both the waybill and Taobao binding.
+    var platformOrderID: String?
+
+    static func validPlatformOrderID(_ orderID: String, platform: String) -> Bool {
+        let pattern: String
+        switch platform {
+        case "jd": pattern = #"\A[0-9]{6,32}\z"#
+        case "pdd": pattern = #"\A[0-9]{6}-[0-9]{6,32}\z"#
+        default: return false
+        }
+        return orderID.range(of: pattern, options: .regularExpression) != nil
+    }
 
     init(
         id: UUID = UUID(),
@@ -62,7 +74,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         refreshChannel: String? = nil,
         taobaoOrderID: String? = nil,
         logisticsSource: String? = nil,
-        lastRefreshError: String? = nil
+        lastRefreshError: String? = nil,
+        platformOrderID: String? = nil
     ) {
         self.id = id
         self.trackingNumber = trackingNumber
@@ -86,6 +99,7 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         self.taobaoOrderID = taobaoOrderID
         self.logisticsSource = logisticsSource
         self.lastRefreshError = lastRefreshError
+        self.platformOrderID = platformOrderID
     }
 }
 

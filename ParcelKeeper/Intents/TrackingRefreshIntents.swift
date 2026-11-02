@@ -31,6 +31,8 @@ enum ShipmentRefreshPresentation {
     static func origin(_ shipment: Shipment) -> String {
         switch shipment.originPlatform {
         case "taobao": return "淘宝"
+        case "jd": return "京东"
+        case "pdd": return "拼多多"
         case "uapi": return "UAPI"
         case nil, "", "manual": return "原UAPI／未关联"
         default: return "未关联（未知来源）"
@@ -39,6 +41,8 @@ enum ShipmentRefreshPresentation {
     static func source(_ shipment: Shipment) -> String {
         switch shipment.logisticsSource {
         case "taobao": return "淘宝"
+        case "jd": return "京东"
+        case "pdd": return "拼多多"
         case "uapi": return "UAPI"
         case nil, "": return shipment.lastQueriedAt == nil ? "未关联" : "原UAPI（旧记录）"
         default: return "未知来源"

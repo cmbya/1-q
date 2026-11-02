@@ -71,7 +71,7 @@ struct ShipmentDetailView: View {
                             Text("UAPI（可能消耗积分）").tag("uapi")
                         }
                         .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("跟随来源：淘宝关联票使用淘宝，原UAPI／未关联票沿用UAPI。商城失败不会自动转收费查询；修改渠道不会改变添加来源。")
+                        Text("跟随来源：淘宝／京东／拼多多关联票使用对应平台，原UAPI／未关联票沿用UAPI。商城失败不会自动转收费查询；修改渠道不会改变添加来源。当前物流来源仅表示上次成功查询渠道，不因导入或切换默认渠道而改变。")
                             .font(.footnote)
                         Button(querying ? "正在查询" : "刷新物流（按默认渠道）") {
                             refreshLogistics(mode: .automatic)

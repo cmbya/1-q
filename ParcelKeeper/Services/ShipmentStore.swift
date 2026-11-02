@@ -168,6 +168,40 @@ final class ShipmentStore: ObservableObject {
         try addThrowing(shipment)
         return shipment.id
     }
+    /// Confirmed mall import only; binding uses the refresh lease before the dataset lock.
+    /// Existing user fields and explicit UAPI overrides are never replaced by mall metadata.
+    @discardableResult func importMall(_ candidate: MallCandidate, platform: String) throws -> UUID {
+        guard platform == "jd" || platform == "pdd",
+              Shipment.validPlatformOrderID(candidate.orderID, platform: platform) else {
+            throw PickupStorageError.stalePreview
+        }
+        let number = try ShipmentShortcutParser.number(candidate.trackingNumber)
+        guard let storage else { throw PickupStorageError.appGroupUnavailable }
+        let matches = try storage.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }
+        guard matches.count <= 1 else { throw ShipmentShortcutError.ambiguous }
+        if let previous = matches.first {
+            let lease = try storage.acquireTrackingQuery(id: previous.id)
+            defer { lease.release() }
+            return try change { data in
+                let indices = data.shipments.indices.filter { CarrierDetector.sanitize(data.shipments[$0].trackingNumber) == number }
+                guard indices.count == 1, let index = indices.first, data.shipments[index].id == previous.id else { throw PickupStorageError.stalePreview }
+                let current = data.shipments[index]
+                guard current.originPlatform == nil || current.originPlatform == platform,
+                      current.taobaoOrderID == nil,
+                      current.platformOrderID == nil || current.platformOrderID == candidate.orderID else {
+                    throw PickupStorageError.stalePreview
+                }
+                data.shipments[index].originPlatform = platform
+                data.shipments[index].platformOrderID = candidate.orderID
+                return current.id
+            }
+        }
+        let detection = CarrierDetector.detect(number, context: candidate.carrier)
+        let shipment = Shipment(trackingNumber: number, carrierName: detection.carrier.name, carrierCode: detection.carrier.code,
+                                note: candidate.title, originPlatform: platform, platformOrderID: candidate.orderID)
+        try addThrowing(shipment)
+        return shipment.id
+    }
     @discardableResult func add(_ shipment: Shipment) -> Bool {
         do { try addThrowing(shipment); return true }
         catch { lastErrorMessage = error.localizedDescription; return false }
