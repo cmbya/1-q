@@ -108,7 +108,7 @@ final class MallRoutingTests: XCTestCase {
         do { _ = try await service.refresh(id: item.id); XCTFail() } catch { XCTAssertEqual(error as? MallWebError, .identityMismatch) }
         mall.wrongNumber = false
         mall.onQuery = { try self.storage.transaction { $0.shipments[0].platformOrderID = "999999999999" } }
-        do { _ = try await service.refresh(id: item.id); XCTFail() } catch { XCTAssertEqual(error as? PickupStorageError, .stalePreview) }
+        do { _ = try await service.refresh(id: item.id); XCTFail() } catch { guard case PickupStorageError.stalePreview = error else { return XCTFail("Expected stalePreview") } }
         XCTAssertEqual(try storage.snapshot().shipments[0].logisticsInfo, "旧轨迹")
         XCTAssertEqual(uapi.calls, 0)
     }
@@ -140,7 +140,7 @@ final class MallRoutingTests: XCTestCase {
                 }
             }
             do { _ = try await TrackingRefreshService(store: storage, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refresh(id: item.id); XCTFail() }
-            catch { XCTAssertEqual(error as? PickupStorageError, .stalePreview) }
+            catch { guard case PickupStorageError.stalePreview = error else { return XCTFail("Expected stalePreview") } }
             let saved = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == item.id })
             XCTAssertEqual(saved.logisticsInfo, "旧轨迹")
             XCTAssertNil(saved.lastRefreshError)
@@ -174,8 +174,9 @@ final class MallRoutingTests: XCTestCase {
         let item = try add(nil)
         try storage.transaction { data in
             var duplicate = item; duplicate.id = UUID()
+            duplicate.pickupCode = "另一取码"
             data.shipments.append(duplicate)
-            data.records.append(PickupRecord(groupID: data.records[0].groupID, code: "另一取码", shipmentID: duplicate.id))
+            data.records.append(PickupRecord(groupID: data.records[0].groupID, code: duplicate.pickupCode, source: duplicate.note, shipmentID: duplicate.id))
         }
         let before = try storage.exportBackup()
         let store = ShipmentStore(storageProvider: { self.storage })
@@ -210,7 +211,7 @@ final class MallRoutingTests: XCTestCase {
         }
         let lease = try storage.acquireTrackingQuery(id: item.id)
         defer { lease.release() }
-        XCTAssertThrowsError(try store.importMall(candidate, platform: "jd")) { XCTAssertEqual($0 as? PickupStorageError, .queryInProgress) }
+        XCTAssertThrowsError(try store.importMall(candidate, platform: "jd")) { guard case PickupStorageError.queryInProgress = $0 else { return XCTFail("Expected queryInProgress") } }
         XCTAssertEqual(try storage.exportBackup(), before)
     }
     @MainActor func testImportNewMallShipmentAndConflictingOrder() throws {
