@@ -32,6 +32,7 @@ struct SettingsView: View {
 
                 Section("物流查询") {
                     NavigationLink("UAPI物流查询") { UAPISettingsView() }
+                    NavigationLink("淘宝导入（试验）") { TaobaoTrialView() }
                 }
 
                 Section("AI") {
