@@ -138,7 +138,11 @@ private struct MallLoginSheet: View {
                                 }
                                 guard MallSession.hasLoginCredentials(cookies, platform: browser.platform) else { throw MallWebError.authentication }
                                 browser.message = "正在同平台网页环境验证订单访问；验证通过才保存。"
-                                try await MallDirectClient(platform: browser.platform, cookies: cookies).verifySession()
+                                if browser.platform == .jd {
+                                    try await MallWebClient(platform: .jd, cookies: cookies).verifySession()
+                                } else {
+                                    try await MallDirectClient(platform: browser.platform, cookies: cookies).verifySession()
+                                }
                                 let fresh = try await browser.capture()
                                 guard browser.active, !Task.isCancelled, !readOnly else { return }
                                 try MallSession(platform: browser.platform).save(fresh)
@@ -177,6 +181,8 @@ struct MallImportView: View {
                 Text("在正常平台网页手动登录并读取自己的订单。非官方开放平台授权，网页改版、登录过期或风控可能导致不可用。不购买、不确认收货、不绕过验证。")
                     .font(.footnote)
                 Text("会话仅保存在本机独立钥匙串，不进入JSON备份；退出会销毁登录网页并清除该平台会话，不影响其他平台。不要分享密码或Cookie。")
+                    .font(.footnote)
+                Text(platform == .jd ? "京东通过手机网页读取，需保持App前台；快捷指令后台不支持此网页链路，失败不自动切换UAPI。" : "拼多多使用已验证的Cookie直连读取，网页登录用于取得本机会话。")
                     .font(.footnote)
                 Text(hasSession ? "已保存候选会话（不代表登录有效）" : "尚未保存会话")
                 Button("登录／重新登录" + platform.title) { consent = true }
@@ -265,7 +271,12 @@ struct MallImportView: View {
         task = Task { @MainActor in
             defer { if operationID == id { busy = false; task = nil; operationID = nil } }
             do {
-                try await MallDirectClient(platform: platform, cookies: parsed).verifySession()
+                if platform == .jd {
+                    // Never test an imported account against cookies from the old account.
+                    try await MallWebClient(platform: .jd, cookies: parsed, isolatedContext: true).verifySession()
+                } else {
+                    try await MallDirectClient(platform: platform, cookies: parsed).verifySession()
+                }
                 try Task.checkCancellation()
                 guard operationID == id, !store.isHistoricalSnapshot else { return }
                 try session.save(parsed)
@@ -313,8 +324,13 @@ struct MallImportView: View {
         task = Task { @MainActor in
             defer { if operationID == id { busy = false; operationID = nil; task = nil } }
             do {
-                let client = MallDirectClient(platform: currentPlatform, cookies: try session.load())
-                let values = try await client.fetchOrders()
+                let cookies = try session.load()
+                let values: [MallCandidate]
+                if currentPlatform == .jd {
+                    values = try await MallWebClient(platform: .jd, cookies: cookies).fetchOrders()
+                } else {
+                    values = try await MallDirectClient(platform: currentPlatform, cookies: cookies).fetchOrders()
+                }
                 try Task.checkCancellation()
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else { return }
                 candidates = values

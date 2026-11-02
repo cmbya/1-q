@@ -60,6 +60,9 @@ struct MallTrackingClient: MallTrackingQuerying {
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
         try Task.checkCancellation()
         let cookies = try MallSession(platform: platform).load()
+        if platform == .jd {
+            return try await MallWebClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
+        }
         return try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
     }
 }
@@ -107,7 +110,9 @@ struct MallSession {
     static func hasLoginCredentials(_ cookies: [TaobaoTrialCookie], platform: MallPlatform) -> Bool {
         let relevant = cookies.filter { applies($0, to: platform.ordersURL, platform: platform) && !$0.value.isEmpty }
         let names = Set(relevant.map(\.name))
-        return platform == .jd ? names.isSuperset(of: ["pt_key", "pt_pin"]) : names.contains("PDDAccessToken") && (names.contains("pdd_user_id") || names.contains("pdduid"))
+        return platform == .jd
+            ? !names.isDisjoint(with: ["thor", "pt_key"]) && !names.isDisjoint(with: ["pin", "pt_pin", "_pst"])
+            : names.contains("PDDAccessToken") && (names.contains("pdd_user_id") || names.contains("pdduid"))
     }
     func load() throws -> [TaobaoTrialCookie] {
         do {
@@ -141,8 +146,8 @@ struct MallWebDetail {
     func result(expected: String, platform: MallPlatform) throws -> UAPITrackingResult {
         guard number == expected else { throw MallWebError.identityMismatch }
         guard let latest = points.max(by: { $0.date < $1.date }) else { throw MallWebError.noTrace }
-        // Do not infer delivered/collected from ambiguous Chinese text or overwrite the user's status.
-        return UAPITrackingResult(trackingNumber: number, carrierName: carrier, carrierCode: "", status: nil,
+        // Only the latest dated event may contribute a conservative status.
+        return UAPITrackingResult(trackingNumber: number, carrierName: carrier, carrierCode: "", status: MallDeliveryState.resolve(latest: latest.text),
             logisticsInfo: String(latest.text.prefix(1000)), logisticsTime: latest.date,
             queryInfo: (["\(platform.title)网页物流（非UAPI）"] + points.sorted { $0.date > $1.date }.map { ShipmentDateDisplay.string($0.date) + " " + $0.text }).joined(separator: "\n"), queriedAt: Date())
     }
@@ -207,6 +212,87 @@ enum MallWebParser {
         guard !points.isEmpty else { throw MallWebError.noTrace }
         return MallWebDetail(number: number, carrier: String((body["carrier"] as? String ?? "").prefix(100)), points: points)
     }
+    /// DOM layout reference: Halo0sama/ExpressAssistant JdTrackFetcher.kt,
+    /// b892565502d381a58a5a2c57e6d9068e07648c7a. Require a real visible waybill;
+    /// never copy its order-ID substitution or ambiguous neighboring-text pairing.
+    static func jdDOM(text: String, url: URL, orderID: String) throws -> MallWebDetail {
+        guard MallPlatform.jd.allowed(url), url.host == "trade.m.jd.com",
+              url.path == "/order/deal_wuliu_jdm.shtml", identifier(orderID, platform: .jd),
+              URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .filter({ $0.name == "dealId" }).map(\.value) == [Optional(orderID)] else { throw MallWebError.identityMismatch }
+        guard text.utf8.count <= 2_000_000 else { throw MallWebError.unsupported }
+        let lines = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var numbers = Set<String>()
+        var headerLines = Set<Int>()
+        var carrier = ""
+        for (index, line) in lines.enumerated() {
+            if line.contains("运单号") {
+                guard line.hasPrefix("运单号") else { throw MallWebError.identityMismatch }
+                var value = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                if value.hasPrefix(":") || value.hasPrefix("：") { value = String(value.dropFirst()).trimmingCharacters(in: .whitespaces) }
+                headerLines.insert(index)
+                if value.isEmpty, index + 1 < lines.count { value = lines[index + 1]; headerLines.insert(index + 1) }
+                guard waybill(value), value != orderID else { throw MallWebError.identityMismatch }
+                numbers.insert(value)
+            }
+            for label in ["国内承运人：", "国内承运人:", "承运人：", "承运人:"] where line.hasPrefix(label) {
+                carrier = String(line.dropFirst(label.count).prefix(100))
+                headerLines.insert(index)
+            }
+        }
+        guard numbers.count == 1, let number = numbers.first else { throw MallWebError.identityMismatch }
+        let expression = try NSRegularExpression(pattern: #"(?<![0-9])\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?(?![0-9:])"#)
+        let keywords = ["快件", "包裹", "派件", "派送", "揽收", "签收", "发往", "到达", "转运", "投递", "取件", "出库", "配送", "妥投", "运输", "送达"]
+        func isDescription(_ line: String) -> Bool {
+            !["订单编号", "运单号", "联系电话", "¥", "评论", "已售"].contains(where: line.contains) && keywords.contains(where: line.contains)
+        }
+        // Preserve order and test both complete layouts; never greedily pair a
+        // timestamp with one of two neighboring descriptions.
+        enum Token { case time(Date), description(String), inline(MallWebPoint) }
+        var tokens: [Token] = []
+        for (index, line) in lines.enumerated() where !headerLines.contains(index) {
+            if ["精选推荐", "猜你喜欢", "为你推荐"].contains(where: line.contains) { break }
+            let matches = expression.matches(in: line, range: NSRange(line.startIndex..., in: line))
+            if !matches.isEmpty {
+                guard matches.count == 1, let match = matches.first, let range = Range(match.range, in: line),
+                      let time = date(String(line[range])) else { throw MallWebError.noTrace }
+                let before = String(line[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+                let after = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                guard before.isEmpty || after.isEmpty else { throw MallWebError.noTrace }
+                let description = before.isEmpty ? after : before
+                if description.isEmpty { tokens.append(.time(time)) }
+                else if isDescription(description) { tokens.append(.inline(MallWebPoint(date: time, text: String(description.prefix(1000))))) }
+                else { throw MallWebError.noTrace }
+            } else if isDescription(line) {
+                guard line.range(of: #"\d{2}[-/]\d{2}|\d{2}:\d{2}"#, options: .regularExpression) == nil else { throw MallWebError.noTrace }
+                tokens.append(.description(String(line.prefix(1000))))
+            }
+            guard tokens.count <= 1000 else { throw MallWebError.unsupported }
+        }
+        func paired(descriptionFirst: Bool) -> [MallWebPoint]? {
+            var points: [MallWebPoint] = []
+            var index = 0
+            while index < tokens.count {
+                if case let .inline(point) = tokens[index] { points.append(point); index += 1; continue }
+                guard index + 1 < tokens.count else { return nil }
+                if descriptionFirst {
+                    guard case let .description(description) = tokens[index], case let .time(time) = tokens[index + 1] else { return nil }
+                    points.append(MallWebPoint(date: time, text: description))
+                } else {
+                    guard case let .time(time) = tokens[index], case let .description(description) = tokens[index + 1] else { return nil }
+                    points.append(MallWebPoint(date: time, text: description))
+                }
+                index += 2
+            }
+            return points.isEmpty ? nil : points
+        }
+        let before = paired(descriptionFirst: true)
+        let after = paired(descriptionFirst: false)
+        let onlyInline = tokens.allSatisfy { if case .inline = $0 { return true }; return false }
+        guard let points = before ?? after, onlyInline || (before == nil) != (after == nil) else { throw MallWebError.noTrace }
+        return MallWebDetail(number: number, carrier: carrier, points: points)
+    }
     static func pddDetail(text: String, url: URL, orderID: String) throws -> MallWebDetail {
         guard MallPlatform.pdd.allowed(url), url.path == "/goods_express.html",
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { throw MallWebError.unsupported }
@@ -261,7 +347,10 @@ enum MallWebParser {
     private var captures: [[String: Any]] = []
     private var failure: MallWebError?
     private var busy = false
-    init(platform: MallPlatform, cookies: [TaobaoTrialCookie]) { self.platform = platform; self.cookies = cookies }
+    private let isolatedContext: Bool
+    init(platform: MallPlatform, cookies: [TaobaoTrialCookie], isolatedContext: Bool = false) {
+        self.platform = platform; self.cookies = cookies; self.isolatedContext = isolatedContext
+    }
 
     func verifySession() async throws {
         try await prepare()
@@ -308,7 +397,7 @@ enum MallWebParser {
         guard !cookies.isEmpty, cookies.allSatisfy({ MallSession.valid($0, platform: platform) }) else { throw MallWebError.authentication }
         busy = true
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = MallBrowserContext.store(for: platform)
+        configuration.websiteDataStore = isolatedContext ? WKWebsiteDataStore.nonPersistent() : MallBrowserContext.store(for: platform)
         configuration.userContentController.add(self, name: "mallResponse")
         configuration.userContentController.addUserScript(WKUserScript(source: Self.observerScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let view = WKWebView(frame: window.bounds, configuration: configuration)
@@ -371,13 +460,23 @@ enum MallWebParser {
     private func observeDetail(orderID: String) async throws -> MallWebDetail {
         try load(MallWebParser.detailURL(platform: platform, orderID: orderID))
         var clicked = false
-        for _ in 0..<40 {
+        for attempt in 0..<40 {
             let (url, text) = try await tick()
             if platform == .jd {
                 guard url.path == "/order/deal_wuliu_jdm.shtml" else { continue }
                 let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
                 guard items.filter({ $0.name == "dealId" }).map(\.value) == [Optional(orderID)] else { throw MallWebError.identityMismatch }
-                if let root = captures.first { return try MallWebParser.jdDetail(root) }
+                // Prefer the page's original trace API; empty/unknown responses may still render.
+                for root in captures {
+                    do { return try MallWebParser.jdDetail(root) }
+                    catch MallWebError.noTrace { continue }
+                    catch MallWebError.unsupported { continue }
+                }
+                if attempt >= 9 { // Five-second render grace, within the existing 20-second deadline.
+                    do { return try MallWebParser.jdDOM(text: text, url: url, orderID: orderID) }
+                    catch MallWebError.noTrace { continue }
+                    catch MallWebError.identityMismatch { continue } // No matching visible identity, no result/write.
+                }
             } else if url.path == "/goods_express.html" {
                 do { return try MallWebParser.pddDetail(text: text, url: url, orderID: orderID) }
                 catch MallWebError.noTrace { continue } // Render may not have completed; deadline remains fixed.
@@ -443,40 +542,5 @@ enum MallWebParser {
       target.click(); return true;
     })()
     """#
-    private static let observerScript = #"""
-    (() => {
-      if (window !== window.top) return;
-      let sent = 0;
-      const accepted = raw => {
-        try {
-          const u = new URL(raw, location.href);
-          if (u.protocol !== 'https:' || u.username || u.password || (u.port && u.port !== '443')) return false;
-          if (u.hostname === 'api.m.jd.com') return ['order_list_m','get_logistics_list_by_order_m'].includes(u.searchParams.get('functionId'));
-          return ['mobile.yangkeduo.com','mobile.pinduoduo.com'].includes(u.hostname) && u.pathname.endsWith('/aristotle/order_list_v4');
-        } catch (_) { return false; }
-      };
-      const report = (url, body) => {
-        if (sent >= 4 || typeof body !== 'string' || body.length > 2000000) return;
-        if (new TextEncoder().encode(body).length > 2000000 || !accepted(url)) return;
-        sent++;
-        window.webkit.messageHandlers.mallResponse.postMessage({type:'response',url:url,body:body});
-      };
-      const original = window.fetch;
-      if (original) window.fetch = function(...args) {
-        const promise = original.apply(this,args);
-        promise.then(response => {
-          if (!accepted(response.url)) return;
-          response.clone().text().then(body => report(response.url,body)).catch(() => {});
-        }).catch(() => {});
-        return promise;
-      };
-      const send = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.send = function(...args) {
-        this.addEventListener('load', () => {
-          try { if (accepted(this.responseURL) && (!this.responseType || this.responseType === 'text')) report(this.responseURL,this.responseText); } catch (_) {}
-        }, {once:true});
-        return send.apply(this,args);
-      };
-    })();
-    """#
+    private static let observerScript = JDWebScripts.observer
 }

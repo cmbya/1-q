@@ -24,6 +24,14 @@ final class MallDirectClientTests: XCTestCase {
         catch let error as MallDirectError { XCTAssertEqual(error.reason, reason); XCTAssertFalse(error.localizedDescription.contains("fixture")) }
         catch { XCTFail("Unsafe/unexpected error type: \(type(of: error))") }
     }
+    func testPDDLatestPickupCompletionUpdatesStatusWithoutScanningHistory() async throws {
+        for (latest, expected) in [("快件已按约定投递，取件人凭取件码完成取件", ShipmentStatus.delivered), ("您的快件已妥投，已在代收点取出", .delivered), ("已放入快递柜，等待取件", .readyForPickup)] {
+            let traces: [[String: Any]] = [["info": "正在派送", "time": 1792679300], ["info": latest, "time": 1792679363]]
+            let network = MallDirectFixtureNetwork([html(pddList()), html(pddShip(traces: traces))])
+            let result = try await MallDirectClient(platform: .pdd, cookies: cookies(.pdd), network: network).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378")
+            XCTAssertEqual(result.status, expected)
+        }
+    }
     func testJDPostFormMetadataAndAllPackages() async throws {
         let network = MallDirectFixtureNetwork([json(jdList), json(["success": true, "data": ["orderTrackGroupInfoList": [group("JD123456789"), group("JD987654321")]]])])
         let result = try await MallDirectClient(platform: .jd, cookies: cookies(.jd), network: network).fetchOrders()
@@ -122,7 +130,7 @@ final class MallDirectClientTests: XCTestCase {
         let network = MallDirectFixtureNetwork([html(pddList()), html(pddShip(traces: traces))])
         let result = try await MallDirectClient(platform: .pdd, cookies: cookies(.pdd), network: network).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378")
         XCTAssertEqual(result.logisticsTime?.timeIntervalSince1970, 1792679363)
-        XCTAssertNil(result.status)
+        XCTAssertEqual(result.status, .inTransit)
         let noTrace = MallDirectFixtureNetwork([json(jdList), json(["data": ["orderTrackGroupInfoList": [["shipId": "JD123456789", "thirdName": "京东快递", "orderTrackInfoList": []]]]])])
         let candidate = try await MallDirectClient(platform: .jd, cookies: cookies(.jd), network: noTrace).fetchOrders()
         XCTAssertEqual(candidate.first?.trackingNumber, "JD123456789")

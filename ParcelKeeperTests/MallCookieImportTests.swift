@@ -2,6 +2,14 @@ import XCTest
 @testable import ParcelKeeper
 
 final class MallCookieImportTests: XCTestCase {
+    func testJDWebCredentialAlternativesRequireTicketAndIdentity() throws {
+        for value in ["thor=fixture;pin=user", "pt_key=fixture;pin=user", "thor=fixture;pt_pin=user", "thor=fixture;_pst=user"] {
+            XCTAssertNoThrow(try MallCookieImport.parse(value, platform: .jd))
+        }
+        for value in ["thor=fixture", "pin=user", "pt_key=;pt_pin=user", "thor=fixture;pin="] {
+            XCTAssertThrowsError(try MallCookieImport.parse(value, platform: .jd))
+        }
+    }
     func testCookieImportUsesPlatformDomainAndPreservesEquals() throws {
         let cookies = try MallCookieImport.parse("pt_key=fixture=tail; pt_pin=fixture-user;", platform: .jd)
         XCTAssertEqual(cookies.first?.value, "fixture=tail")

@@ -41,14 +41,15 @@ struct MallDirectError: LocalizedError {
         self.http = http.flatMap { (100...599).contains($0) ? $0 : nil }
         self.bytes = bytes.flatMap { $0 >= 0 ? $0 : nil }
         // Never echo arbitrary server strings, even if they look like an error code.
-        self.code = code.flatMap { ["0", "202", "1001", "1002", "401", "403", "429"].contains($0) ? $0 : nil }
+        self.code = code.flatMap { ["0", "3", "202", "1001", "1002", "401", "403", "429"].contains($0) ? $0 : nil }
     }
     var errorDescription: String? {
         var fields = ["阶段=\(stage)"]
         if let http { fields.append("HTTP=\(http)") }
         if let bytes { fields.append("字节=\(bytes)") }
         if let code { fields.append("代码=\(code)") }
-        return (reason.errorDescription ?? "商城请求失败。") + "（" + fields.joined(separator: "，") + "）"
+        let explanation = reason == .unsupported ? "商城接口拒绝请求或返回结构不受支持；未更新数据，未切换UAPI。" : (reason.errorDescription ?? "商城请求失败。")
+        return explanation + "（" + fields.joined(separator: "，") + "）"
     }
 }
 
@@ -339,9 +340,9 @@ struct MallDirectClient {
         }
         let sorted = points.sorted { $0.date > $1.date }
         guard let latest = sorted.first else { throw failure(.noTrace, stage) }
-        // shippingStatus is the only sourced explicit terminal status. JD's prose and
-        // forecast text are not reliable status flags (e.g. 未签收 / 预计派送).
-        let status: ShipmentStatus? = !jd && ["SIGN", "SIGNED"].contains(text(ship["shippingStatus"]).uppercased()) ? .delivered : nil
+        // Prefer explicit platform terminal flags; otherwise classify only the latest dated event.
+        // Cabinet storage and forecast/negated text must not become collected.
+        let status: ShipmentStatus? = !jd && ["SIGN", "SIGNED"].contains(text(ship["shippingStatus"]).uppercased()) ? .delivered : MallDeliveryState.resolve(latest: latest.text)
         let summary = (["\(platform.title)Cookie直连物流（非UAPI）"] + sorted.map { ShipmentDateDisplay.string($0.date) + " " + $0.text }).joined(separator: "\n")
         guard summary.utf8.count <= 250_000 else { throw failure(.unsupported, stage) }
         return UAPITrackingResult(trackingNumber: number, carrierName: bounded(ship[jd ? "thirdName" : "shippingName"], 100), carrierCode: "", status: status, logisticsInfo: latest.text, logisticsTime: latest.date, queryInfo: summary, queriedAt: Date())
