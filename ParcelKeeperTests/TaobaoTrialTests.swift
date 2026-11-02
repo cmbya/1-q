@@ -56,7 +56,7 @@ final class TaobaoTrialTests: XCTestCase {
         XCTAssertEqual(network.requests.count, 3)
     }
     func testSessionClearAndSecureStorageFailure() throws {
-        let keys = ShipmentPhoneTests.PhoneKeys()
+        let keys = TrackingRefreshTests.PhoneKeys()
         let session = TaobaoTrialSession(keys: keys)
         // This mock only implements endpoint credentials; legacy save is a no-op.
         XCTAssertThrowsError(try session.save([.init(name: "synthetic", value: "fixture", domain: ".taobao.com", path: "/", secure: true, expires: nil)]))
