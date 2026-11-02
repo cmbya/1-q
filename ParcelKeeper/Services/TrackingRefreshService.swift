@@ -87,6 +87,7 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let direct = error as? MallDirectError { return direct.localizedDescription }
         if let platform, platform == "jd" || platform == "pdd" {
             let name = platform == "jd" ? "京东" : "拼多多"
             let detail: String
@@ -314,6 +315,10 @@ struct TrackingRefreshService {
                 let reason = Self.safeReason(error, platform: route?.platform ?? latest.originPlatform)
                 if let failure = error as? TaobaoTrackingError, failure.stopsBatch {
                     blockedPlatforms.insert("taobao")
+                    report.stoppedReason = reason
+                }
+                if let failure = error as? MallDirectError, failure.reason.stopsBatch, let platform = route?.platform {
+                    blockedPlatforms.insert(platform)
                     report.stoppedReason = reason
                 }
                 if let failure = error as? MallWebError, failure.stopsBatch, let platform = route?.platform {

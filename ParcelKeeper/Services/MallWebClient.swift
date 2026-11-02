@@ -7,7 +7,18 @@ enum MallPlatform: String, CaseIterable, Identifiable, Codable {
     case jd, pdd
     var id: String { rawValue }
     var title: String { self == .jd ? "京东" : "拼多多" }
-    var loginURL: URL { URL(string: self == .jd ? "https://plogin.m.jd.com/login/login" : "https://mobile.yangkeduo.com/login.html")! }
+    var loginURL: URL {
+        var url = URLComponents(string: self == .jd ? "https://plogin.m.jd.com/login/login" : "https://mobile.yangkeduo.com/login.html")!
+        url.queryItems = self == .jd
+            ? [.init(name: "appid", value: "300"), .init(name: "returnurl", value: ordersURL.absoluteString)]
+            : [.init(name: "_x_no_login_launch", value: "1"), .init(name: "from", value: ordersURL.absoluteString)]
+        return url.url!
+    }
+    var userAgent: String {
+        self == .pdd
+            ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15"
+            : "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
+    }
     var ordersURL: URL { URL(string: self == .jd ? "https://trade.m.jd.com/order/orderlist_jdm.shtml" : "https://mobile.yangkeduo.com/orders.html")! }
     var sessionService: String { "ParcelKeeper.Mall.Web.\(rawValue)" }
     func allowed(_ url: URL) -> Bool {
@@ -15,6 +26,23 @@ enum MallPlatform: String, CaseIterable, Identifiable, Codable {
               url.port == nil || url.port == 443, let host = url.host?.lowercased() else { return false }
         let domains = self == .jd ? ["jd.com"] : ["yangkeduo.com", "pinduoduo.com"]
         return domains.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+}
+/// Preserve platform web storage in memory across login/orders/logistics, without plaintext persistence.
+@MainActor enum MallBrowserContext {
+    private static var stores: [MallPlatform: WKWebsiteDataStore] = [:]
+    static func store(for platform: MallPlatform) -> WKWebsiteDataStore {
+        if let current = stores[platform] { return current }
+        let next = WKWebsiteDataStore.nonPersistent()
+        stores[platform] = next
+        return next
+    }
+    static func clear(_ platform: MallPlatform) async {
+        let current = store(for: platform)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            current.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) { continuation.resume() }
+        }
+        stores[platform] = nil
     }
 }
 struct MallCandidate: Identifiable {
@@ -32,7 +60,7 @@ struct MallTrackingClient: MallTrackingQuerying {
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
         try Task.checkCancellation()
         let cookies = try MallSession(platform: platform).load()
-        return try await MallWebClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
+        return try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
     }
 }
 enum MallWebError: LocalizedError, Equatable {
@@ -75,6 +103,11 @@ struct MallSession {
               !cookie.value.contains(where: { $0.isNewline || $0 == ";" }),
               let url = URL(string: "https://" + bare + (cookie.path.isEmpty ? "/" : cookie.path)) else { return false }
         return applies(cookie, to: url, platform: platform)
+    }
+    static func hasLoginCredentials(_ cookies: [TaobaoTrialCookie], platform: MallPlatform) -> Bool {
+        let relevant = cookies.filter { applies($0, to: platform.ordersURL, platform: platform) && !$0.value.isEmpty }
+        let names = Set(relevant.map(\.name))
+        return platform == .jd ? names.isSuperset(of: ["pt_key", "pt_pin"]) : names.contains("PDDAccessToken") && (names.contains("pdd_user_id") || names.contains("pdduid"))
     }
     func load() throws -> [TaobaoTrialCookie] {
         do {
@@ -230,6 +263,16 @@ enum MallWebParser {
     private var busy = false
     init(platform: MallPlatform, cookies: [TaobaoTrialCookie]) { self.platform = platform; self.cookies = cookies }
 
+    func verifySession() async throws {
+        try await prepare()
+        defer { cleanup() }
+        try load(platform.ordersURL)
+        _ = try await observeOrders()
+        guard let web else { throw MallWebError.unsupported }
+        let native = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
+        let current = native.map { TaobaoTrialCookie(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path, secure: $0.isSecure, expires: $0.expiresDate) }
+        guard MallSession.hasLoginCredentials(current, platform: platform) else { throw MallWebError.authentication }
+    }
     func fetchOrders() async throws -> [MallCandidate] {
         try await prepare()
         defer { cleanup() }
@@ -265,11 +308,11 @@ enum MallWebParser {
         guard !cookies.isEmpty, cookies.allSatisfy({ MallSession.valid($0, platform: platform) }) else { throw MallWebError.authentication }
         busy = true
         let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
+        configuration.websiteDataStore = MallBrowserContext.store(for: platform)
         configuration.userContentController.add(self, name: "mallResponse")
         configuration.userContentController.addUserScript(WKUserScript(source: Self.observerScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let view = WKWebView(frame: window.bounds, configuration: configuration)
-        view.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1"
+        view.customUserAgent = platform.userAgent
         view.navigationDelegate = self
         view.alpha = 0.01
         view.isUserInteractionEnabled = false
@@ -277,8 +320,10 @@ enum MallWebParser {
         window.insertSubview(view, at: 0)
         web = view
         do {
+            let existing = await configuration.websiteDataStore.httpCookieStore.allCookies()
             for cookie in cookies {
                 try Task.checkCancellation()
+                if existing.contains(where: { $0.name == cookie.name && $0.domain == cookie.domain && $0.path == cookie.path }) { continue }
                 var properties: [HTTPCookiePropertyKey: Any] = [.name: cookie.name, .value: cookie.value, .domain: cookie.domain, .path: cookie.path.isEmpty ? "/" : cookie.path]
                 if cookie.secure { properties[.secure] = "TRUE" }
                 if let expiry = cookie.expires { properties[.expires] = expiry }

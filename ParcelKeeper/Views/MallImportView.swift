@@ -25,15 +25,18 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     init(platform: MallPlatform, cookies: [TaobaoTrialCookie]) {
         self.platform = platform
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = MallBrowserContext.store(for: platform)
         let view = WKWebView(frame: .zero, configuration: config)
+        view.customUserAgent = platform.userAgent
         web = view
         super.init()
         view.navigationDelegate = self
         setup = Task { @MainActor [weak self] in
             guard let self else { return }
+            let existing = await config.websiteDataStore.httpCookieStore.allCookies()
             for cookie in cookies {
                 guard self.active, !Task.isCancelled else { return }
+                if existing.contains(where: { $0.name == cookie.name && $0.domain == cookie.domain && $0.path == cookie.path }) { continue }
                 guard cookie.expires.map({ $0 > Date() }) ?? true,
                       let url = URL(string: "https://" + cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
                       platform.allowed(url) else { continue }
@@ -45,7 +48,10 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
                 }
             }
             guard self.active, !Task.isCancelled, platform.allowed(platform.loginURL) else { return }
-            view.load(URLRequest(url: platform.loginURL))
+            let current = await config.websiteDataStore.httpCookieStore.allCookies()
+            let values = current.map { TaobaoTrialCookie(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path, secure: $0.isSecure, expires: $0.expiresDate) }
+            guard self.active, !Task.isCancelled else { return }
+            view.load(URLRequest(url: MallSession.hasLoginCredentials(values, platform: platform) ? platform.ordersURL : platform.loginURL))
         }
     }
 
@@ -120,7 +126,7 @@ private struct MallLoginSheet: View {
                     Button("取消") { saveTask?.cancel(); browser.destroy(); dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("保存候选会话") {
+                    Button(saving ? "正在验证订单访问" : "验证并保存会话") {
                         saving = true
                         saveTask = Task { @MainActor in
                             defer { saving = false }
@@ -130,10 +136,15 @@ private struct MallLoginSheet: View {
                                 guard !cookies.isEmpty else {
                                     browser.message = "尚未读取到平台会话，请在网页完成登录后重试。"; return
                                 }
-                                try MallSession(platform: browser.platform).save(cookies)
+                                guard MallSession.hasLoginCredentials(cookies, platform: browser.platform) else { throw MallWebError.authentication }
+                                browser.message = "正在同平台网页环境验证订单访问；验证通过才保存。"
+                                try await MallDirectClient(platform: browser.platform, cookies: cookies).verifySession()
+                                let fresh = try await browser.capture()
+                                guard browser.active, !Task.isCancelled, !readOnly else { return }
+                                try MallSession(platform: browser.platform).save(fresh)
                                 browser.destroy(); saved(); dismiss()
                             } catch is CancellationError { }
-                            catch { browser.message = "会话未保存，请稍后重试。" }
+                            catch { browser.message = "会话未保存：" + ((error as? MallDirectError)?.localizedDescription ?? (error as? MallWebError)?.localizedDescription ?? "本机安全保存或订单验证失败。") }
                         }
                     }.disabled(saving || !browser.active || readOnly)
                 }
@@ -146,6 +157,8 @@ private struct MallLoginSheet: View {
 struct MallImportView: View {
     @EnvironmentObject private var store: ShipmentStore
     let platform: MallPlatform
+    @State private var cookieImport = false
+    @State private var cookieText = ""
     @State private var consent = false
     @State private var login = false
     @State private var browser: MallLoginBrowser?
@@ -167,6 +180,8 @@ struct MallImportView: View {
                     .font(.footnote)
                 Text(hasSession ? "已保存候选会话（不代表登录有效）" : "尚未保存会话")
                 Button("登录／重新登录" + platform.title) { consent = true }
+                    .disabled(busy || store.isHistoricalSnapshot)
+                Button("导入Cookie（备用）") { cookieText = ""; cookieImport = true }
                     .disabled(busy || store.isHistoricalSnapshot)
                 Button("退出并清除本平台会话", role: .destructive) { clearSession() }
                     .disabled(store.isHistoricalSnapshot)
@@ -217,16 +232,55 @@ struct MallImportView: View {
             }
             Button("取消", role: .cancel) {}
         } message: { Text("平台将收到正常网页请求与登录信息，可能要求验证码或重新登录；保存候选Cookie不能证明登录成功，需手动读取订单验证。") }
+        .sheet(isPresented: $cookieImport, onDismiss: { cookieText = "" }) {
+            NavigationStack {
+                Form {
+                    Text("仅粘贴本平台Cookie值（name=value; name=value），不要粘贴curl或整组请求头。它等同登录凭据，不要发给他人。验证订单访问成功后才保存钥匙串；不进入JSON备份。")
+                    SecureField("Cookie", text: $cookieText).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    Button(busy ? "正在验证" : "验证并保存") { saveImportedCookie() }
+                        .disabled(busy || cookieText.isEmpty || store.isHistoricalSnapshot)
+                    if let message { Text(message).font(.footnote).textSelection(.enabled) }
+                }
+                .navigationTitle(platform.title + "Cookie导入")
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { cancel(); cookieText = ""; cookieImport = false } } }
+            }.interactiveDismissDisabled(busy)
+        }
         .sheet(isPresented: $login, onDismiss: { browser?.destroy(); browser = nil }) {
             if let browser {
                 MallLoginSheet(browser: browser, saved: {
                     candidates = []; selected = []; loadSession()
-                    message = "候选会话已保存，请手动读取订单验证，不代表登录成功。"
+                    message = "已验证订单访问并保存本机会话；后续有效性仍以实际读取为准。"
                 }, readOnly: store.isHistoricalSnapshot)
             }
         }
     }
 
+    private func saveImportedCookie() {
+        guard !busy, !store.isHistoricalSnapshot else { return }
+        let parsed: [TaobaoTrialCookie]
+        do { parsed = try MallCookieImport.parse(cookieText, platform: platform) }
+        catch { cookieText = ""; message = "Cookie格式或必要登录凭据不完整，尚未保存。"; return }
+        cookieText = ""; busy = true
+        let id = UUID(); operationID = id
+        task = Task { @MainActor in
+            defer { if operationID == id { busy = false; task = nil; operationID = nil } }
+            do {
+                try await MallDirectClient(platform: platform, cookies: parsed).verifySession()
+                try Task.checkCancellation()
+                guard operationID == id, !store.isHistoricalSnapshot else { return }
+                try session.save(parsed)
+                await MallBrowserContext.clear(platform)
+                guard operationID == id else { return }
+                hasSession = true; cookieImport = false; candidates = []; selected = []
+                message = "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
+            } catch is CancellationError { }
+            catch { if operationID == id { message = "验证失败，原会话未替换：" + safeFailure(error) } }
+        }
+    }
+    private func safeFailure(_ error: Error) -> String {
+        if let direct = error as? MallDirectError { return direct.localizedDescription }
+        return (error as? MallWebError)?.localizedDescription ?? "本机安全保存或读取失败。"
+    }
     private func loadSession() {
         do { hasSession = !(try session.load()).isEmpty }
         catch { hasSession = false; message = "无法读取本机会话，请重新登录或清除会话。" }
@@ -240,8 +294,15 @@ struct MallImportView: View {
         guard !store.isHistoricalSnapshot else { return }
         cancel(); browser?.destroy(); browser = nil; login = false
         candidates = []; selected = []
-        do { try session.clear(); hasSession = false; message = "本平台会话已清除，其他平台不受影响。" }
-        catch { message = "清除失败，请重试；不能确认本机会话已删除。" }
+        busy = true
+        task = Task { @MainActor in
+            defer { busy = false; task = nil }
+            do {
+                try session.clear()
+                await MallBrowserContext.clear(platform)
+                hasSession = false; message = "本平台会话与网页上下文已清除，其他平台不受影响。"
+            } catch { message = "清除失败，请重试；不能确认本机会话已删除。" }
+        }
     }
 
     private func fetch() {
@@ -252,14 +313,14 @@ struct MallImportView: View {
         task = Task { @MainActor in
             defer { if operationID == id { busy = false; operationID = nil; task = nil } }
             do {
-                let client = MallWebClient(platform: currentPlatform, cookies: try session.load())
+                let client = MallDirectClient(platform: currentPlatform, cookies: try session.load())
                 let values = try await client.fetchOrders()
                 try Task.checkCancellation()
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else { return }
                 candidates = values
                 message = values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。"
             } catch is CancellationError { }
-            catch { if operationID == id { message = "读取订单失败，请检查平台登录／验证状态后重试。未导入，未调用UAPI。" } }
+            catch { if operationID == id { message = "读取订单失败：" + safeFailure(error) + " 未导入，未调用UAPI。" } }
         }
     }
 
@@ -309,7 +370,8 @@ struct MallImportView: View {
                     guard !Task.isCancelled, operationID == id else { return }
                     summary.refreshFailed += 1
                     // Never display raw web errors: responses may contain session material.
-                    details.append(candidate.trackingNumber + "：关联已保存，物流未更新，请检查登录／验证或稍后重试。")
+                    details.append(candidate.trackingNumber + "：关联已保存，物流未更新：" + safeFailure(error))
+                    if let failure = error as? MallDirectError, failure.reason.stopsBatch { platformStopped = true }
                     if let failure = error as? MallWebError, failure.stopsBatch { platformStopped = true }
                 }
             }

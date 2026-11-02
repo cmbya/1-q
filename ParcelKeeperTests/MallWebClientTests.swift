@@ -3,6 +3,29 @@ import WebKit
 @testable import ParcelKeeper
 
 final class MallWebClientTests: XCTestCase {
+    @MainActor func testPlatformBrowserContextSurvivesViewRecreationAndIsIsolated() {
+        XCTAssertTrue(MallBrowserContext.store(for: .jd) === MallBrowserContext.store(for: .jd))
+        XCTAssertTrue(MallBrowserContext.store(for: .pdd) === MallBrowserContext.store(for: .pdd))
+        XCTAssertFalse(MallBrowserContext.store(for: .jd) === MallBrowserContext.store(for: .pdd))
+        XCTAssertFalse(MallBrowserContext.store(for: .jd).isPersistent)
+    }
+    @MainActor func testClearingOneBrowserContextDoesNotAffectOtherPlatform() async {
+        let jd = MallBrowserContext.store(for: .jd)
+        let pdd = MallBrowserContext.store(for: .pdd)
+        await MallBrowserContext.clear(.pdd)
+        XCTAssertTrue(jd === MallBrowserContext.store(for: .jd))
+        XCTAssertFalse(pdd === MallBrowserContext.store(for: .pdd))
+    }
+    func testRequiredLoginCookiesAreNotAnalyticsCookies() {
+        func cookie(_ name: String, domain: String) -> TaobaoTrialCookie {
+            .init(name: name, value: "fixture", domain: domain, path: "/", secure: true, expires: nil)
+        }
+        XCTAssertFalse(MallSession.hasLoginCredentials([cookie("analytics", domain: ".jd.com")], platform: .jd))
+        XCTAssertTrue(MallSession.hasLoginCredentials([cookie("pt_key", domain: ".jd.com"), cookie("pt_pin", domain: ".jd.com")], platform: .jd))
+        XCTAssertFalse(MallSession.hasLoginCredentials([cookie("PDDAccessToken", domain: ".yangkeduo.com")], platform: .pdd))
+        XCTAssertTrue(MallSession.hasLoginCredentials([cookie("PDDAccessToken", domain: ".yangkeduo.com"), cookie("pdd_user_id", domain: ".yangkeduo.com")], platform: .pdd))
+        XCTAssertTrue(MallPlatform.pdd.loginURL.absoluteString.contains("_x_no_login_launch=1"))
+    }
     func testPlatformURLBoundary() {
         for platform in MallPlatform.allCases {
             XCTAssertTrue(platform.allowed(platform.loginURL))
