@@ -142,6 +142,9 @@ enum TaobaoTrialParser {
 final class TaobaoTrialClient {
     private let network: any AINetworking
     private var cookies: [TaobaoTrialCookie]
+    private var stage = "订单列表"
+    private var lastStatus: Int?
+    private var lastRoot: [String: Any]?
     init(cookies: [TaobaoTrialCookie], network: any AINetworking = AISecureNetwork()) {
         self.cookies = cookies; self.network = network
     }
@@ -150,6 +153,7 @@ final class TaobaoTrialClient {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         guard let body = String(data: data, encoding: .utf8) else { throw TaobaoTrialError.shape }
         for attempt in 0...1 {
+            lastStatus = nil; lastRoot = nil
             try Task.checkCancellation()
             let applicable = cookies.filter { $0.applies(to: endpoint) }
             let token = applicable.first(where: { $0.name == "_m_h5_tk" })?.value.components(separatedBy: "_").first ?? ""
@@ -168,6 +172,9 @@ final class TaobaoTrialClient {
             catch is CancellationError { throw CancellationError() }
             catch { throw TaobaoTrialError.network }
             try Task.checkCancellation()
+            lastStatus = (response as? HTTPURLResponse)?.statusCode
+            guard bytes.count <= 2_000_000 else { throw TaobaoTrialError.network }
+            lastRoot = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any]
             guard let http = response as? HTTPURLResponse, http.statusCode == 200,
                   bytes.count <= 2_000_000 else { throw TaobaoTrialError.network }
             let newCookies = HTTPCookie.cookies(withResponseHeaderFields: http.allHeaderFields.reduce(into: [String: String]()) { result, item in
@@ -188,6 +195,15 @@ final class TaobaoTrialClient {
         throw TaobaoTrialError.login
     }
     func fetch() async throws -> TaobaoTrialReport {
+        defer { lastRoot = nil; lastStatus = nil }
+        do { return try await fetchReport() }
+        catch is CancellationError { throw CancellationError() }
+        catch let reason as TaobaoTrialError {
+            throw TaobaoTrialDiagnostic(stage: stage, reason: reason, status: lastStatus, root: lastRoot)
+        }
+    }
+    private func fetchReport() async throws -> TaobaoTrialReport {
+        stage = "订单列表"; lastStatus = nil; lastRoot = nil
         let root = try await call("mtop.taobao.order.queryboughtlistv2", payload: [
             "tabCode": "all", "page": 1, "OrderType": "OrderList", "templateConfigVersion": "0", "appName": "tborder", "appVersion": "3.0",
             "condition": "{\"version\":\"1.0.0\",\"appChannel\":\"\"}", "ttid": "201200@taobao_h5_9.18.0", "requestIdentity": "#t#ip#h5"
@@ -197,6 +213,7 @@ final class TaobaoTrialClient {
         for order in orders.prefix(8) {
             try Task.checkCancellation()
             report.scanned += 1
+            stage = "物流详情"; lastStatus = nil; lastRoot = nil
             do {
                 let response = try await call("mtop.taobao.logistics.detailorlist.query", payload: ["orderId": order.id])
                 for item in try TaobaoTrialParser.waybills(response) {

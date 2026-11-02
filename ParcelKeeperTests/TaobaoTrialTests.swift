@@ -52,7 +52,9 @@ final class TaobaoTrialTests: XCTestCase {
         XCTAssertTrue(network.requests.allSatisfy { $0.url?.host == "h5api.m.taobao.com" })
         network.validation = true
         do { _ = try await TaobaoTrialClient(cookies: [], network: network).fetch(); XCTFail() }
-        catch TaobaoTrialError.verification {}
+        catch let error as TaobaoTrialDiagnostic {
+            guard case .verification = error.reason else { return XCTFail("Expected verification failure") }
+        }
         XCTAssertEqual(network.requests.count, 3)
     }
     func testSessionClearAndSecureStorageFailure() throws {

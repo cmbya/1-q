@@ -28,7 +28,7 @@ final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = navigationAction.request.url, TaobaoTrialPolicy.allowed(url) else {
-            message = "已阻止非淘宝HTTPS跳转。若验证依赖其他域名，本试验暂不支持；不绕过验证。"
+            message = "已阻止跳转：\(navigationAction.request.url.map(TaobaoTrialPolicy.blockedDestination) ?? "未知地址")。若验证依赖其他域名，本试验暂不支持；不绕过验证。"
             decisionHandler(.cancel); return
         }
         // Keep target=_blank in the same restricted WebView.
@@ -38,7 +38,7 @@ final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         guard let url = navigationResponse.response.url, TaobaoTrialPolicy.allowed(url) else {
-            message = "已阻止不受支持的登录页面。"
+            message = "已阻止登录页面：\(navigationResponse.response.url.map(TaobaoTrialPolicy.blockedDestination) ?? "未知地址")。"
             decisionHandler(.cancel); return
         }
         decisionHandler(.allow)
