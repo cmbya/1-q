@@ -283,7 +283,12 @@ struct HomeView: View {
     }
 
     private func processText(_ text: String) {
-        let drafts = SmartShipmentParser.parse(text)
+        let report = SmartShipmentParser.parseReport(text)
+        guard !report.hasFailures else {
+            pasteErrorMessage = "部分运单无法安全识别，本次未导入。请分开核对后重试：\n" + report.failures.map(\.message).joined(separator: "\n")
+            return
+        }
+        let drafts = report.drafts
         guard !drafts.isEmpty else {
             if let single = SmartShipmentParser.parseSingleNumber(text) {
                 presentImport([single])

@@ -51,6 +51,28 @@ enum JDOrderSelection {
         guard alternate.count <= 1, alternate.allSatisfy({ $0.value == orderID }) else { throw MallWebError.identityMismatch }
         return url
     }
+    /// A malformed link is local damage; an explicit different identity is not.
+    private static func rowURL(_ raw: String, id: String) throws -> URL? {
+        let normalized = raw.hasPrefix("//") ? "https:" + raw : raw.hasPrefix("/") ? "https://trade.m.jd.com" + raw : raw
+        if let items = URLComponents(string: normalized)?.queryItems {
+            let ids = items.filter { ["dealid", "orderid"].contains($0.name.lowercased()) }
+            if ids.contains(where: { $0.value != id }) || items.filter({ $0.name.lowercased() == "dealid" }).count > 1 {
+                throw MallWebError.identityMismatch
+            }
+        }
+        return try? logisticsURL(raw, orderID: id)
+    }
+    static func excludedIDs(_ root: [String: Any]) -> Set<String> {
+        let rawRows = (root["body"] as? [String: Any])?["orderList"] as? [Any] ?? []
+        let rows = rawRows.compactMap { $0 as? [String: Any] }
+        return Set(rows.compactMap { row in
+            guard let id = scalar(row["orderId"]), identifier(id) else { return nil }
+            let type = (row["progressInfo"] as? [String: Any])?["progressId"] as? String ?? ""
+            let status = (row["orderStatusInfo"] as? [String: Any])?["orderStatusName"] as? String ?? ""
+            let specials = row["specialDealList"] as? [[String: Any]] ?? []
+            return excluded(status) || (!type.isEmpty && type != "logistics") || specials.contains(where: { ($0["isStore2Home"] as? Bool) == true }) ? id : nil
+        })
+    }
     private static func excluded(_ text: String) -> Bool {
         ["取消", "关闭", "退款", "待付款", "未支付", "未付款"].contains(where: text.contains)
     }
@@ -72,22 +94,27 @@ enum JDOrderSelection {
         try inspect(root: root, now: now, recentMonth: recentMonth).orders
     }
     static func inspect(root: [String: Any], now: Date = Date(), recentMonth: Bool = true) throws -> Report {
-        guard let body = root["body"] as? [String: Any], let rows = body["orderList"] as? [[String: Any]], rows.count <= 200 else { throw MallWebError.unsupported }
+        guard let body = root["body"] as? [String: Any], let rawRows = body["orderList"] as? [Any], rawRows.count <= 200 else { throw MallWebError.unsupported }
+        let rows = rawRows.compactMap { $0 as? [String: Any] }
         var report = Report()
         var seen = Set<String>()
         for object in rows {
-            guard let id = scalar(object["orderId"]), identifier(id), seen.insert(id).inserted else { throw MallWebError.identityMismatch }
+            guard let id = scalar(object["orderId"]), identifier(id) else { report.skip(.missingLink); continue }
+            guard seen.insert(id).inserted else { throw MallWebError.identityMismatch }
             let status = (object["orderStatusInfo"] as? [String: Any])?["orderStatusName"] as? String ?? ""
             if excluded(status) { report.skip(.excludedStatus); continue }
             guard let progress = object["progressInfo"] as? [String: Any], let type = progress["progressId"] as? String, !type.isEmpty else { report.skip(.unknownType); continue }
             guard type == "logistics" else { report.skip(.nonCourier); continue }
             let url: URL
             if let value = progress["progressLink"] {
-                guard let link = value as? String else { throw MallWebError.unsupported }
+                guard let link = value as? String else { report.skip(.missingLink); continue }
                 if link.isEmpty {
                     guard let made = fallback(object, id: id) else { report.skip(.missingLink); continue }
                     url = made
-                } else { url = try logisticsURL(link, orderID: id) }
+                } else {
+                    guard let valid = try rowURL(link, id: id) else { report.skip(.missingLink); continue }
+                    url = valid
+                }
             } else {
                 guard let made = fallback(object, id: id) else { report.skip(.missingLink); continue }
                 url = made
@@ -102,17 +129,25 @@ enum JDOrderSelection {
     /// Probe eligibility is not courier classification or permission to import.
     /// ExpressAssistant b8925655 uses order fields when progressInfo is absent.
     static func probes(_ root: [String: Any]) throws -> [MallWebOrder] {
-        guard let body = root["body"] as? [String: Any], let rows = body["orderList"] as? [[String: Any]], rows.count <= 200 else { throw MallWebError.unsupported }
+        guard let body = root["body"] as? [String: Any], let rawRows = body["orderList"] as? [Any], rawRows.count <= 200 else { throw MallWebError.unsupported }
+        let rows = rawRows.compactMap { $0 as? [String: Any] }
         var result: [MallWebOrder] = []
+        var seen = Set<String>()
+        let excluded = excludedIDs(root)
         for row in rows {
-            guard let id = scalar(row["orderId"]), identifier(id) else { throw MallWebError.identityMismatch }
+            guard let id = scalar(row["orderId"]), identifier(id) else { continue }
+            guard seen.insert(id).inserted else { throw MallWebError.identityMismatch }
+            if excluded.contains(id) { continue }
             let status = (row["orderStatusInfo"] as? [String: Any])?["orderStatusName"] as? String ?? ""
-            if excluded(status) { continue }
+            if Self.excluded(status) { continue }
             let specials = row["specialDealList"] as? [[String: Any]] ?? []
             if specials.contains(where: { ($0["isStore2Home"] as? Bool) == true }) { continue }
             let raw = (row["progressInfo"] as? [String: Any])?["progressLink"] as? String ?? ""
             let url: URL
-            if !raw.isEmpty { url = try logisticsURL(raw, orderID: id) }
+            if !raw.isEmpty {
+                guard let valid = try rowURL(raw, id: id) else { continue }
+                url = valid
+            }
             else if let built = fallback(row, id: id) { url = built }
             else { continue }
             let title = (row["wareInfoList"] as? [[String: Any]])?.first?["wareName"] as? String ?? "京东订单"
@@ -148,16 +183,18 @@ enum JDOrderSelection {
     }
     static func inspectDOM(_ value: Any, now: Date = Date(), recentMonth: Bool = true) throws -> Report {
         guard let root = value as? [String: Any], root["recognized"] as? Bool == true,
-              let empty = root["empty"] as? Bool, let rows = root["rows"] as? [[String: Any]], rows.count <= 200,
-              (!rows.isEmpty && !empty) || (rows.isEmpty && empty) else { throw MallWebError.unsupported }
+              let empty = root["empty"] as? Bool, let rawRows = root["rows"] as? [Any], rawRows.count <= 200,
+              (!rawRows.isEmpty && !empty) || (rawRows.isEmpty && empty) else { throw MallWebError.unsupported }
+        let rows = rawRows.compactMap { $0 as? [String: Any] }
         var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
         guard let cutoff = calendar.date(byAdding: .month, value: -1, to: now) else { throw MallWebError.unsupported }
         var report = Report(); var seen = Set<String>()
         for row in rows {
-            guard let id = row["id"] as? String, identifier(id), seen.insert(id).inserted,
-                  let raw = row["url"] as? String, let text = row["text"] as? String, text.utf8.count <= 32000,
-                  let title = row["title"] as? String, let dateText = row["orderDate"] as? String else { throw MallWebError.identityMismatch }
-            let url = try logisticsURL(raw, orderID: id)
+            guard let id = row["id"] as? String, identifier(id) else { report.skip(.missingLink); continue }
+            guard seen.insert(id).inserted else { throw MallWebError.identityMismatch }
+            guard let raw = row["url"] as? String, let text = row["text"] as? String, text.utf8.count <= 32000,
+                  let title = row["title"] as? String, let dateText = row["orderDate"] as? String else { report.skip(.missingLink); continue }
+            guard let url = try rowURL(raw, id: id) else { report.skip(.missingLink); continue }
             let regex = try! NSRegularExpression(pattern: #"订单(?:编号|号)\s*[:：]?\s*([0-9]{6,32})(?![0-9])"#)
             let ns = text as NSString
             let ids = Set(regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).map { ns.substring(with: $0.range(at: 1)) })

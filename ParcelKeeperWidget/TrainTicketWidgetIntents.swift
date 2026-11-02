@@ -51,14 +51,23 @@ struct ResetTrainTicketWidgetBrowsingIntent: AppIntent {
 
     init() {}
     init(slot: TrainWidgetSlot) { self.slot = slot.rawValue }
+    @Parameter(title: "当前绑定快照") var expectedBinding: String?
+    init(slot: TrainWidgetSlot, expectedBinding: TrainWidgetBinding) {
+        self.slot = slot.rawValue
+        self.expectedBinding = try? String(data: JSONEncoder().encode(expectedBinding), encoding: .utf8)
+    }
 
     func perform() async throws -> some IntentResult {
         guard let target = TrainWidgetSlot(rawValue: slot) else {
             throw PickupStorageError.invalidData("组件槽位无效。")
         }
+        guard let raw = expectedBinding, let bytes = raw.data(using: .utf8),
+              let expected = try? JSONDecoder().decode(TrainWidgetBinding.self, from: bytes), expected.slot == target else {
+            throw PickupStorageError.staleCompletion
+        }
         let group = try AppGroupResolver.groupID()
         let store = try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData)
-        try store.resetTrainWidgetBrowsing(slot: target)
+        try store.resetTrainWidgetBrowsing(slot: target, expectedBinding: expected)
         WidgetCenter.shared.reloadTimelines(ofKind: target.kind)
         return .result()
     }

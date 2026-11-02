@@ -131,11 +131,10 @@ struct SettingsView: View {
                                 }
                                 do {
                                     try store.confirmBackupImport(preview, policy: conflictPolicy)
-                                    let importedShipments = store.shipments
                                     let refreshWarning = store.lastErrorMessage
+                                    store.endReminderOperation()
                                     Task { @MainActor in
-                                        defer { store.endReminderOperation() }
-                                        let errors = await NotificationManager.shared.reconcileReminders(with: importedShipments)
+                                        let errors = await store.reconcileReminders()
                                         let result = errors.isEmpty ? "备份导入完成，未来提醒已对账。" : "备份已导入，但部分提醒未恢复：\n" + errors.joined(separator: "\n")
                                         importResultMessage = [result, refreshWarning].compactMap { $0 }.joined(separator: "\n")
                                     }

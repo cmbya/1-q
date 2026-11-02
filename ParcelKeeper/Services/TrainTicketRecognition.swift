@@ -71,7 +71,15 @@ enum TrainTicketRecognition {
     static func travelEvidence(_ text: String) -> String {
         // Segment inline labels first: an order timestamp must not discard the
         // adjacent journey, nor contribute its year/time to AI evidence checks.
-        fieldLines(text).components(separatedBy: .newlines).filter {
+        // OCR can split the owned date and time across lines. Remove only
+        // timestamp-shaped continuations, never the next labeled journey field.
+        let day = #"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?"#
+        let time = #"\d{1,2}[:：]\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"#
+        let splitTimestamp = "(?m)^[ \t]*" + nonTravelTimeNames
+            + #"[ \t]*[:：][ \t]*(?:\r?\n[ \t]*)+"# + day
+            + #"(?:(?:[ T]+|(?:\r?\n[ \t]*)+)"# + time + #")?[ \t]*(?=\r?$|\n)"#
+        return fieldLines(text).replacingOccurrences(of: splitTimestamp, with: "", options: .regularExpression)
+            .components(separatedBy: .newlines).filter {
             $0.range(of: "^\\s*" + nonTravelTimeNames + "\\s*[:：]", options: .regularExpression) == nil
         }.joined(separator: "\n")
     }

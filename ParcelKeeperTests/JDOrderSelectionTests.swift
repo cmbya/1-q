@@ -47,11 +47,16 @@ final class JDOrderSelectionTests: XCTestCase {
     func testDuplicateAndInvalidJSONIdentityRejected() {
         XCTAssertThrowsError(try JDOrderSelection.orders(root: root([item(), item()]), now: now, recentMonth: false))
         var invalid = item(); invalid["orderId"] = "123&dealId=999999"
-        XCTAssertThrowsError(try JDOrderSelection.orders(root: root([invalid]), now: now, recentMonth: false))
+        XCTAssertEqual(try? JDOrderSelection.orders(root: root([invalid]), now: now, recentMonth: false).count, 0)
     }
     func testPoisonedURLsRejected() {
         for link in ["https://evil.com/order/deal_wuliu_jdm.shtml?dealId=\(id)", "https://trade.m.jd.com.evil.com/order/deal_wuliu_jdm.shtml?dealId=\(id)", "http://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(id)", "https://user@trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(id)", "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(id)&dealId=\(id)", "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=999999", "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(id)&orderID=999999"] {
-            XCTAssertThrowsError(try JDOrderSelection.orders(root: root([item(link)]), now: now, recentMonth: false), link)
+            // Bad destinations are skipped locally, but explicit conflicting IDs abort.
+            if link.contains("&dealId=") || link.contains("dealId=999999") || link.contains("orderID=999999") {
+                XCTAssertThrowsError(try JDOrderSelection.orders(root: root([item(link)]), now: now, recentMonth: false), link)
+            } else {
+                XCTAssertEqual(try? JDOrderSelection.orders(root: root([item(link)]), now: now, recentMonth: false).count, 0, link)
+            }
         }
     }
     func testWhitelistNotProductNameOrPendingFilter() throws {

@@ -17,7 +17,9 @@ struct MallCandidateBatchResult {
     static func collect(orders: [MallWebOrder], detail: (MallWebOrder) async throws -> MallWebDetail) async throws -> MallCandidateBatchResult {
         var result = MallCandidateBatchResult()
         var ambiguous = Set<String>()
-        for order in orders.prefix(8) {
+        // Eight useful previews, with a separate finite failure/attempt budget.
+        for order in orders.prefix(24) {
+            if result.candidates.count >= 8 { break }
             try Task.checkCancellation()
             result.attempted += 1
             do {
@@ -30,7 +32,7 @@ struct MallCandidateBatchResult {
                         result.failed += 2
                     }
                 } else {
-                    result.candidates.append(MallCandidate(trackingNumber: value.number, carrier: value.carrier, title: order.title, orderID: order.id))
+                    result.candidates.append(MallCandidate(trackingNumber: value.number, carrier: value.carrier, title: order.title, orderID: order.id, sourceURL: order.url.absoluteString))
                 }
             } catch is CancellationError { throw CancellationError() }
             catch {

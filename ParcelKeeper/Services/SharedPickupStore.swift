@@ -52,6 +52,48 @@ final class SharedPickupStore {
     }()
     private var dataURL: URL { directory.appendingPathComponent("pickup-data.json") }
     private var lockURL: URL { directory.appendingPathComponent("pickup-data.lock") }
+    // Durable write-ahead identities only: no suffixes and not part of backups.
+    private struct PhoneIdentity: Codable, Equatable {
+        var id: UUID
+        var trackingNumber: String
+        init(_ shipment: Shipment) {
+            id = shipment.id
+            trackingNumber = CarrierDetector.sanitize(shipment.trackingNumber)
+        }
+        var shipment: Shipment { Shipment(id: id, trackingNumber: trackingNumber, carrierName: "", carrierCode: "") }
+    }
+    private var retiredPhonesURL: URL { directory.appendingPathComponent("retired-shipment-identities.json") }
+    private func retiredPhones() throws -> [PhoneIdentity] {
+        guard fileManager.fileExists(atPath: retiredPhonesURL.path) else { return [] }
+        return try decoder.decode([PhoneIdentity].self, from: Data(contentsOf: retiredPhonesURL))
+    }
+    private func journalRetirements(_ identities: [PhoneIdentity]) throws {
+        guard !identities.isEmpty else { return }
+        var pending = try retiredPhones()
+        for identity in identities where !pending.contains(identity) { pending.append(identity) }
+        try encoder.encode(pending).write(to: retiredPhonesURL, options: .atomic)
+    }
+    func cleanupRetiredShipmentPhones(clear: (Shipment) throws -> Void) throws {
+        guard !readOnly else { throw PickupStorageError.appGroupUnavailable }
+        let pending = try locked { try retiredPhones() }
+        guard !pending.isEmpty else { return }
+        var leases: [TrackingQueryLease] = []
+        defer { leases.forEach { $0.release() } }
+        for id in Set(pending.map(\.id)).sorted(by: { $0.uuidString < $1.uuidString }) {
+            leases.append(try acquireTrackingQuery(id: id))
+        }
+        try locked {
+            let current = try readOrMigrate().shipments.map(PhoneIdentity.init)
+            var remaining = try retiredPhones()
+            for identity in pending {
+                if !current.contains(identity) {
+                    try clear(identity.shipment)
+                }
+                remaining.removeAll { $0 == identity }
+            }
+            try encoder.encode(remaining).write(to: retiredPhonesURL, options: .atomic)
+        }
+    }
 
     init(appGroupID: String?, fileManager: FileManager = .default, legacyURL: URL? = nil, containerURL: URL? = nil, readOnly: Bool = false, accessMode: AccessMode = .appManaged) throws {
         self.fileManager = fileManager
@@ -83,8 +125,14 @@ final class SharedPickupStore {
         deinit { release() }
     }
     func acquireTrackingQuery(id: UUID) throws -> TrackingQueryLease {
+        try acquireLease(named: "tracking-query-\(id.uuidString).lock")
+    }
+    func acquireReminderReconciliation() throws -> TrackingQueryLease {
+        try acquireLease(named: "reminder-reconciliation.lock")
+    }
+    private func acquireLease(named name: String) throws -> TrackingQueryLease {
         guard !readOnly else { throw PickupStorageError.appGroupUnavailable }
-        let url = directory.appendingPathComponent("tracking-query-\(id.uuidString).lock")
+        let url = directory.appendingPathComponent(name)
         let fd = open(url.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
@@ -283,8 +331,12 @@ final class SharedPickupStore {
         }
     }
 
-    func resetTrainWidgetBrowsing(slot: TrainWidgetSlot) throws {
+    func resetTrainWidgetBrowsing(slot: TrainWidgetSlot, expectedBinding: TrainWidgetBinding? = nil) throws {
         try transaction { data in
+            guard let expectedBinding, expectedBinding.slot == slot,
+                  TrainTicketSelection.binding(for: slot, in: data.trainWidgetBindings ?? []) == expectedBinding else {
+                throw PickupStorageError.staleCompletion
+            }
             let updated = TrainWidgetBinding(slot: slot, mode: .automatic, ticketID: nil, browsingTicketID: nil)
             var bindings = data.trainWidgetBindings ?? []
             if let index = bindings.firstIndex(where: { $0.slot == slot }) { bindings[index] = updated }
@@ -328,7 +380,19 @@ final class SharedPickupStore {
         }
     }
     @discardableResult func importBackup(_ preview: BackupPreview, policy: BackupConflictPolicy?) throws -> PickupDataset {
-        try transaction { current in
+        guard !readOnly else { throw PickupStorageError.appGroupUnavailable }
+        let base = try decoder.decode(PickupDataset.self, from: preview.baseData)
+        let affected = policy == .replaceExisting ? base.shipments.filter { old in
+            preview.incoming.shipments.contains { $0.id == old.id || CarrierDetector.sanitize($0.trackingNumber) == CarrierDetector.sanitize(old.trackingNumber) }
+        } : []
+        var leases: [TrackingQueryLease] = []
+        defer { leases.forEach { $0.release() } }
+        let ids = Set(affected.map(\.id) + preview.incoming.shipments.map(\.id))
+        for id in ids.sorted(by: { $0.uuidString < $1.uuidString }) {
+            leases.append(try acquireTrackingQuery(id: id))
+        }
+        return try transaction { current in
+            let previousIdentities = current.shipments.map(PhoneIdentity.init)
             guard try encoder.encode(current) == preview.baseData else { throw PickupStorageError.stalePreview }
             if preview.hasConflicts && policy == nil { throw PickupStorageError.conflictConfirmationRequired }
             // Cross-entity identifiers are ambiguous and cannot safely be resolved by either policy.
@@ -416,6 +480,9 @@ final class SharedPickupStore {
             }
             // Never rewrite an existing record implicitly. Reject coupled conflicts instead.
             try validate(current)
+            let validIdentities = current.shipments.map(PhoneIdentity.init)
+            // Before commit: failed commits remain protected by the live identity check.
+            try journalRetirements(previousIdentities.filter { !validIdentities.contains($0) })
             return current
         }
     }

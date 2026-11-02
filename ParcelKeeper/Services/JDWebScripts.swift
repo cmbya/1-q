@@ -7,6 +7,7 @@ enum JDWebScripts {
     (() => {
       if (window !== window.top) return;
       let sent = 0;
+      const generation = window.__mallGeneration;
       const parsed = raw => {
         try {
           const u = new URL(raw, location.href);
@@ -24,7 +25,7 @@ enum JDWebScripts {
           if (sent >= (location.pathname === '/order/orderlist_jdm.shtml' ? 20 : 4) || typeof body !== 'string' || body.length > 2000000) return;
           if (new TextEncoder().encode(body).length > 2000000 || !accepted(url)) return;
           sent++;
-          window.webkit.messageHandlers.mallResponse.postMessage({type:'response',url:url,body:body});
+          window.webkit.messageHandlers.mallResponse.postMessage({type:'response',url:url,body:body,generation:generation});
         } catch (_) {} // Observation must never prevent the site's callback from running.
       };
       const original = window.fetch;
@@ -51,7 +52,8 @@ enum JDWebScripts {
         let map = slots.get(owner);
         if (!map) { map = new Map(); slots.set(owner,map); }
         const existing = map.get(key);
-        if (existing) {
+        const descriptor = Object.getOwnPropertyDescriptor(owner,key);
+        if (existing && descriptor && descriptor.get === existing.get) {
           existing.parts = parts; existing.url = url;
           existing.update(existing.value);
           return;
@@ -64,16 +66,18 @@ enum JDWebScripts {
           slot.value = value; slot.exposed = value;
           if (slot.parts.length > 1) { watch(value,slot.parts.slice(1),slot.url); return; }
           if (typeof value === 'function') {
+            const requestURL = slot.url;
             slot.exposed = function(...args) {
-              try { report(slot.url,JSON.stringify(args[0])); } catch (_) {}
+              try { report(requestURL,JSON.stringify(args[0])); } catch (_) {}
               return Reflect.apply(value,this,args);
             };
           }
         };
         slot.update(slot.value);
+        slot.get = () => slot.exposed;
         Object.defineProperty(owner,key,{configurable:true,enumerable:d ? d.enumerable : true,
-          get() { return slot.exposed; }, set(value) { slot.update(value); }});
-        map.set(key,slot); installed++;
+          get:slot.get, set(value) { slot.update(value); }});
+        map.set(key,slot); if (!existing) installed++;
       };
       const inspectURL = raw => {
         try {

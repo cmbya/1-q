@@ -18,6 +18,9 @@ final class ShipmentStore: ObservableObject {
     func endReminderOperation() { reminderOperationInProgress = false }
     private var storage: SharedPickupStore?
     var shipmentPhones = ShipmentPhoneStore()
+    var reminderReconciler: ([Shipment]) async -> [String] = {
+        await NotificationManager.shared.reconcileReminders(with: $0)
+    }
     var reloadWidget: (String) -> Void = { WidgetCenter.shared.reloadTimelines(ofKind: $0) }
     var isHistoricalSnapshot: Bool { storage?.isReadOnly == true }
 
@@ -71,6 +74,38 @@ final class ShipmentStore: ObservableObject {
     // Call when the application returns to the foreground.
     func refreshOnForeground() {
         do { try reload() } catch { lastErrorMessage = error.localizedDescription }
+    }
+    // The persisted dataset is the durable desired notification state. Reconcile
+    // every launch/foreground even if a process died between system and JSON writes.
+    func reconcileReminders() async -> [String] {
+        guard let storage, !storage.isReadOnly else { return [] }
+        guard beginReminderOperation() else { return ["提醒操作正在进行，请稍后重试对账。"] }
+        defer { endReminderOperation() }
+        do {
+            let lease = try storage.acquireReminderReconciliation()
+            defer { lease.release() }
+            var cleanupErrors: [String] = []
+            do { try cleanupRetiredPhones(in: storage) }
+            catch { cleanupErrors = ["旧运单凭据清理待重试：\(error.localizedDescription)"] }
+            for _ in 0..<3 {
+                let desired = try storage.snapshot().shipments
+                let errors = await reminderReconciler(desired)
+                // Another process may commit while notification APIs await.
+                if try storage.snapshot().shipments == desired {
+                    apply(try storage.snapshot())
+                    let warnings = cleanupErrors + errors
+                    if !warnings.isEmpty { lastErrorMessage = warnings.joined(separator: "\n") }
+                    return warnings
+                }
+            }
+            let message = "共享提醒数据持续变化，尚未完成对账；下次启动或回到前台会重试。"
+            lastErrorMessage = message
+            return [message]
+        } catch {
+            let message = "提醒对账未完成，下次启动或回到前台会重试：\(error.localizedDescription)"
+            lastErrorMessage = message
+            return [message]
+        }
     }
     func reload() throws {
         guard let storage = storage else { throw PickupStorageError.appGroupUnavailable }
@@ -175,6 +210,7 @@ final class ShipmentStore: ObservableObject {
               Shipment.validPlatformOrderID(candidate.orderID, platform: platform) else {
             throw PickupStorageError.stalePreview
         }
+        let sourceURL = platform == "jd" ? candidate.sourceURL.flatMap { Shipment.logisticsEntry($0, orderID: candidate.orderID) } : nil
         let number = try ShipmentShortcutParser.number(candidate.trackingNumber)
         guard let storage else { throw PickupStorageError.appGroupUnavailable }
         let matches = try storage.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }
@@ -193,12 +229,13 @@ final class ShipmentStore: ObservableObject {
                 }
                 data.shipments[index].originPlatform = platform
                 data.shipments[index].platformOrderID = candidate.orderID
+                if let sourceURL { data.shipments[index].platformLogisticsURL = sourceURL }
                 return current.id
             }
         }
         let detection = CarrierDetector.detect(number, context: candidate.carrier)
         let shipment = Shipment(trackingNumber: number, carrierName: detection.carrier.name, carrierCode: detection.carrier.code,
-                                note: candidate.title, originPlatform: platform, platformOrderID: candidate.orderID)
+                                note: candidate.title, originPlatform: platform, platformOrderID: candidate.orderID, platformLogisticsURL: sourceURL)
         try addThrowing(shipment)
         return shipment.id
     }
@@ -517,6 +554,10 @@ final class ShipmentStore: ObservableObject {
     func confirmBackupImport(_ preview: BackupPreview, policy: BackupConflictPolicy? = nil) throws {
         guard let storage = storage else { throw PickupStorageError.appGroupUnavailable }
         let committed = try storage.importBackup(preview, policy: policy)
+        // Import is committed; keep the journal on cleanup failure for lifecycle retry.
+        var cleanupWarning: String?
+        do { try cleanupRetiredPhones(in: storage) }
+        catch { cleanupWarning = "备份已导入，旧运单凭据清理待重试：\(error.localizedDescription)" }
         WidgetCenter.shared.reloadTimelines(ofKind: "ParcelKeeperPickupWidget")
         for slot in WidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
         for slot in TrainWidgetSlot.allCases { WidgetCenter.shared.reloadTimelines(ofKind: slot.kind) }
@@ -524,6 +565,14 @@ final class ShipmentStore: ObservableObject {
         do { try reload() } catch {
             apply(committed)
             lastErrorMessage = "备份已导入，但刷新失败：\(error.localizedDescription)"
+        }
+        if let cleanupWarning { lastErrorMessage = [lastErrorMessage, cleanupWarning].compactMap { $0 }.joined(separator: "\n") }
+    }
+    private func cleanupRetiredPhones(in storage: SharedPickupStore) throws {
+        try storage.cleanupRetiredShipmentPhones { shipment in
+            if (try? ShipmentShortcutParser.number(shipment.trackingNumber)) != nil {
+                try shipmentPhones.clear(for: shipment)
+            }
         }
     }
     // The old UI cannot confirm a preview; never silently import through it.

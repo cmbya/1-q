@@ -295,7 +295,7 @@ final class TrainTicketStoreTests: XCTestCase {
         binding = TrainTicketSelection.binding(for: .b, in: try shared.snapshot().trainWidgetBindings ?? [])
         XCTAssertEqual(binding.mode, .automatic)
         XCTAssertEqual(binding.browsingTicketID, tickets[0].id)
-        try shared.resetTrainWidgetBrowsing(slot: .b)
+        try shared.resetTrainWidgetBrowsing(slot: .b, expectedBinding: binding)
         binding = TrainTicketSelection.binding(for: .b, in: try shared.snapshot().trainWidgetBindings ?? [])
         XCTAssertEqual(binding, TrainWidgetBinding(slot: .b, mode: .automatic))
         try app.reload()

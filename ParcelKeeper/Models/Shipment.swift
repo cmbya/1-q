@@ -41,6 +41,23 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var lastRefreshError: String?
     // JD/PDD order identity is separate from both the waybill and Taobao binding.
     var platformOrderID: String?
+    // Validated platform logistics entry; never contains credentials.
+    var platformLogisticsURL: String?
+
+    /// Store only public logistics parameters, never arbitrary platform tokens.
+    static func logisticsEntry(_ raw: String, orderID: String) -> String? {
+        guard raw.utf8.count <= 8192, let c = URLComponents(string: raw), c.scheme == "https",
+              c.host == "trade.m.jd.com", c.path == "/order/deal_wuliu_jdm.shtml",
+              c.user == nil, c.password == nil, c.fragment == nil, c.port == nil || c.port == 443,
+              let items = c.queryItems, items.filter({ $0.name == "dealId" }).map(\.value) == [Optional(orderID)] else { return nil }
+        let allowed = Set(["from", "dealState", "dealId", "orderType", "skuid", "shopid", "source"])
+        let kept = items.filter { allowed.contains($0.name) }
+        guard Set(kept.map(\.name)).count == kept.count,
+              kept.allSatisfy({ ($0.value ?? "").utf8.count <= 256 }) else { return nil }
+        var safe = URLComponents(string: "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml")!
+        safe.queryItems = kept
+        return safe.url?.absoluteString
+    }
 
     static func validPlatformOrderID(_ orderID: String, platform: String) -> Bool {
         let pattern: String
@@ -75,7 +92,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         taobaoOrderID: String? = nil,
         logisticsSource: String? = nil,
         lastRefreshError: String? = nil,
-        platformOrderID: String? = nil
+        platformOrderID: String? = nil,
+        platformLogisticsURL: String? = nil
     ) {
         self.id = id
         self.trackingNumber = trackingNumber
@@ -100,6 +118,7 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
         self.logisticsSource = logisticsSource
         self.lastRefreshError = lastRefreshError
         self.platformOrderID = platformOrderID
+        self.platformLogisticsURL = platformLogisticsURL
     }
 }
 

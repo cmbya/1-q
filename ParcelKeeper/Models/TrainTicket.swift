@@ -94,7 +94,8 @@ struct TrainTicketFields: Codable, Equatable {
 
     // Operational duplicate identity; gate/class/arrival corrections do not create a new ticket.
     var duplicateIdentity: [String] {
-        [departureDate, departureTime, trainNumber, departureStation, arrivalStation, passenger, carriage, seat]
+        // Normalize identity only; validated fields must preserve legacy data.
+        [departureDate, departureTime, trainNumber.uppercased(), departureStation, arrivalStation, passenger, carriage, seat]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

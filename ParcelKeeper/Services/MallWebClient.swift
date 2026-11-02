@@ -37,12 +37,17 @@ enum MallPlatform: String, CaseIterable, Identifiable, Codable {
         stores[platform] = next
         return next
     }
-    static func clear(_ platform: MallPlatform) async {
-        let current = store(for: platform)
+    static func detach(_ platform: MallPlatform) -> WKWebsiteDataStore {
+        stores.removeValue(forKey: platform) ?? WKWebsiteDataStore.nonPersistent()
+    }
+    static func removeData(from store: WKWebsiteDataStore) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            current.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) { continuation.resume() }
+            store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) { continuation.resume() }
         }
-        stores[platform] = nil
+    }
+    static func clear(_ platform: MallPlatform) async {
+        let old = detach(platform)
+        await removeData(from: old)
     }
 }
 struct MallCandidate: Identifiable {
@@ -50,18 +55,28 @@ struct MallCandidate: Identifiable {
     let carrier: String
     let title: String
     let orderID: String
+    var sourceURL: String? = nil
     var id: String { trackingNumber }
 }
 protocol MallTrackingQuerying {
     func query(platform: String, orderID: String, trackingNumber: String) async throws -> UAPITrackingResult
+    func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult
+}
+extension MallTrackingQuerying {
+    func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
+        try await query(platform: platform, orderID: orderID, trackingNumber: trackingNumber)
+    }
 }
 struct MallTrackingClient: MallTrackingQuerying {
     func query(platform: String, orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
+        try await query(platform: platform, orderID: orderID, trackingNumber: trackingNumber, sourceURL: nil)
+    }
+    func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
         try Task.checkCancellation()
         let cookies = try MallSession(platform: platform).load()
         if platform == .jd {
-            return try await MallWebClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
+            return try await MallWebClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber, sourceURL: sourceURL)
         }
         return try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
     }
@@ -324,8 +339,27 @@ enum MallWebParser {
         guard !points.isEmpty else { throw MallWebError.noTrace }
         return MallWebDetail(number: number, carrier: carrier, points: points)
     }
+    static func jdRequestOrderID(_ url: URL) -> String? {
+        guard let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        var ids: [String] = []
+        for item in query where ["orderid", "dealid"].contains(item.name.lowercased()) {
+            guard let value = item.value else { return nil }; ids.append(value)
+        }
+        let bodies = query.filter { $0.name == "body" }
+        guard bodies.count <= 1 else { return nil }
+        if let text = bodies.first?.value {
+            guard let data = text.data(using: .utf8), let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            for (key, value) in body where ["orderid", "dealid"].contains(key.lowercased()) {
+                if let text = value as? String { ids.append(text) }
+                else if let n = value as? NSNumber, String(cString: n.objCType) != "c" { ids.append(n.stringValue) }
+                else { return nil }
+            }
+        }
+        guard let id = ids.first, identifier(id, platform: .jd), ids.allSatisfy({ $0 == id }) else { return nil }
+        return id
+    }
     static func message(_ value: Any) throws -> (url: URL, root: [String: Any]) {
-        guard let object = value as? [String: Any], Set(object.keys) == Set(["type", "url", "body"]),
+        guard let object = value as? [String: Any], Set(object.keys).isSubset(of: Set(["type", "url", "body", "generation"])), Set(["type", "url", "body"]).isSubset(of: Set(object.keys)),
               object["type"] as? String == "response", let rawURL = object["url"] as? String, rawURL.utf8.count <= 8192,
               let url = URL(string: rawURL), let body = object["body"] as? String, body.utf8.count <= 2_000_000,
               let root = try? JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any] else { throw MallWebError.unsupported }
@@ -347,6 +381,9 @@ enum MallWebParser {
     private var captures: [[String: Any]] = []
     private var failure: MallWebError?
     private var busy = false
+    private var generation = UUID().uuidString
+    private var detailOrderID: String?
+    private var queryDeadline: Date?
     private(set) var diagnosticMessage = "尚未读取网页。"
     private let isolatedContext: Bool
     init(platform: MallPlatform, cookies: [TaobaoTrialCookie], isolatedContext: Bool = false) {
@@ -402,14 +439,19 @@ enum MallWebParser {
         diagnosticMessage = listDiagnostic + "\n" + result.message + " 下单日期未知或范围外未导入\(unverifiedDate)单。"
         return result.candidates
     }
-    func query(orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
+    func query(orderID: String, trackingNumber: String, sourceURL: String? = nil) async throws -> UAPITrackingResult {
         _ = try MallWebParser.detailURL(platform: platform, orderID: orderID)
         guard MallWebParser.waybill(trackingNumber) else { throw MallWebError.identityMismatch }
         try await prepare()
         defer { cleanup() }
         if platform == .jd {
+            queryDeadline = Date().addingTimeInterval(18)
+            if let sourceURL {
+                let entry = try JDOrderSelection.logisticsURL(sourceURL, orderID: orderID)
+                return try await observeDetail(orderID: orderID, url: entry).result(expected: trackingNumber, platform: platform)
+            }
             try load(platform.ordersURL)
-            let orders = try await observeOrders(recentMonth: false)
+            let orders = try await collectJDOrders(recentMonth: false, targetOrderID: orderID)
             guard let order = orders.first(where: { $0.id == orderID }) else { throw MallWebError.identityMismatch }
             return try await observeDetail(orderID: orderID, url: order.url).result(expected: trackingNumber, platform: platform)
         }
@@ -459,14 +501,20 @@ enum MallWebParser {
         web?.configuration.userContentController.removeAllUserScripts()
         web?.removeFromSuperview()
         web = nil; captures.removeAll(); failure = nil; busy = false
+        queryDeadline = nil; detailOrderID = nil
     }
     private func load(_ url: URL) throws {
         guard platform.allowed(url), let web else { throw MallWebError.unsupported }
         captures.removeAll(); failure = nil
+        generation = UUID().uuidString
+        let controller = web.configuration.userContentController
+        controller.removeAllUserScripts()
+        controller.addUserScript(WKUserScript(source: "window.__mallGeneration='\(generation)';\n" + Self.observerScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20))
     }
     private func tick() async throws -> (URL, String) {
         try Task.checkCancellation()
+        if let queryDeadline, Date() >= queryDeadline { throw MallWebError.timeout }
         try await Task.sleep(nanoseconds: 500_000_000)
         guard UIApplication.shared.applicationState == .active else { throw MallWebError.unsupported }
         if let failure { throw failure }
@@ -494,17 +542,21 @@ enum MallWebParser {
     }
     private var jdDatedOrders = Set<String>()
     /// Bounded page-generated collection, like ExpressAssistant scrollAndCollect.
-    private func collectJDOrders(recentMonth: Bool) async throws -> [MallWebOrder] {
+    private func collectJDOrders(recentMonth: Bool, targetOrderID: String? = nil) async throws -> [MallWebOrder] {
         jdDatedOrders.removeAll()
         var collected: [MallWebOrder] = []
         var capturedOrderIDs = Set<String>()
         var seenResponseCount = 0
         var recognized = false
         var total: Int?
-        for attempt in 0..<120 {
+        var excludedIDs = Set<String>()
+        for attempt in 0..<(targetOrderID == nil ? 120 : 16) {
             _ = try await tick()
             for root in captures.dropFirst(seenResponseCount) {
                 do {
+                    excludedIDs.formUnion(JDOrderSelection.excludedIDs(root))
+                    collected.removeAll { excludedIDs.contains($0.id) }
+                    jdDatedOrders.subtract(excludedIDs)
                     let probes = try JDOrderSelection.probes(root)
                     recognized = true
                     if let body = root["body"] as? [String: Any] {
@@ -516,36 +568,43 @@ enum MallWebParser {
                         }
                         if let n = body["totalNum"] as? NSNumber, n.intValue >= 0 { total = n.intValue }
                     }
-                    for order in probes where !collected.contains(where: { $0.id == order.id }) {
+                    for order in probes where !excludedIDs.contains(order.id) && !collected.contains(where: { $0.id == order.id }) {
                         if collected.count < 200 { collected.append(order) }
                     }
                 } catch MallWebError.unsupported { continue }
             }
             seenResponseCount = captures.count
-            if attempt % 6 == 5 {
-                if let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript),
-                   let report = try? JDOrderSelection.inspectDOM(snapshot, recentMonth: recentMonth) {
+            if attempt % 6 == 0 || attempt % 6 == 5 {
+                do {
+                  if let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript) {
+                    let report = try JDOrderSelection.inspectDOM(snapshot, recentMonth: recentMonth)
                     recognized = true
-                    for order in report.orders {
+                    for order in report.orders where !excludedIDs.contains(order.id) {
                         jdDatedOrders.insert(order.id)
-                        if !collected.contains(where: { $0.id == order.id }), collected.count < 200 { collected.append(order) }
+                        if let index = collected.firstIndex(where: { $0.id == order.id }) { collected[index] = order }
+                        else if collected.count < 200 { collected.append(order) }
                     }
-                }
+                  }
+                } catch MallWebError.unsupported { /* An unfinished DOM is not a failed API page. */ }
                 // Trigger only normal page scrolling; never synthesize signed API requests.
-                _ = try await web?.evaluateJavaScript("(() => { const e=document.scrollingElement; if(e) window.scrollBy(0, Math.max(300,window.innerHeight*0.8)); })()")
+                if targetOrderID == nil || !collected.contains(where: { $0.id == targetOrderID }) {
+                    _ = try await web?.evaluateJavaScript("(() => { const e=document.scrollingElement; if(e) window.scrollBy(0, Math.max(300,window.innerHeight*0.8)); })()")
+                }
             }
             diagnosticMessage = "阶段：订单采集；已观察\(capturedOrderIDs.count)单，待详情核实\(collected.count)单；已签收保留，未知类型不等于即时配送。"
+            if let targetOrderID, collected.contains(where: { $0.id == targetOrderID }) { return collected }
             if let total, capturedOrderIDs.count >= total, attempt >= 5 { break }
             if captures.count >= 20 || collected.count >= 200 { break }
         }
         guard recognized else { throw MallWebError.timeout }
-        diagnosticMessage += " 已到采集上限或平台总数；非全量保证。逐单最多核实8单，日期未知不会导入。"
+        diagnosticMessage += " 已到采集上限或平台总数；非全量保证。逐单最多尝试24单、取得8票，日期未知不会导入。"
         return collected
     }
     private func observeDetail(orderID: String, url: URL? = nil) async throws -> MallWebDetail {
         diagnosticMessage = "阶段：逐单物流页面；尚未取得匹配运单与轨迹。"
         let target = try url ?? MallWebParser.detailURL(platform: platform, orderID: orderID)
         if platform == .jd { _ = try JDOrderSelection.logisticsURL(target.absoluteString, orderID: orderID) }
+        detailOrderID = orderID
         try load(target)
         var clicked = false
         for attempt in 0..<40 {
@@ -605,6 +664,7 @@ enum MallWebParser {
         guard message.name == "mallResponse", message.frameInfo.isMainFrame,
               let current = web?.url, platform.allowed(current),
               let frame = message.frameInfo.request.url, platform.allowed(frame), frame.host == current.host else { return }
+        guard let envelope = message.body as? [String: Any], envelope["generation"] as? String == generation else { return }
         do {
             let packet = try MallWebParser.message(message.body)
             guard platform.allowed(packet.url) else { throw MallWebError.unsupported }
@@ -614,6 +674,13 @@ enum MallWebParser {
             let accepted = jd ? functionID == (listPage ? "order_list_m" : "get_logistics_list_by_order_m") :
                 (platform == .pdd && listPage && packet.url.path.hasSuffix("/aristotle/order_list_v4"))
             guard accepted else { return }
+            if jd && !listPage {
+                // A live page URL is not evidence of response ownership.
+                guard let expected = detailOrderID, MallWebParser.jdRequestOrderID(packet.url) == expected else { return }
+                if let id = (packet.root["body"] as? [String: Any])?["orderId"] {
+                    guard String(describing: id) == expected else { throw MallWebError.identityMismatch }
+                }
+            }
             let limit = platform == .jd && listPage ? 20 : 4
             guard captures.count < limit else { return }
             captures.append(packet.root)

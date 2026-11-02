@@ -70,7 +70,9 @@ private struct TaobaoTrialLoginView: View {
     @StateObject private var browser: TaobaoTrialBrowser
     @State private var saving = false
     let saved: () -> Void
-    init(cookies: [TaobaoTrialCookie], saved: @escaping () -> Void) {
+    let readOnly: Bool
+    init(cookies: [TaobaoTrialCookie], readOnly: Bool, saved: @escaping () -> Void) {
+        self.readOnly = readOnly
         _browser = StateObject(wrappedValue: TaobaoTrialBrowser(cookies: cookies)); self.saved = saved
     }
     var body: some View {
@@ -89,12 +91,14 @@ private struct TaobaoTrialLoginView: View {
                         Task { @MainActor in
                             defer { saving = false }
                             do {
+                                guard !readOnly, !Task.isCancelled else { return }
                                 let cookies = try await browser.capture()
+                                guard !readOnly, !Task.isCancelled else { return }
                                 try TaobaoTrialSession().save(cookies)
                                 browser.stop(); saved(); dismiss()
                             } catch { browser.message = "未保存会话：" + error.localizedDescription }
                         }
-                    }.disabled(saving)
+                    }.disabled(saving || readOnly)
                 }
             }
         }
@@ -123,16 +127,17 @@ struct TaobaoTrialView: View {
                 Text("会话仅保存在本机钥匙串，不进入JSON备份；退出会清除会话。平台会收到网络请求及登录信息。")
                     .font(.footnote)
                 Text(hasSession ? "本机会话已保存（不代表登录仍有效）" : "尚未保存会话")
-                Button("登录／重新登录淘宝") { consent = true }.disabled(busy)
+                Button("登录／重新登录淘宝") { consent = true }.disabled(busy || store.isHistoricalSnapshot)
                 Button("退出并清除会话", role: .destructive) {
+                    guard !store.isHistoricalSnapshot else { return }
                     task?.cancel(); operationID = nil; busy = false; report = nil; selected = []; cookies = []
                     do { try session.clear(); hasSession = false; message = "本机会话已清除。" }
                     catch { message = error.localizedDescription }
-                }.disabled(busy)
+                }.disabled(busy || store.isHistoricalSnapshot)
             }
             Section("手动同步") {
                 Button(busy ? "正在读取" : "读取待收货单号（不调用UAPI）") { fetch() }
-                    .disabled(busy || !hasSession)
+                    .disabled(busy || !hasSession || store.isHistoricalSnapshot)
                 Text("确认后保存淘宝订单关联并尝试读取物流；无轨迹时默认“运输中”仍仅作占位，不代表已核实。后续按来源刷新，UAPI仅手动备用。")
                     .font(.footnote)
                 Text("首版只读取第一页，最多处理8个待收货订单，可能遗漏其他订单；不是全量同步。缺少运单号不会用订单号替代。")
@@ -176,11 +181,11 @@ struct TaobaoTrialView: View {
         }
         .onDisappear { task?.cancel(); operationID = nil; busy = false }
         .confirmationDialog("允许在淘宝网页登录并保存本机会话？", isPresented: $consent, titleVisibility: .visible) {
-            Button("同意并打开淘宝") { login = true }
+            Button("同意并打开淘宝") { if !store.isHistoricalSnapshot { login = true } }
             Button("取消", role: .cancel) {}
         } message: { Text("本功能不是官方开放平台授权。凭据只存本机，可能触发重新登录或验证，不保证可用；不要向聊天发送密码或Cookie。") }
         .sheet(isPresented: $login) {
-            TaobaoTrialLoginView(cookies: cookies) {
+            TaobaoTrialLoginView(cookies: cookies, readOnly: store.isHistoricalSnapshot) {
                 report = nil; selected = []
                 do { cookies = try session.load(); hasSession = true; message = "会话已保存，请手动读取订单验证。" }
                 catch { message = error.localizedDescription }
@@ -188,6 +193,7 @@ struct TaobaoTrialView: View {
         }
     }
     private func fetch() {
+        guard !busy, !store.isHistoricalSnapshot else { return }
         report = nil; selected = []; message = nil
         let id = UUID(); operationID = id; busy = true
         task = Task { @MainActor in
@@ -196,7 +202,7 @@ struct TaobaoTrialView: View {
                 let client = TaobaoTrialClient(cookies: try session.load())
                 let value = try await client.fetch()
                 try Task.checkCancellation()
-                guard operationID == id else { return }
+                guard operationID == id, !store.isHistoricalSnapshot else { return }
                 report = value
                 message = value.candidates.isEmpty ? "本页未取得可导入单号；不代表账号没有其他快递。" : "请核对并勾选后确认导入。"
             } catch is CancellationError { }

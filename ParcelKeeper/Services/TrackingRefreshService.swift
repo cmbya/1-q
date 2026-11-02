@@ -129,7 +129,7 @@ struct TrackingRefreshService {
         current.id == before.id &&
         CarrierDetector.sanitize(current.trackingNumber) == CarrierDetector.sanitize(before.trackingNumber) &&
         current.originPlatform == before.originPlatform && current.taobaoOrderID == before.taobaoOrderID &&
-        current.platformOrderID == before.platformOrderID &&
+        current.platformOrderID == before.platformOrderID && current.platformLogisticsURL == before.platformLogisticsURL &&
         current.refreshChannel == before.refreshChannel && current.carrierCode == before.carrierCode &&
         current.uapiCarrierCode == before.uapiCarrierCode &&
         (current.carrierCode != CarrierDetector.unknown.code ||
@@ -187,7 +187,7 @@ struct TrackingRefreshService {
         case .mall(let platform):
             guard let orderID = before.platformOrderID,
                   Shipment.validPlatformOrderID(orderID, platform: platform) else { throw MallWebError.unsupported }
-            result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number)
+            result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number, sourceURL: before.platformLogisticsURL.flatMap { Shipment.logisticsEntry($0, orderID: orderID) })
         case .uapi:
         // Shortcut optional text can arrive as "" instead of nil. Only an
         // entirely blank input means omitted; never repair nonblank credentials.

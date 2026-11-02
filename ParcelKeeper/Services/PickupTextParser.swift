@@ -136,11 +136,12 @@ struct PickupTextParser {
         var codeOccurrences = 0
         for match in codeMatches {
             guard let code = value(match, 1),
-                  PickupFieldProtection.validWrapping(match.range(at: 1), in: text),
                   PickupFieldProtection.isWholeToken(match.range(at: 1), in: text, labeled: true),
                   PickupFieldProtection.allows(code, range: match.range(at: 1), protected: protected) else { continue }
+            // Malformed labeled values still prove multiplicity, but are not candidates.
             codeOccurrences += 1
-            if code.count <= 32, !codes.contains(code) { codes.append(code) }
+            if PickupFieldProtection.validWrapping(match.range(at: 1), in: text),
+               code.count <= 32, !codes.contains(code) { codes.append(code) }
             // Only consume a list item when it is a standalone token, never a
             // numeric prefix of an address such as “456号”.
             var position = NSMaxRange(match.range)

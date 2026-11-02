@@ -13,6 +13,7 @@ struct TrainTicketEntry: TimelineEntry {
     var mode: TrainWidgetMode = .automatic
     var isBrowsing: Bool = false
     var canResetBrowsing: Bool = false
+    var binding: TrainWidgetBinding? = nil
 
     var position: Int {
         guard let id = ticket?.id, let index = eligibleTicketIDs.firstIndex(of: id) else { return 0 }
@@ -72,7 +73,7 @@ struct TrainTicketProvider: TimelineProvider {
         return TrainTicketEntry(date: date, slot: slot, ticket: selected, message: message,
             isStorageError: false, eligibleTicketIDs: eligible.map(\.id), mode: binding.mode,
             isBrowsing: binding.mode == .automatic && binding.browsingTicketID == selected?.id && selected != nil,
-            canResetBrowsing: binding.mode == .fixed || binding.browsingTicketID != nil)
+            canResetBrowsing: binding.mode == .fixed || binding.browsingTicketID != nil, binding: binding)
     }
 }
 
@@ -130,10 +131,12 @@ struct TrainTicketWidgetView: View {
             }
             .disabled(entry.isStorageError || entry.eligibleTicketIDs.isEmpty || (entry.ticket != nil && entry.eligibleTicketIDs.count == 1))
             Spacer(minLength: 0)
-            Button(intent: ResetTrainTicketWidgetBrowsingIntent(slot: entry.slot)) {
-                Text("回到自动")
+            if let binding = entry.binding {
+                Button(intent: ResetTrainTicketWidgetBrowsingIntent(slot: entry.slot, expectedBinding: binding)) {
+                    Text("回到自动")
+                }
+                .disabled(entry.isStorageError || !entry.canResetBrowsing)
             }
-            .disabled(entry.isStorageError || !entry.canResetBrowsing)
         }
         .font(.system(size: large ? 12 : 10))
         .buttonStyle(.plain)

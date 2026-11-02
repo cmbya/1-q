@@ -38,6 +38,20 @@ run('existing callback keeps this, args, result; URL unchanged', () => {
   assert.equal(seen[0],c.jd); assert.equal(seen[1][0],body); assert.equal(seen[1][1],'extra');
   assert.equal(s.src,url('jd.done')); assert.equal(messages.length,1); assert.deepEqual(JSON.parse(messages[0].body),body);
 });
+run('deleted callback slot can be reinstalled for same name', () => {
+  const {c,messages}=environment();
+  for(let i=0;i<3;i++) {
+    c.cb=v=>v; const s=new c.HTMLScriptElement(); s.src=url('cb')+'&page='+i;
+    c.document.appendChild(s); c.cb({i}); delete c.cb;
+  }
+  assert.equal(messages.length,3);
+});
+run('saved callback retains request identity after callback name reuse', () => {
+  const {c,messages}=environment(); c.cb=v=>v;
+  const a=new c.HTMLScriptElement(); a.src=url('cb')+'&page=1'; const old=c.cb;
+  const b=new c.HTMLScriptElement(); b.src=url('cb')+'&page=2'; old({ok:1});
+  assert.equal(new URL(messages[0].url).searchParams.get('page'),'1');
+});
 run('late callback assignment after src and insertion', () => {
   const {c,messages} = environment(); const s = new c.HTMLScriptElement(); s.setAttribute('src',url('late')); c.document.insertBefore(s,null);
   c.late = function(v) { return v; }; const data = {ok:true}; assert.equal(c.late(data),data); assert.equal(messages.length,1);

@@ -85,10 +85,7 @@ final class NotificationManager {
         content.body = "\(shipment.carrierName) · \(shipment.trackingNumber) 记得查看物流或取件。"
         content.sound = .default
 
-        let components = Calendar.current.dateComponents(
-            [.year, .month, .day, .hour, .minute, .second],
-            from: date
-        )
+        let components = Self.absoluteReminderComponents(for: date)
         let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
         let request = UNNotificationRequest(
             identifier: reminderIdentifier(for: shipment.id),
@@ -96,6 +93,16 @@ final class NotificationManager {
             trigger: trigger
         )
         try await center.add(request)
+    }
+
+    // reminderDate is an instant, not a floating device-local wall time.
+    static func absoluteReminderComponents(for date: Date) -> DateComponents {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        components.calendar = calendar
+        components.timeZone = calendar.timeZone
+        return components
     }
 
     func cancelReminder(for shipmentID: UUID) {

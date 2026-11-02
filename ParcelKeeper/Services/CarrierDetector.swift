@@ -86,7 +86,7 @@ enum CarrierDetector {
         let fullRange = NSRange(normalized.startIndex..., in: normalized)
         // Field ownership is local to its value, not the whole line. A second
         // full-text scoring pass must not resurrect order/phone/pickup values.
-        let excludedPattern = #"(?<![A-Z0-9_])(?:订单号码|訂單號碼|订单号|訂單號|订单编号|訂單編號|ORDER(?:TRACKINGNUMBER|NUMBER|ID)?|手机号|手機號|联系电话|聯繫電話|电话|電話|PHONE|MOBILE|身份证|身份證|日期|DATE|取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼|PICKUPCODE|CODE)[\"']?\s*[：:=为為是]?\s*[\"']?[A-Z0-9][A-Z0-9_#*+－-]*"#
+        let excludedPattern = #"(?<![A-Z0-9_])(?:订单号码|訂單號碼|订单号|訂單號|订单编号|訂單編號|ORDER(?:TRACKINGNUMBER|NUMBER|ID)?|手机号|手機號|联系电话|聯繫電話|电话|電話|PHONE|MOBILE|身份证|身份證|日期|DATE|取件码|取件碼|提货码|提貨碼|取货码|取貨碼|凭证码|憑證碼|核销码|核銷碼|PICKUPCODE|CODE)[\"']?\s*[：:=为為是]?\s*[\"']?\s*[（(\[【「『]?\s*[A-Z0-9][A-Z0-9_#*+－-]*"#
         let urlPattern = #"(?:https?://|www\.)[^\s，。；！？<>\"']+"#
         let urls = (try? NSRegularExpression(pattern: urlPattern, options: [.caseInsensitive]))?.matches(in: normalized, range: fullRange).map(\.range) ?? []
         // Preserve pickup field ownership before whole-text tracking detection,

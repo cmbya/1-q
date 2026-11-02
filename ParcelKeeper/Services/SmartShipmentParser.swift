@@ -1,12 +1,30 @@
 import Foundation
 
 enum SmartShipmentParser {
+    struct Failure {
+        let trackingNumbers: [String]
+        let message: String
+    }
+
+    struct ParseReport {
+        let drafts: [ShipmentImportDraft]
+        let failures: [Failure]
+        var hasFailures: Bool { !failures.isEmpty }
+    }
+
+    /// Compatible array API fails closed rather than hiding rejected parcels.
     static func parse(_ rawText: String) -> [ShipmentImportDraft] {
+        let report = parseReport(rawText)
+        return report.hasFailures ? [] : report.drafts
+    }
+
+    /// UI may offer successful drafts only while also surfacing every failure.
+    static func parseReport(_ rawText: String) -> ParseReport {
         let text = PickupFieldProtection.singleNotification(rawText)
-        guard !text.isEmpty else { return [] }
+        guard !text.isEmpty else { return ParseReport(drafts: [], failures: []) }
 
         let numbers = ShipmentShortcutParser.numbers(in: text)
-        guard !numbers.isEmpty else { return [] }
+        guard !numbers.isEmpty else { return ParseReport(drafts: [], failures: []) }
         let contexts: [String]
         if numbers.count == 1 {
             contexts = [text]
@@ -21,23 +39,36 @@ enum SmartShipmentParser {
             }
             if isolated(blocks) { contexts = blocks }
             else if isolated(lines) { contexts = lines }
-            else { return [] }
+            else {
+                return ParseReport(drafts: [], failures: [Failure(trackingNumbers: numbers,
+                    message: ShipmentShortcutError.ambiguous.localizedDescription)])
+            }
         }
-        return contexts.compactMap { context in
-            guard let parsed = try? ShipmentShortcutParser.parse(context) else { return nil }
+        var drafts: [ShipmentImportDraft] = []
+        var failures: [Failure] = []
+        for context in contexts {
+            let parsed: ShipmentShortcutInput
+            do {
+                parsed = try ShipmentShortcutParser.parse(context)
+            } catch {
+                failures.append(Failure(trackingNumbers: ShipmentShortcutParser.numbers(in: context),
+                                        message: error.localizedDescription))
+                continue
+            }
             let detection = CarrierDetector.detect(parsed.trackingNumber, context: context)
             // Pickup codes in historical events must not be reused on a newer
             // return/delivery. For dated histories inspect only the selected event.
             let codeContext = parsed.logisticsTime == nil ? context : (parsed.logisticsInfo ?? context)
-            return ShipmentImportDraft(
+            drafts.append(ShipmentImportDraft(
                 trackingNumber: parsed.trackingNumber,
                 carrier: detection.carrier,
                 confidence: detection.confidence,
                 status: parsed.status ?? .inTransit,
                 note: inferNote(from: context),
                 pickupCode: parsed.status == .readyForPickup ? extractPickupCode(from: codeContext) : ""
-            )
+            ))
         }
+        return ParseReport(drafts: drafts, failures: failures)
     }
 
     static func parseSingleNumber(_ value: String) -> ShipmentImportDraft? {

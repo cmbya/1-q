@@ -240,7 +240,7 @@ struct MallImportView: View {
         .sheet(isPresented: $cookieImport, onDismiss: { cookieText = "" }) {
             NavigationStack {
                 Form {
-                    Text("仅粘贴本平台Cookie值（name=value; name=value），不要粘贴curl或整组请求头。它等同登录凭据，不要发给他人。验证订单访问成功后才保存钥匙串；不进入JSON备份。")
+                    Text(platform == .jd ? "仅粘贴本平台Cookie值；保存为本机候选会话，不代表登录或订单读取已验证，不进入JSON备份。不要分享Cookie。" : "仅粘贴本平台Cookie值（name=value; name=value），不要粘贴curl或整组请求头。验证订单访问成功后才保存钥匙串，不进入JSON备份。")
                     SecureField("Cookie", text: $cookieText).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button(busy ? "正在验证" : "验证并保存") { saveImportedCookie() }
                         .disabled(busy || cookieText.isEmpty || store.isHistoricalSnapshot)
@@ -254,7 +254,7 @@ struct MallImportView: View {
             if let browser {
                 MallLoginSheet(browser: browser, saved: {
                     candidates = []; selected = []; loadSession()
-                    message = "已验证订单访问并保存本机会话；后续有效性仍以实际读取为准。"
+                    message = platform == .jd ? "已保存候选会话；尚未验证订单访问，请单独读取。" : "已验证订单访问并保存本机会话；后续有效性仍以实际读取为准。"
                 }, readOnly: store.isHistoricalSnapshot)
             }
         }
@@ -301,14 +301,22 @@ struct MallImportView: View {
         guard !store.isHistoricalSnapshot else { return }
         cancel(); browser?.destroy(); browser = nil; login = false
         candidates = []; selected = []
+        let id = UUID(); operationID = id
+        let currentPlatform = platform
         busy = true
         task = Task { @MainActor in
-            defer { busy = false; task = nil }
+            defer { if operationID == id { busy = false; task = nil; operationID = nil } }
             do {
-                try session.clear()
-                await MallBrowserContext.clear(platform)
+                guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
+                try MallSession(platform: currentPlatform).clear()
+                let oldContext = MallBrowserContext.detach(currentPlatform)
+                await MallBrowserContext.removeData(from: oldContext)
+                guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
                 hasSession = false; message = "本平台会话与网页上下文已清除，其他平台不受影响。"
-            } catch { message = "清除失败，请重试；不能确认本机会话已删除。" }
+            } catch {
+                guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
+                message = "清除失败，请重试；不能确认本机会话已删除。"
+            }
         }
     }
 
