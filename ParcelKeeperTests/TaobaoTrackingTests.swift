@@ -25,6 +25,16 @@ final class TaobaoTrackingTests: XCTestCase {
         }
     }
 
+    func testValidFieldsSurviveEmptyOtherEnvelopeAsInUpstreamSamples() throws {
+        for (valid, placeholder) in [("newLogistics", "logisticsDetailH5"), ("logisticsDetailH5", "newLogistics")] {
+            for empty in [NSNull(), [String: Any](), ["fields": NSNull()], ["fields": [String: Any]()]] as [Any] {
+                let root: [String: Any] = ["result": ["data": [valid: ["fields": fields([node("01-02 10:00")])], placeholder: empty]]]
+                let json = try JSONSerialization.data(withJSONObject: root)
+                let bytes = Data(("['__ICE_SUSPENSE_LOADER__']['undefined'] = " + String(decoding: json, as: UTF8.self)).utf8)
+                XCTAssertEqual(try TaobaoTrackingParser.parse(bytes, trackingNumber: number, now: now).trackingNumber, number)
+            }
+        }
+    }
     func testAlternateTimeAndStringLabel() throws {
         var value = fields([])
         value["multiStage"] = [["time": "01-02 10:00", "title": "运输中", "labelDesc": "备用正文"]]
@@ -157,6 +167,8 @@ final class TaobaoTrackingTests: XCTestCase {
         XCTAssertEqual(network.requests.count, 1)
         let request = try XCTUnwrap(network.requests.first)
         XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertTrue(request.value(forHTTPHeaderField: "User-Agent")?.contains("Mobile Safari") == true)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         XCTAssertEqual(request.url?.host, "pages-g.m.taobao.com")
         XCTAssertEqual(request.url?.path, "/wow/z/app/mtb/logisticsV2/h5-detail")
         let components = try XCTUnwrap(URLComponents(url: request.url!, resolvingAgainstBaseURL: false))

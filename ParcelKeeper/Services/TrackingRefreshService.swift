@@ -73,7 +73,7 @@ struct TrackingRefreshService {
         if let failure = error as? TaobaoTrackingError {
             switch failure {
             case .missingBinding: return "淘宝订单关联缺失，请重新绑定后刷新。"
-            case .unsupported: return "此记录不支持所选平台刷新，未切换查询渠道。"
+            case .unsupported: return failure.localizedDescription
             case .identityMismatch: return "淘宝运单身份不匹配，未更新。"
             case .noTrace: return "淘宝暂无可用物流轨迹，保留上次结果。"
             case .authentication: return "淘宝登录已失效，请在 App 重新登录。"

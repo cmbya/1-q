@@ -52,7 +52,8 @@ struct TaobaoTrackingClient: TaobaoTrackingQuerying {
         }) else { throw TaobaoTrackingError.authentication }
         var request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         request.httpMethod = "GET"
-        request.setValue("text/html", forHTTPHeaderField: "Accept")
+        request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        request.setValue("Mozilla/5.0 (Linux; Android 14; 25102RKBEC Build/UP1A.231005.007) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36", forHTTPHeaderField: "User-Agent")
         request.setValue(cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
         let bytes: Data
         let response: URLResponse
@@ -91,10 +92,9 @@ enum TaobaoTrackingParser {
         try checkCodes(result)
         guard let data = result["data"] as? [String: Any] else { throw TaobaoTrackingError.unsupported }
         try checkCodes(data)
-        // Both known envelopes appearing at once is ambiguous; no first-match guessing.
-        let envelopes = ["newLogistics", "logisticsDetailH5"].compactMap { data[$0] }
-        guard envelopes.count == 1, let envelope = envelopes[0] as? [String: Any],
-              let fields = envelope["fields"] as? [String: Any] else { throw TaobaoTrackingError.unsupported }
+        // Upstream samples contain both names, one of them a placeholder without fields.
+        let envelopes = ["newLogistics", "logisticsDetailH5"].compactMap { (data[$0] as? [String: Any])?["fields"] as? [String: Any] }.filter { !$0.isEmpty }
+        guard envelopes.count == 1, let fields = envelopes.first else { throw TaobaoTrackingError.unsupported }
         // A package collection alongside a selected-looking fields object is not a supported binding.
         guard !["packages", "packageList", "logisticsList", "mailList"].contains(where: { fields[$0] != nil || data[$0] != nil }) else {
             throw TaobaoTrackingError.unsupported
