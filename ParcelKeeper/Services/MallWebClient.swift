@@ -347,6 +347,7 @@ enum MallWebParser {
     private var captures: [[String: Any]] = []
     private var failure: MallWebError?
     private var busy = false
+    private(set) var diagnosticMessage = "尚未读取网页。"
     private let isolatedContext: Bool
     init(platform: MallPlatform, cookies: [TaobaoTrialCookie], isolatedContext: Bool = false) {
         self.platform = platform; self.cookies = cookies; self.isolatedContext = isolatedContext
@@ -356,7 +357,7 @@ enum MallWebParser {
         try await prepare()
         defer { cleanup() }
         try load(platform.ordersURL)
-        _ = try await observeOrders()
+        _ = try await observeOrders(recentMonth: false)
         guard let web else { throw MallWebError.unsupported }
         let native = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
         let current = native.map { TaobaoTrialCookie(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path, secure: $0.isSecure, expires: $0.expiresDate) }
@@ -367,24 +368,24 @@ enum MallWebParser {
         defer { cleanup() }
         try load(platform.ordersURL)
         let orders = try await observeOrders()
-        var candidates: [MallCandidate] = []
-        for order in orders.prefix(8) {
-            try Task.checkCancellation()
-            let detail = try await observeDetail(orderID: order.id)
-            if let existing = candidates.first(where: { $0.trackingNumber == detail.number }) {
-                guard existing.orderID == order.id else { throw MallWebError.identityMismatch }
-            } else {
-                candidates.append(MallCandidate(trackingNumber: detail.number, carrier: detail.carrier, title: order.title, orderID: order.id))
-            }
+        let listDiagnostic = diagnosticMessage
+        let result = try await MallCandidateBatch.collect(orders: orders) { order in
+            try await self.observeDetail(orderID: order.id, url: order.url)
         }
-        // An explicitly recognized empty order array is allowed; an unknown response never is.
-        return candidates
+        diagnosticMessage = listDiagnostic + "\n" + result.message
+        return result.candidates
     }
     func query(orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
         _ = try MallWebParser.detailURL(platform: platform, orderID: orderID)
         guard MallWebParser.waybill(trackingNumber) else { throw MallWebError.identityMismatch }
         try await prepare()
         defer { cleanup() }
+        if platform == .jd {
+            try load(platform.ordersURL)
+            let orders = try await observeOrders(recentMonth: false)
+            guard let order = orders.first(where: { $0.id == orderID }) else { throw MallWebError.identityMismatch }
+            return try await observeDetail(orderID: orderID, url: order.url).result(expected: trackingNumber, platform: platform)
+        }
         return try await observeDetail(orderID: orderID).result(expected: trackingNumber, platform: platform)
     }
     private func prepare() async throws {
@@ -450,15 +451,41 @@ enum MallWebParser {
         if let error = MallWebParser.pageFailure(url: url, text: text) { throw error }
         return (url, text)
     }
-    private func observeOrders() async throws -> [MallWebOrder] {
-        for _ in 0..<40 {
+    private func observeOrders(recentMonth: Bool = true) async throws -> [MallWebOrder] {
+        diagnosticMessage = "阶段：订单列表；等待接口或可识别订单页面。"
+        for attempt in 0..<40 {
             _ = try await tick()
-            if let root = captures.first { return try MallWebParser.orders(root, platform: platform) }
+            if platform != .jd {
+                if let root = captures.first { return try MallWebParser.orders(root, platform: platform) }
+                continue
+            }
+            var recognizedAPI = false
+            for root in captures {
+                do {
+                    let report = try JDOrderSelection.inspect(root: root, recentMonth: recentMonth)
+                    recognizedAPI = true
+                    diagnosticMessage = "阶段：订单列表；已识别接口，普通快递\(report.orders.count)单，日期待核实\(report.skipped[.unknownDate, default: 0])单，类型未知\(report.skipped[.unknownType, default: 0])单。"
+                    if !recentMonth || report.skipped[.unknownDate, default: 0] == 0 { return report.orders }
+                } catch MallWebError.unsupported { continue }
+            }
+            if attempt >= 5, let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript) {
+                do {
+                    let report = try JDOrderSelection.inspectDOM(snapshot, recentMonth: recentMonth)
+                    diagnosticMessage = "阶段：订单页面读取；本页近一个月普通快递\(report.orders.count)单，日期未知跳过\(report.skipped[.unknownDate, default: 0])单，范围外\(report.skipped[.outsideWindow, default: 0])单。非全量分页。"
+                    return report.orders
+                } catch MallWebError.unsupported {
+                    if !recognizedAPI { diagnosticMessage = "阶段：订单列表；尚未捕获合法接口或识别订单卡片。" }
+                }
+            }
         }
+        diagnosticMessage += " 订单列表等待超时；未进入逐单物流。"
         throw MallWebError.timeout
     }
-    private func observeDetail(orderID: String) async throws -> MallWebDetail {
-        try load(MallWebParser.detailURL(platform: platform, orderID: orderID))
+    private func observeDetail(orderID: String, url: URL? = nil) async throws -> MallWebDetail {
+        diagnosticMessage = "阶段：逐单物流页面；尚未取得匹配运单与轨迹。"
+        let target = try url ?? MallWebParser.detailURL(platform: platform, orderID: orderID)
+        if platform == .jd { _ = try JDOrderSelection.logisticsURL(target.absoluteString, orderID: orderID) }
+        try load(target)
         var clicked = false
         for attempt in 0..<40 {
             let (url, text) = try await tick()

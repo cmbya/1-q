@@ -195,7 +195,7 @@ struct MallImportView: View {
             Section("手动读取与确认") {
                 Button(busy ? "正在处理" : "读取网页订单（不调用UAPI）") { fetch() }
                     .disabled(busy || !hasSession || store.isHistoricalSnapshot)
-                Text("仅展示本次网页能够读取的订单，非全量同步；缺少运单号不会用订单号替代。请核对预览并勾选，确认后才保存。已有票仅补平台关联，不覆盖备注／取件码。")
+                Text(platform == .jd ? "测试范围：本页近一个月的普通快递，包含已签收；即时配送不作为快递。日期无法核实的订单跳过，不代表全月完整同步。跑通后再切换未签收。缺少真实运单不导入。" : "仅展示本次网页能够读取的订单，非全量同步；缺少运单号不会用订单号替代。请核对预览并勾选，确认后才保存。已有票仅补平台关联，不覆盖备注／取件码。")
                     .font(.footnote)
                 Text("确认后先导入／补关联，再按平台尝试刷新物流；整批物流请求预算20秒，登录／验证等错误会停止后续平台请求，但继续保存所选关联。未取得轨迹不代表已核实状态；不会自动调用UAPI。")
                     .font(.footnote)
@@ -327,14 +327,25 @@ struct MallImportView: View {
                 let cookies = try session.load()
                 let values: [MallCandidate]
                 if currentPlatform == .jd {
-                    values = try await MallWebClient(platform: .jd, cookies: cookies).fetchOrders()
+                    let client = MallWebClient(platform: .jd, cookies: cookies)
+                    do {
+                        values = try await client.fetchOrders()
+                        guard operationID == id, platform == currentPlatform, !Task.isCancelled, !store.isHistoricalSnapshot else { return }
+                        message = client.diagnosticMessage
+                    } catch is CancellationError { return }
+                    catch {
+                        guard operationID == id, platform == currentPlatform, !Task.isCancelled else { return }
+                        message = client.diagnosticMessage + "\n" + safeFailure(error) + " 未导入，未调用UAPI。"
+                        return
+                    }
                 } else {
                     values = try await MallDirectClient(platform: currentPlatform, cookies: cookies).fetchOrders()
                 }
                 try Task.checkCancellation()
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else { return }
                 candidates = values
-                message = values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。"
+                let outcome = values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。"
+                message = [message, outcome].compactMap { $0 }.joined(separator: "\n")
             } catch is CancellationError { }
             catch { if operationID == id { message = "读取订单失败：" + safeFailure(error) + " 未导入，未调用UAPI。" } }
         }
