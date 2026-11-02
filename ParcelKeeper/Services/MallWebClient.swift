@@ -354,10 +354,23 @@ enum MallWebParser {
     }
 
     func verifySession() async throws {
+        if platform != .jd {
+            try await MallDirectClient(platform: platform, cookies: cookies).verifySession()
+            return
+        }
         try await prepare()
         defer { cleanup() }
         try load(platform.ordersURL)
-        _ = try await observeOrders(recentMonth: false)
+        // Access verification recognizes the response envelope, not courier eligibility.
+        var accessible = false
+        for _ in 0..<40 {
+            _ = try await tick()
+            if captures.contains(where: { root in
+                guard let body = root["body"] as? [String: Any], let list = body["orderList"] as? [[String: Any]] else { return false }
+                return list.count <= 200
+            }) { accessible = true; break }
+        }
+        guard accessible else { throw MallWebError.timeout }
         guard let web else { throw MallWebError.unsupported }
         let native = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
         let current = native.map { TaobaoTrialCookie(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path, secure: $0.isSecure, expires: $0.expiresDate) }

@@ -126,7 +126,7 @@ private struct MallLoginSheet: View {
                     Button("取消") { saveTask?.cancel(); browser.destroy(); dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(saving ? "正在验证订单访问" : "验证并保存会话") {
+                    Button(saving ? "正在保存" : (browser.platform == .jd ? "保存候选会话" : "验证并保存会话")) {
                         saving = true
                         saveTask = Task { @MainActor in
                             defer { saving = false }
@@ -137,14 +137,13 @@ private struct MallLoginSheet: View {
                                     browser.message = "尚未读取到平台会话，请在网页完成登录后重试。"; return
                                 }
                                 guard MallSession.hasLoginCredentials(cookies, platform: browser.platform) else { throw MallWebError.authentication }
-                                browser.message = "正在同平台网页环境验证订单访问；验证通过才保存。"
-                                if browser.platform == .jd {
-                                    try await MallWebClient(platform: .jd, cookies: cookies).verifySession()
-                                } else {
+                                browser.message = browser.platform == .jd ? "正在保存本机候选会话；订单访问另行验证。" : "正在验证订单访问。"
+                                if browser.platform != .jd {
                                     try await MallDirectClient(platform: browser.platform, cookies: cookies).verifySession()
                                 }
                                 let fresh = try await browser.capture()
                                 guard browser.active, !Task.isCancelled, !readOnly else { return }
+                                guard MallSession.hasLoginCredentials(fresh, platform: browser.platform) else { throw MallWebError.authentication }
                                 try MallSession(platform: browser.platform).save(fresh)
                                 browser.destroy(); saved(); dismiss()
                             } catch is CancellationError { }
@@ -271,10 +270,7 @@ struct MallImportView: View {
         task = Task { @MainActor in
             defer { if operationID == id { busy = false; task = nil; operationID = nil } }
             do {
-                if platform == .jd {
-                    // Never test an imported account against cookies from the old account.
-                    try await MallWebClient(platform: .jd, cookies: parsed, isolatedContext: true).verifySession()
-                } else {
+                if platform != .jd {
                     try await MallDirectClient(platform: platform, cookies: parsed).verifySession()
                 }
                 try Task.checkCancellation()
@@ -283,7 +279,7 @@ struct MallImportView: View {
                 await MallBrowserContext.clear(platform)
                 guard operationID == id else { return }
                 hasSession = true; cookieImport = false; candidates = []; selected = []
-                message = "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
+                message = platform == .jd ? "已保存本机候选会话；不代表登录有效或订单可读取。请单独读取订单验证，未调用UAPI。" : "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
             } catch is CancellationError { }
             catch { if operationID == id { message = "验证失败，原会话未替换：" + safeFailure(error) } }
         }
