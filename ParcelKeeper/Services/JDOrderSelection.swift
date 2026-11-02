@@ -13,6 +13,10 @@ enum JDOrderSelection {
     struct Report {
         var orders: [MallWebOrder] = []
         var skipped: [SkipReason: Int] = [:]
+        // Unknown delivery type/link is unresolved, not proof of an empty courier list.
+        var requiresDOM: Bool {
+            [SkipReason.unknownType, .unknownDate, .missingLink].contains { skipped[$0, default: 0] > 0 }
+        }
         mutating func skip(_ reason: SkipReason) { skipped[reason, default: 0] += 1 }
     }
     private static func scalar(_ value: Any?) -> String? {

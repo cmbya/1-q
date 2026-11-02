@@ -465,7 +465,8 @@ enum MallWebParser {
                     let report = try JDOrderSelection.inspect(root: root, recentMonth: recentMonth)
                     recognizedAPI = true
                     diagnosticMessage = "阶段：订单列表；已识别接口，普通快递\(report.orders.count)单，日期待核实\(report.skipped[.unknownDate, default: 0])单，类型未知\(report.skipped[.unknownType, default: 0])单。"
-                    if !recentMonth || report.skipped[.unknownDate, default: 0] == 0 { return report.orders }
+                    if !report.requiresDOM { return report.orders }
+                    diagnosticMessage += " 正在尝试页面后备识别；未知类型不视为即时配送。"
                 } catch MallWebError.unsupported { continue }
             }
             if attempt >= 5, let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript) {

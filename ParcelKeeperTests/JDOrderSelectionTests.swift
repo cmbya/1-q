@@ -3,6 +3,23 @@ import XCTest
 
 final class JDOrderSelectionTests: XCTestCase {
     private let id = "123456789012"
+    func testUnknownTypeRequiresDOMEvenWhenNoDateWasChecked() throws {
+        var unknown = item(); unknown.removeValue(forKey: "progressInfo")
+        let report = try JDOrderSelection.inspect(root: root([unknown]), now: now)
+        XCTAssertEqual(report.skipped[.unknownType], 1)
+        XCTAssertNil(report.skipped[.unknownDate])
+        XCTAssertTrue(report.requiresDOM)
+    }
+    func testKnownEmptyAndExplicitNonCourierDoNotRequireDOM() throws {
+        XCTAssertFalse(try JDOrderSelection.inspect(root: root([]), now: now).requiresDOM)
+        var instant = item(); instant["progressInfo"] = ["progressId": "store2home"]
+        XCTAssertFalse(try JDOrderSelection.inspect(root: root([instant]), now: now).requiresDOM)
+    }
+    func testSignedRecentDOMRemainsEligibleAfterUnknownAPIType() throws {
+        var unknown = item(); unknown.removeValue(forKey: "progressInfo")
+        XCTAssertTrue(try JDOrderSelection.inspect(root: root([unknown]), now: now).requiresDOM)
+        XCTAssertEqual(try JDOrderSelection.ordersDOM(snapshot(), now: now).first?.id, id)
+    }
     private var now: Date { MallWebParser.date("2026-11-02 12:00:00")! }
     private func item(_ link: String? = nil) -> [String: Any] {
         ["orderId": id, "progressInfo": ["progressId": "logistics", "progressLink": link ?? "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=123456789012&orderType=0&skuid=456&shopid=789&dealState=7"],
