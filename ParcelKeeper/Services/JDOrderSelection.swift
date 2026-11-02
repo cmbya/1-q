@@ -99,6 +99,35 @@ enum JDOrderSelection {
         }
         return report
     }
+    /// Probe eligibility is not courier classification or permission to import.
+    /// ExpressAssistant b8925655 uses order fields when progressInfo is absent.
+    static func probes(_ root: [String: Any]) throws -> [MallWebOrder] {
+        guard let body = root["body"] as? [String: Any], let rows = body["orderList"] as? [[String: Any]], rows.count <= 200 else { throw MallWebError.unsupported }
+        var result: [MallWebOrder] = []
+        for row in rows {
+            guard let id = scalar(row["orderId"]), identifier(id) else { throw MallWebError.identityMismatch }
+            let status = (row["orderStatusInfo"] as? [String: Any])?["orderStatusName"] as? String ?? ""
+            if excluded(status) { continue }
+            let specials = row["specialDealList"] as? [[String: Any]] ?? []
+            if specials.contains(where: { ($0["isStore2Home"] as? Bool) == true }) { continue }
+            let raw = (row["progressInfo"] as? [String: Any])?["progressLink"] as? String ?? ""
+            let url: URL
+            if !raw.isEmpty { url = try logisticsURL(raw, orderID: id) }
+            else if let built = fallback(row, id: id) { url = built }
+            else { continue }
+            let title = (row["wareInfoList"] as? [[String: Any]])?.first?["wareName"] as? String ?? "京东订单"
+            if !result.contains(where: { $0.id == id }) { result.append(MallWebOrder(id: id, title: String(title.prefix(200)), url: url)) }
+        }
+        return result
+    }
+    static func isRecentOrder(text: String, now: Date = Date()) throws -> Bool {
+        let dates = labeledDates(text)
+        guard dates.count == 1, let date = orderDate(dates[0]) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        guard let cutoff = calendar.date(byAdding: .month, value: -1, to: now) else { throw MallWebError.unsupported }
+        return date >= cutoff && date <= now
+    }
     private static func labeledDates(_ text: String) -> [String] {
         let pattern = #"(?:下单时间|下单日期)\s*[:：]?\s*(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?)(?![\d:])"#
         let regex = try! NSRegularExpression(pattern: pattern)

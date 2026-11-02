@@ -382,10 +382,24 @@ enum MallWebParser {
         try load(platform.ordersURL)
         let orders = try await observeOrders()
         let listDiagnostic = diagnosticMessage
-        let result = try await MallCandidateBatch.collect(orders: orders) { order in
-            try await self.observeDetail(orderID: order.id, url: order.url)
+        let prioritized = orders.filter { jdDatedOrders.contains($0.id) } + orders.filter { !jdDatedOrders.contains($0.id) }
+        var unverifiedDate = 0
+        let result = try await MallCandidateBatch.collect(orders: prioritized) { order in
+            let detail = try await self.observeDetail(orderID: order.id, url: order.url)
+            if self.platform == .jd {
+                guard let web = self.web, let current = web.url else { throw MallWebError.identityMismatch }
+                _ = try JDOrderSelection.logisticsURL(current.absoluteString, orderID: order.id)
+                let text = try await web.evaluateJavaScript("document.body ? document.body.innerText.slice(0,100000) : ''") as? String ?? ""
+                let recent = try JDOrderSelection.isRecentOrder(text: text)
+                guard self.jdDatedOrders.contains(order.id) || recent else {
+                    unverifiedDate += 1
+                    throw MallWebError.noTrace
+                }
+                guard detail.number != order.id, !detail.carrier.isEmpty else { throw MallWebError.identityMismatch }
+            }
+            return detail
         }
-        diagnosticMessage = listDiagnostic + "\n" + result.message
+        diagnosticMessage = listDiagnostic + "\n" + result.message + " 下单日期未知或范围外未导入\(unverifiedDate)单。"
         return result.candidates
     }
     func query(orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
@@ -465,6 +479,7 @@ enum MallWebParser {
         return (url, text)
     }
     private func observeOrders(recentMonth: Bool = true) async throws -> [MallWebOrder] {
+        if platform == .jd { return try await collectJDOrders(recentMonth: recentMonth) }
         diagnosticMessage = "阶段：订单列表；等待接口或可识别订单页面。"
         for attempt in 0..<40 {
             _ = try await tick()
@@ -472,28 +487,60 @@ enum MallWebParser {
                 if let root = captures.first { return try MallWebParser.orders(root, platform: platform) }
                 continue
             }
-            var recognizedAPI = false
-            for root in captures {
-                do {
-                    let report = try JDOrderSelection.inspect(root: root, recentMonth: recentMonth)
-                    recognizedAPI = true
-                    diagnosticMessage = "阶段：订单列表；已识别接口，普通快递\(report.orders.count)单，日期待核实\(report.skipped[.unknownDate, default: 0])单，类型未知\(report.skipped[.unknownType, default: 0])单。"
-                    if !report.requiresDOM { return report.orders }
-                    diagnosticMessage += " 正在尝试页面后备识别；未知类型不视为即时配送。"
-                } catch MallWebError.unsupported { continue }
-            }
-            if attempt >= 5, let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript) {
-                do {
-                    let report = try JDOrderSelection.inspectDOM(snapshot, recentMonth: recentMonth)
-                    diagnosticMessage = "阶段：订单页面读取；本页近一个月普通快递\(report.orders.count)单，日期未知跳过\(report.skipped[.unknownDate, default: 0])单，范围外\(report.skipped[.outsideWindow, default: 0])单。非全量分页。"
-                    return report.orders
-                } catch MallWebError.unsupported {
-                    if !recognizedAPI { diagnosticMessage = "阶段：订单列表；尚未捕获合法接口或识别订单卡片。" }
-                }
-            }
+
         }
         diagnosticMessage += " 订单列表等待超时；未进入逐单物流。"
         throw MallWebError.timeout
+    }
+    private var jdDatedOrders = Set<String>()
+    /// Bounded page-generated collection, like ExpressAssistant scrollAndCollect.
+    private func collectJDOrders(recentMonth: Bool) async throws -> [MallWebOrder] {
+        jdDatedOrders.removeAll()
+        var collected: [MallWebOrder] = []
+        var capturedOrderIDs = Set<String>()
+        var seenResponseCount = 0
+        var recognized = false
+        var total: Int?
+        for attempt in 0..<120 {
+            _ = try await tick()
+            for root in captures.dropFirst(seenResponseCount) {
+                do {
+                    let probes = try JDOrderSelection.probes(root)
+                    recognized = true
+                    if let body = root["body"] as? [String: Any] {
+                        if let rows = body["orderList"] as? [[String: Any]] {
+                            for row in rows {
+                                if let id = row["orderId"] as? String { capturedOrderIDs.insert(id) }
+                                else if let id = row["orderId"] as? NSNumber { capturedOrderIDs.insert(id.stringValue) }
+                            }
+                        }
+                        if let n = body["totalNum"] as? NSNumber, n.intValue >= 0 { total = n.intValue }
+                    }
+                    for order in probes where !collected.contains(where: { $0.id == order.id }) {
+                        if collected.count < 200 { collected.append(order) }
+                    }
+                } catch MallWebError.unsupported { continue }
+            }
+            seenResponseCount = captures.count
+            if attempt % 6 == 5 {
+                if let snapshot = try await web?.evaluateJavaScript(JDOrderSelection.domScript),
+                   let report = try? JDOrderSelection.inspectDOM(snapshot, recentMonth: recentMonth) {
+                    recognized = true
+                    for order in report.orders {
+                        jdDatedOrders.insert(order.id)
+                        if !collected.contains(where: { $0.id == order.id }), collected.count < 200 { collected.append(order) }
+                    }
+                }
+                // Trigger only normal page scrolling; never synthesize signed API requests.
+                _ = try await web?.evaluateJavaScript("(() => { const e=document.scrollingElement; if(e) window.scrollBy(0, Math.max(300,window.innerHeight*0.8)); })()")
+            }
+            diagnosticMessage = "阶段：订单采集；已观察\(capturedOrderIDs.count)单，待详情核实\(collected.count)单；已签收保留，未知类型不等于即时配送。"
+            if let total, capturedOrderIDs.count >= total, attempt >= 5 { break }
+            if captures.count >= 20 || collected.count >= 200 { break }
+        }
+        guard recognized else { throw MallWebError.timeout }
+        diagnosticMessage += " 已到采集上限或平台总数；非全量保证。逐单最多核实8单，日期未知不会导入。"
+        return collected
     }
     private func observeDetail(orderID: String, url: URL? = nil) async throws -> MallWebDetail {
         diagnosticMessage = "阶段：逐单物流页面；尚未取得匹配运单与轨迹。"
@@ -567,7 +614,8 @@ enum MallWebParser {
             let accepted = jd ? functionID == (listPage ? "order_list_m" : "get_logistics_list_by_order_m") :
                 (platform == .pdd && listPage && packet.url.path.hasSuffix("/aristotle/order_list_v4"))
             guard accepted else { return }
-            guard captures.count < 4 else { throw MallWebError.unsupported }
+            let limit = platform == .jd && listPage ? 20 : 4
+            guard captures.count < limit else { return }
             captures.append(packet.root)
         } catch { failure = .unsupported }
     }

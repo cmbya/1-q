@@ -21,7 +21,7 @@ enum JDWebScripts {
       const accepted = raw => !!parsed(raw);
       const report = (url, body) => {
         try {
-          if (sent >= 4 || typeof body !== 'string' || body.length > 2000000) return;
+          if (sent >= (location.pathname === '/order/orderlist_jdm.shtml' ? 20 : 4) || typeof body !== 'string' || body.length > 2000000) return;
           if (new TextEncoder().encode(body).length > 2000000 || !accepted(url)) return;
           sent++;
           window.webkit.messageHandlers.mallResponse.postMessage({type:'response',url:url,body:body});

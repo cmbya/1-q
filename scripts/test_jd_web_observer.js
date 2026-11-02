@@ -57,6 +57,14 @@ run('host, function, duplicate query, dangerous callback rejected', () => {
     const s = new c.HTMLScriptElement(); s.src = raw; c.document.appendChild(s); c.cb({ok:1}); assert.equal(c.cb,original); assert.equal(messages.length,0);
   }
 });
+run('order page captures twenty responses while detail stays at four', () => {
+  for (const [pathname,limit] of [['/order/orderlist_jdm.shtml',20],['/order/deal_wuliu_jdm.shtml',4]]) {
+    const {c,messages}=environment(); c.location.pathname=pathname;
+    c.cb=v=>v; const s=new c.HTMLScriptElement(); s.src=url('cb'); c.document.appendChild(s);
+    for(let i=0;i<25;i++) c.cb({body:{orderList:[{orderId:String(i)}]}});
+    assert.equal(messages.length,limit);
+  }
+});
 run('both allowed JD functions; bound of four; cyclic payload safe', () => {
   const {c,messages} = environment(); c.cb = v => 9; const s = new c.HTMLScriptElement(); s.src = url('cb','get_logistics_list_by_order_m');
   const cyclic = {}; cyclic.self = cyclic; assert.equal(c.cb(cyclic),9);
