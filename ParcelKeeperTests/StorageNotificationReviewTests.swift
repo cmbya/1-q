@@ -32,16 +32,16 @@ final class StorageNotificationReviewTests: XCTestCase {
         try phones.save("0123", for: old)
         let preview = try replacement(old)
         let incoming = preview.incoming.shipments[0]
-        try phones.save("5678", for: incoming)
+        try phones.save("9087", for: incoming)
         _ = try storage.importBackup(preview, policy: .replaceExisting)
         // Simulate process death after dataset commit but before Keychain cleanup.
         let restarted = try SharedPickupStore(appGroupID: nil, containerURL: root)
         try restarted.cleanupRetiredShipmentPhones(clear: phones.clear)
         XCTAssertNil(try phones.read(for: old))
-        XCTAssertEqual(try phones.read(for: incoming), "5678")
+        XCTAssertEqual(try phones.read(for: incoming), "9087")
         try restarted.cleanupRetiredShipmentPhones(clear: phones.clear)
-        XCTAssertEqual(try phones.read(for: incoming), "5678")
-        XCTAssertFalse(String(decoding: try restarted.exportBackup(), as: UTF8.self).contains("5678"))
+        XCTAssertEqual(try phones.read(for: incoming), "9087")
+        XCTAssertFalse(String(decoding: try restarted.exportBackup(), as: UTF8.self).contains("9087"))
     }
     func testReplacementRejectsActiveQueryBeforeCommit() throws {
         let old = try seed(), preview = try replacement(old)

@@ -144,6 +144,9 @@ struct PickupTextParser {
                code.count <= 32, !codes.contains(code) { codes.append(code) }
             // Only consume a list item when it is a standalone token, never a
             // numeric prefix of an address such as “456号”.
+            // An unclosed/malformed primary wrapper cannot own following list items.
+            // Still count its label above so it cannot hide a second valid notice.
+            guard PickupFieldProtection.validWrapping(match.range(at: 1), in: text) else { continue }
             var position = NSMaxRange(match.range)
             while position < full.length,
                   let next = continuation?.firstMatch(in: text, options: [.anchored],
