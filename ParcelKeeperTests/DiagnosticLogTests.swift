@@ -97,7 +97,15 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("trackingFailed"))
         XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        #if targetEnvironment(simulator)
+        // CoreSimulator may omit hardware-backed data protection metadata.
+        // If it reports a value it must still be correct; device builds require it.
+        if let protection = attributes[.protectionKey] as? FileProtectionType {
+            XCTAssertEqual(protection, .completeUntilFirstUserAuthentication)
+        }
+        #else
         XCTAssertEqual(attributes[.protectionKey] as? FileProtectionType, .completeUntilFirstUserAuthentication)
+        #endif
         logger.clear()
         XCTAssertEqual(logger.snapshotForTesting().entryCount, 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
