@@ -14,7 +14,7 @@ final class PlatformPresentationTests: XCTestCase {
         XCTAssertTrue(message.hasPrefix("物流已更新。"))
         XCTAssertTrue(message.contains("暂无物流轨迹"))
         XCTAssertTrue(message.contains("尚无成功查询"))
-        XCTAssertFalse(message.contains("实时"))
+        XCTAssertTrue(message.contains("状态不代表实时物流"))
     }
 
     func testPlatformOriginAndActualLogisticsSourceAreIndependent() {

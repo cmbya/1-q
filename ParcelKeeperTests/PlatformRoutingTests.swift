@@ -24,7 +24,7 @@ final class PlatformRoutingTests: XCTestCase {
         shipment.taobaoOrderID = "123456789012345678"
         try store.transaction { data in
             data.shipments.append(shipment)
-            data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42", shipmentID: shipment.id))
+            data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42", source: shipment.note, shipmentID: shipment.id))
         }
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
@@ -103,8 +103,9 @@ final class PlatformRoutingTests: XCTestCase {
                 other.id = UUID(); other.trackingNumber = "YT123456789012\(index)"
                 if index == 2 { other.originPlatform = nil; other.taobaoOrderID = nil }
                 other.lastQueryAttemptAt = Date(timeIntervalSince1970: Double(index))
+                other.pickupCode = "extra-\(index)"
                 data.shipments.append(other)
-                data.records.append(PickupRecord(groupID: data.groups[0].id, code: "extra-\(index)", shipmentID: other.id))
+                data.records.append(PickupRecord(groupID: data.groups[0].id, code: other.pickupCode, source: other.note, shipmentID: other.id))
             }
         }
         let platform = PlatformClient(), uapi = TrackingRefreshTests.Client()
