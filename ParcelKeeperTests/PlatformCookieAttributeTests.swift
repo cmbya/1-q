@@ -11,7 +11,9 @@ final class PlatformCookieAttributeTests: XCTestCase {
         XCTAssertEqual(cookie.path, "/")
     }
     func testNativeReinjectionPreservesHTTPOnlySecurePathAndExpiry() throws {
-        let expires = Date(timeIntervalSince1970: 4_102_444_800)
+        // Foundation caps far-future Cookie expiries. Verify exact preservation
+        // inside the system-supported window, without subsecond rounding noise.
+        let expires = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) + 86_400)
         let stored = TaobaoTrialCookie(name: "pt_key", value: "synthetic", domain: ".jd.com", path: "/order", secure: true, expires: expires, httpOnly: true)
         let roundTrip = try JSONDecoder().decode(TaobaoTrialCookie.self, from: JSONEncoder().encode(stored))
         let cookie = try XCTUnwrap(roundTrip.webCookie())
