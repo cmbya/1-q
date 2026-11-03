@@ -51,7 +51,7 @@ final class TminiRoutingTests: XCTestCase {
         try store.transaction { data in
             var second = shipment; second.id = UUID(); second.trackingNumber = "YT2234567890123"; second.refreshChannel = "tmini"; second.pickupCode = "43"
             data.shipments.append(second)
-            data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "43", shipmentID: second.id))
+            data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "43", source: second.note, shipmentID: second.id))
         }
         let priorCalls = tmini.calls
         let report = try await service.refreshPending(mode: .tmini)

@@ -50,7 +50,8 @@ final class TminiUsageTests: XCTestCase {
         let settings = TminiSettingsService(defaults: defaults, keys: UAPITrackingClientTests.Keys())
         let network = UAPITrackingClientTests.Network()
         let store = TminiUsageStore(directory: directory)
-        let client = TminiTrackingClient(settings: settings, network: network, usage: store)
+        let cache = PaidTrackingCache(directory: directory.appendingPathComponent("cache"), phoneKeys: { _ in UAPITrackingClientTests.Keys() })
+        let client = TminiTrackingClient(settings: settings, network: network, usage: store, cache: cache)
         do { _ = try await client.query(trackingNumber: "YT1234567890123"); XCTFail() } catch {}
         try settings.saveKey("synthetic-key"); try settings.setEnabled(true, privacyConfirmed: true)
         do { _ = try await client.query(trackingNumber: "bad number"); XCTFail() } catch {}
@@ -63,6 +64,7 @@ final class TminiUsageTests: XCTestCase {
         network.error = URLError(.timedOut)
         do { _ = try await client.query(trackingNumber: "YT1234567890123"); XCTFail() } catch {}
         XCTAssertEqual(try store.summary().points, 12)
+        XCTAssertEqual(network.requests.count, 3, "Authentication and transport failures still count actual dispatches")
         try settings.saveKey("replacement-key"); try settings.removeKey()
         XCTAssertEqual(try store.summary().points, 12)
         network.error = nil

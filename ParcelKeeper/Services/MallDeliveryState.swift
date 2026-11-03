@@ -10,7 +10,10 @@ enum MallDeliveryState {
             !["尚未", "未签收", "未实际签收", "未取件", "未妥投", "未完成", "没有签收", "没有取件", "未能", "请确认"].contains(where: clause.contains)
         }
         let collected = facts.contains { clause in
-            ["已完成取件", "已在代收点取出", "已从代收点取出", "已从快递柜取出", "已从丰巢取出", "收件人已取件", "本人已取件", "客户已取件"].contains(where: clause.contains)
+            // Requests are not collection facts, even when they name the recipient.
+            guard !["请", "請", "待", "等待", "需", "须", "务必", "以便", "才能", "方可"].contains(where: clause.contains) else { return false }
+            let recipientCollected = clause.range(of: #"(?:收件人|取件人|本人|客户)凭取件码完成取件"#, options: .regularExpression) != nil
+            return recipientCollected || ["已完成取件", "已在代收点取出", "已从代收点取出", "已从快递柜取出", "已从丰巢取出", "收件人已取件", "本人已取件", "客户已取件"].contains(where: clause.contains)
         }
         if collected { return .delivered }
         let station = ["待取件", "等待取件", "待您领取", "请及时取件", "请尽快完成取件", "菜鸟驿站代收", "请凭码取件", "请凭取件码", "丰巢暂存", "快递柜暂存", "已放入快递柜", "已存入快递柜", "已送达菜鸟驿站", "已送达驿站", "已送达代收点", "驿站已签收", "代收点已签收", "已签收至菜鸟驿站"].contains(where: latest.contains)

@@ -9,7 +9,14 @@ class AuditHighContract(unittest.TestCase):
     def test_instruction_is_not_completed_fact(self):
         source = (ROOT / 'ParcelKeeper/Services/MallDeliveryState.swift').read_text()
         collected = source.split('let collected =', 1)[1].split('if collected', 1)[0]
-        terms = re.findall(r'"([^"\n]+)"', collected)
+        # Only positive fact literals, not the request/condition exclusion list.
+        positive = re.search(r'return recipientCollected \|\| \[(.*?)\]\.contains', collected, re.S)
+        if positive is None:
+            self.fail('Missing explicit recipient/fact classification')
+        terms = re.findall(r'"([^"\n]+)"', positive.group(1))
+        self.assertIn('guard !["请", "請"', collected)
+        self.assertIn('(?:收件人|取件人|本人|客户)凭取件码完成取件', collected)
+        self.assertNotIn('"完成取件"', positive.group(1))
         for instruction in ['请凭取件码完成取件', '请尽快完成取件']:
             self.assertFalse(any(term in instruction for term in terms))
         station = source.split('let station =', 1)[1].split('if station', 1)[0]

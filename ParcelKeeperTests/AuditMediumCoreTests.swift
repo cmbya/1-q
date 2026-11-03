@@ -101,10 +101,17 @@ final class AuditMediumCoreTests: XCTestCase {
         XCTAssertThrowsError(try phones.save("8351", for: shipment))
         XCTAssertEqual(try phones.read(for: shipment), "9276")
         var incoming = try store.snapshot()
-        incoming.shipments.removeAll(); incoming.records.removeAll()
+        // Import merges: absence is not deletion. Replace the same tracking number
+        // with a new identity so the original phone actually enters retirement.
+        incoming.shipments[0].id = UUID()
+        incoming.records[0].id = UUID()
+        incoming.records[0].shipmentID = incoming.shipments[0].id
         let preview = try store.previewBackup(JSONEncoder().encode(incoming))
         _ = try store.importBackup(preview, policy: .replaceExisting)
+        XCTAssertEqual(try store.snapshot().shipments.map(\.id), incoming.shipments.map(\.id))
         XCTAssertThrowsError(try store.cleanupRetiredShipmentPhones(clear: phones.clear))
+        XCTAssertEqual(try phones.read(for: shipment), "9276")
+        XCTAssertNotNil(cacheKeys.value)
         cacheKeys.failDelete = false
         let restarted = try SharedPickupStore(appGroupID: nil, containerURL: root)
         try restarted.cleanupRetiredShipmentPhones(clear: phones.clear)
@@ -151,11 +158,17 @@ final class AuditMediumCoreTests: XCTestCase {
         let otherGroupID = try XCTUnwrap(store.snapshot().groups.first { $0.id != displayed.groupID }?.id)
         for kind in 0..<4 {
             try store.transaction { data in
+                // Keep each edited fixture structurally valid before testing staleness.
+                data.shipments = [self.shipment]
                 data.records[0] = displayed
                 switch kind {
-                case 0: data.records[0].code = "NEW"
+                case 0:
+                    data.records[0].code = "NEW"
+                    data.shipments[0].pickupCode = "NEW"
                 case 1: data.records[0].groupID = otherGroupID
-                case 2: data.records[0].shipmentID = nil
+                case 2:
+                    data.records[0].shipmentID = nil
+                    data.shipments.removeAll()
                 default: data.records[0].updatedAt = displayed.updatedAt.addingTimeInterval(1)
                 }
             }

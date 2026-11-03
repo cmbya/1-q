@@ -283,7 +283,7 @@ final class ShipmentShortcutTests: XCTestCase {
         _ = try service.upsert(input("已领取"))
         XCTAssertFalse(try store.snapshot().records[0].isCompleted)
     }
-    func testStatusChangeRejectsDuplicateReopeningAtomicallyAndCanRetry() throws {
+    func testStatusChangePreservesManualCompletionAndRejectsAmbiguousIdentityAtomically() throws {
         var reloads = 0
         let service = ShipmentShortcutService(store: store, reloadWidgets: { reloads += 1 })
         _ = try service.upsert(input("运输中"))
@@ -296,28 +296,36 @@ final class ShipmentShortcutTests: XCTestCase {
             data.records[0].isCompleted = true
             data.records.append(PickupRecord(id: competingID, groupID: data.records[0].groupID, code: "42"))
         }
+        // Historical duplicate waybills remain legal storage, but updates must not
+        // guess which identity to change or partially write carrier/logistics fields.
+        var duplicate = original
+        duplicate.id = UUID()
+        try store.transaction { data in
+            data.shipments.append(duplicate)
+            data.records.append(PickupRecord(groupID: data.records[0].groupID, code: duplicate.pickupCode, source: duplicate.note, shipmentID: duplicate.id))
+        }
         let before = try store.exportBackup()
         let dataURL = directory.appendingPathComponent("ParcelKeeper/pickup-data.json")
         let beforeFile = try Data(contentsOf: dataURL)
         var update = input("待取件")
         update.carrierName = "新服务商"
         XCTAssertThrowsError(try service.upsert(update)) { error in
-            guard case PickupStorageError.invalidData = error else { return XCTFail("Unexpected error: \(error)") }
+            guard case ShipmentShortcutError.ambiguous = error else { return XCTFail("Unexpected error: \(error)") }
         }
         XCTAssertEqual(try store.exportBackup(), before)
         XCTAssertEqual(try Data(contentsOf: dataURL), beforeFile)
         XCTAssertEqual(reloads, 1, "A rejected write must not reload widgets")
         try store.transaction { data in
-            let index = try XCTUnwrap(data.records.firstIndex { $0.id == competingID })
-            data.records[index].isCompleted = true
+            data.shipments.removeAll { $0.id == duplicate.id }
+            data.records.removeAll { $0.shipmentID == duplicate.id }
         }
         XCTAssertFalse(try service.upsert(update))
         let after = try store.snapshot()
         XCTAssertEqual(after.shipments[0].id, original.id)
         XCTAssertEqual(after.shipments[0].status, .readyForPickup)
         XCTAssertEqual(after.shipments[0].carrierName, "新服务商")
-        XCTAssertFalse(try XCTUnwrap(after.records.first { $0.id == linkedID }).isCompleted)
-        XCTAssertTrue(try XCTUnwrap(after.records.first { $0.id == competingID }).isCompleted)
+        XCTAssertTrue(try XCTUnwrap(after.records.first { $0.id == linkedID }).isCompleted)
+        XCTAssertFalse(try XCTUnwrap(after.records.first { $0.id == competingID }).isCompleted)
         XCTAssertEqual(reloads, 2)
     }
     func testShortcutStatusChangePreservesExistingPendingHistoryDuplicates() throws {
