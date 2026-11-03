@@ -90,7 +90,8 @@ struct KDYZMSnapshot: Decodable {
                       !text.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
                   }) else { throw KDYZMError.invalid }
             let number = CarrierDetector.sanitize(shipment.waybillNo)
-            let key = shipment.accountId + ":" + carrierKey(shipment.carrier) + ":" + number
+            // Backend order identity permits combined shipping to reuse a waybill.
+            let key = shipment.accountId + ":" + shipment.orderId + ":" + carrierKey(shipment.carrier) + ":" + number
             if !number.isEmpty { guard identities.insert(key).inserted else { throw KDYZMError.invalid } }
             for time in [shipment.arrivalAt, shipment.updatedAt, shipment.logisticsCheckedAt, shipment.logisticsUpdatedAt].compactMap({ $0 }) { _ = try KDYZMTime.date(time) }
             let events = shipment.logisticsEvents ?? []

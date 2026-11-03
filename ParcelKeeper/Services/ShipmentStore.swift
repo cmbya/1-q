@@ -152,7 +152,9 @@ final class ShipmentStore: ObservableObject {
     var activeShipments: [Shipment] { shipments.filter { $0.status != .archived } }
     func syncKDYZM(connection: KDYZMConnection = .shared, client: KDYZMClient = KDYZMClient()) async throws -> KDYZMSyncReport {
         guard let storage, !storage.isReadOnly else { throw PickupStorageError.appGroupUnavailable }
-        let before = try storage.snapshot()
+        let before: PickupDataset
+        do { before = try storage.snapshot() }
+        catch { throw KDYZMSyncFailure.localRead }
         let credential = try await connection.credential()
         let snapshot = try await client.snapshot(credential)
         try Task.checkCancellation()
@@ -168,7 +170,7 @@ final class ShipmentStore: ObservableObject {
             for id in affected.map(\.id).sorted(by: { $0.uuidString < $1.uuidString }) {
                 leases.append(try storage.acquireTrackingQuery(id: id))
             }
-            return try storage.transaction { data in
+            do { return try storage.transaction { data in
                 // Identity/deletion/channel/carrier changes while networking invalidate
                 // this sync; user-only note/code/group/completion edits are preserved.
                 guard !data.shipments.contains(where: { current in
@@ -176,11 +178,17 @@ final class ShipmentStore: ObservableObject {
                 }), affected.allSatisfy({ old in
                           data.shipments.first(where: { $0.id == old.id }).map { KDYZMMerger.sameIdentity($0, old) } ?? false
                       }) else { throw KDYZMError.stale }
-                return try KDYZMMerger.apply(snapshot, origin: credential.baseURL, to: &data)
-            }
+                do { return try KDYZMMerger.apply(snapshot, origin: credential.baseURL, to: &data) }
+                catch KDYZMError.invalid { throw KDYZMSyncFailure.association }
+            } }
+            catch let error as KDYZMSyncFailure { throw error }
+            catch let error as KDYZMError { throw error }
+            catch is CancellationError { throw CancellationError() }
+            catch { throw KDYZMSyncFailure.localWrite }
         }
         WidgetCenter.shared.reloadAllTimelines()
-        try reload()
+        do { try reload() }
+        catch { throw KDYZMSyncFailure.presentation }
         return report
     }
     func shipment(id: UUID) -> Shipment? { shipments.first { $0.id == id } }

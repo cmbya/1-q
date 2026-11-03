@@ -1,6 +1,21 @@
 import Foundation
 import Security
 
+/// Fixed stage codes only; never retains an underlying error or response values.
+enum KDYZMSyncFailure: Error, LocalizedError, CaseIterable, Equatable {
+    case decoding, validation, association, localRead, localWrite, presentation
+    var errorDescription: String? {
+        switch self {
+        case .decoding: return "[SYNC-DECODE] 后台快照字段缺失或类型不兼容，尚未导入。"
+        case .validation: return "[SYNC-VALIDATE] 后台快照身份、关联或字段校验失败，尚未导入。"
+        case .association: return "[SYNC-LINK] 后台记录与本地记录关联冲突，本次事务未保存。"
+        case .localRead: return "[SYNC-READ] 本地数据读取失败，尚未导入。"
+        case .localWrite: return "[SYNC-WRITE] 本地事务校验或保存失败，请保留原数据。"
+        case .presentation: return "[SYNC-DISPLAY] 同步事务已保存，但界面重新读取失败；勿删除数据或反复导入。"
+        }
+    }
+}
+
 // Independently implemented against zsdd2/kdyzm PROTOCOL.md at
 // b13c0527cb38f3aad79cacf8ca85efacaa0004ed. No backend implementation is embedded.
 enum KDYZMError: LocalizedError, Equatable {
@@ -32,6 +47,7 @@ enum KDYZMError: LocalizedError, Equatable {
         return .invalid
     }
     static func safe(_ error: Error) -> String {
+        if let error = error as? KDYZMSyncFailure { return error.localizedDescription }
         if let error = error as? KDYZMError { return error.localizedDescription }
         if error is CancellationError { return "操作已取消，未记为成功。" }
         return KDYZMError.network.localizedDescription
@@ -216,7 +232,10 @@ struct KDYZMClient {
             throw KDYZMError.response(status: actual, code: code)
         }
         do { return try JSONDecoder().decode(type, from: bytes) }
-        catch { throw KDYZMError.invalid }
+        catch {
+            if path == "/v1/snapshot", type == KDYZMSnapshot.self { throw KDYZMSyncFailure.decoding }
+            throw KDYZMError.invalid
+        }
     }
     func preview(origin: String, code: String) async throws -> KDYZMPreview {
         guard !code.isEmpty, code.utf8.count <= 80 else { throw KDYZMError.pairing }
@@ -228,7 +247,9 @@ struct KDYZMClient {
     }
     func snapshot(_ credential: KDYZMCredential, timeout: TimeInterval = 12) async throws -> KDYZMSnapshot {
         let result = try await request(KDYZMSnapshot.self, origin: credential.baseURL, path: "/v1/snapshot", credential: credential, timeout: timeout)
-        return try result.validated()
+        do { return try result.validated() }
+        catch KDYZMError.forbidden { throw KDYZMError.forbidden }
+        catch { throw KDYZMSyncFailure.validation }
     }
     static func validToken(_ raw: String) -> Bool {
         raw.utf8.count <= 280 && raw.range(of: #"\Apcd_[A-Za-z0-9_-]+\z"#, options: .regularExpression) != nil
