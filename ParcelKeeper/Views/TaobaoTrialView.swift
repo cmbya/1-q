@@ -226,7 +226,7 @@ struct TaobaoTrialView: View {
         }
     }
     private func importSelected(_ report: TaobaoTrialReport) {
-        guard !store.isHistoricalSnapshot else { message = "只读历史数据，不能导入。"; return }
+        guard !busy, !store.isHistoricalSnapshot else { return }
         let candidates = report.candidates.filter { selected.contains($0.id) }
         busy = true
         let id = UUID(); operationID = id
@@ -237,18 +237,29 @@ struct TaobaoTrialView: View {
             var platformStopped = false
             let started = ProcessInfo.processInfo.systemUptime
             for candidate in candidates {
-                if Task.isCancelled || operationID != id { return }
+                guard !Task.isCancelled, operationID == id, !store.isHistoricalSnapshot else { return }
                 do {
                     let existed = store.contains(trackingNumber: candidate.number)
                     let ticketID = try store.importTaobao(candidate)
                     if existed { bound += 1 } else { added += 1 }
                     // Link/import first, then fetch actual trace without UAPI fallback.
-                    if !platformStopped && ProcessInfo.processInfo.systemUptime - started < 20 {
+                    let remaining = 20 - (ProcessInfo.processInfo.systemUptime - started)
+                    if !platformStopped, remaining > 0 {
+                        let request = Task { @MainActor in
+                            try await TrackingRefreshService.live().refresh(id: ticketID, mode: .platformOnly)
+                        }
+                        let deadline = Task { @MainActor in
+                            do { try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000)); request.cancel() }
+                            catch { }
+                        }
                         do {
-                            _ = try await TrackingRefreshService.live().refresh(id: ticketID, mode: .platformOnly)
+                            _ = try await withTaskCancellationHandler(operation: { try await request.value }, onCancel: { request.cancel() })
+                            deadline.cancel()
+                            guard !Task.isCancelled, operationID == id else { return }
                             refreshed += 1
-                        } catch is CancellationError { return }
-                        catch {
+                        } catch {
+                            deadline.cancel()
+                            guard !Task.isCancelled, operationID == id else { return }
                             errors.append(candidate.number + "：" + error.localizedDescription)
                             if let failure = error as? TaobaoTrackingError, failure.stopsBatch { platformStopped = true }
                         }
@@ -256,7 +267,7 @@ struct TaobaoTrialView: View {
                 } catch { failed += 1; errors.append(candidate.number + "：关联或保存失败，未覆盖原记录。") }
             }
             try? store.reload()
-            guard operationID == id else { return }
+            guard !Task.isCancelled, operationID == id else { return }
             message = "新增\(added)票，已有记录关联\(bound)票，导入失败\(failed)票；淘宝物流更新\(refreshed)票。未调用UAPI。" + (errors.isEmpty ? "" : "\n" + errors.joined(separator: "\n"))
             selected = []
         }

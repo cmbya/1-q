@@ -110,10 +110,11 @@ struct KDYZMSnapshot: Decodable {
 struct KDYZMSyncReport {
     var imported = 0
     var updated = 0
+    var unchanged = 0
     var skipped = 0
     var noWaybill = 0
     var message: String {
-        "新增 \(imported) 票，更新 \(updated) 票，跳过 \(skipped) 票；\(noWaybill) 个订单尚无运单。同步只读取后台快照，不代表后台已完成平台采集；零订单也不保证购物账号没有订单。"
+        "新增 \(imported) 票，更新 \(updated) 票，未变化 \(unchanged) 票，跳过 \(skipped) 票；\(noWaybill) 个订单尚无运单。同步只读取后台快照，不代表后台已完成平台采集；零订单也不保证购物账号没有订单。"
     }
 }
 enum KDYZMMerger {
@@ -130,20 +131,37 @@ enum KDYZMMerger {
         current.refreshChannel == before.refreshChannel && current.platformOrderID == before.platformOrderID &&
         current.taobaoOrderID == before.taobaoOrderID && current.uapiCarrierCode == before.uapiCarrierCode
     }
-    static func update(_ remote: KDYZMRemoteShipment, local: inout Shipment, refresh: Bool = false) throws -> Bool {
+    static func update(_ remote: KDYZMRemoteShipment, local: inout Shipment, refresh: Bool = false, operation: UUID? = nil) throws -> Bool {
+        func reject(_ reason: DiagnosticReason) throws -> Bool {
+            DiagnosticLog.shared.record(.stageFailed, operation: operation, reason: reason, stage: .merge)
+            if refresh, operation != nil { throw TrackingTimeRejection(reason: reason) }
+            return false
+        }
         guard local.status != .archived else { return false }
+        let original = local
         // Failed/empty cache responses never clear history, and never count as a successful refresh.
         guard remote.logisticsState == "ok", let incoming = remote.logisticsEvents, !incoming.isEmpty,
               let successTime = try KDYZMTime.date(remote.logisticsUpdatedAt ?? 0) else { return false }
-        if let old = local.backendLogisticsUpdatedAt, successTime < old { return false }
+        if let old = local.backendLogisticsUpdatedAt, successTime < old { return try reject(.olderQuery) }
         let latest = incoming.compactMap { try? KDYZMTime.date($0.time) }.max()
-        if let old = local.logisticsTime, latest.map({ $0 >= old }) != true { return false }
+        if let old = local.logisticsTime, latest.map({ $0 >= old }) != true { return try reject(.olderEvent) }
+        let latestDescriptions = incoming.filter { (try? KDYZMTime.date($0.time)) == latest }.map(\.description)
+        let recipientCollected = latest != nil && MallDeliveryState.recipientCollected(events: latestDescriptions)
         if let old = local.logisticsTime, latest == old {
             let newest = incoming.filter { (try? KDYZMTime.date($0.time)) == old }
+            let sameLatest: Bool
             if let prior = local.backendEvents {
-                guard Set(newest) == Set(prior.filter { (try? KDYZMTime.date($0.time)) == old }) else { return false }
+                sameLatest = Set(newest) == Set(prior.filter { (try? KDYZMTime.date($0.time)) == old })
             } else {
-                guard newest.count == 1, newest.first?.description == local.logisticsInfo else { return false }
+                sameLatest = newest.count == 1 && newest.first?.description == local.logisticsInfo
+            }
+            if !sameLatest {
+                // Explicit collection may repair status, not overwrite equal-time conflicts.
+                guard recipientCollected else { return try reject(.statusConflict) }
+                local.status = .delivered
+                if refresh { local.lastQueriedAt = Date(); local.lastRefreshError = nil }
+                if local != original { local.updatedAt = Date() }
+                return true
             }
         }
         let combined = Array(Set((local.backendEvents ?? []) + incoming)).sorted {
@@ -153,7 +171,9 @@ enum KDYZMMerger {
         let priorHistory = local.backendPreviousHistory
         local.backendEvents = combined
         local.backendLogisticsUpdatedAt = successTime
-        local.logisticsInfo = incoming.sorted { $0.time > $1.time }.first?.description
+        local.logisticsInfo = incoming.sorted {
+            $0.time == $1.time ? $0.description < $1.description : $0.time > $1.time
+        }.first?.description
         if let latest { local.logisticsTime = latest }
 
         local.queryInfo = combined.map {
@@ -165,6 +185,7 @@ enum KDYZMMerger {
         }
         // signed is a logistics fact, not proof the user collected the parcel.
         // Never mutate PickupRecord.isCompleted from remote signed/picked.
+        if recipientCollected { local.status = .delivered }
         if local.status != .archived && local.status != .delivered {
             switch remote.status {
             case "signed": local.status = .delivered
@@ -175,11 +196,11 @@ enum KDYZMMerger {
         }
         local.logisticsSource = "kdyzm"; local.lastRefreshError = nil
         if refresh { local.lastQueriedAt = Date() }
-        local.updatedAt = Date()
+        if local != original { local.updatedAt = Date() }
         return true
     }
     @discardableResult
-    static func apply(_ snapshot: KDYZMSnapshot, origin: String, to data: inout PickupDataset) throws -> KDYZMSyncReport {
+    static func apply(_ snapshot: KDYZMSnapshot, origin: String, to data: inout PickupDataset, operation: UUID? = nil) throws -> KDYZMSyncReport {
         _ = try snapshot.validated()
         _ = try KDYZMOrigin(origin)
         var result = KDYZMSyncReport()
@@ -216,6 +237,7 @@ enum KDYZMMerger {
             }
             if let index {
                 var local = data.shipments[index]
+                let original = local
                 guard local.status != .archived else { result.skipped += 1; continue }
                 if local.backendBinding != nil {
                     guard local.originPlatform == order.platform, local.platformOrderID == order.platformOrderId else { throw KDYZMError.stale }
@@ -225,9 +247,9 @@ enum KDYZMMerger {
                       carrierKey(local.carrierName) == carrierKey(remote.carrier) || local.carrierCode == carrierKey(remote.carrier) else { throw KDYZMError.stale }
                 local.backendBinding = binding; local.originPlatform = order.platform
                 local.platformOrderID = order.platformOrderId
-                // Preserve explicit UAPI routing and its logistics; binding alone does not opt in.
-                if local.refreshChannel == nil && (local.logisticsSource == nil || local.logisticsSource == "kdyzm") {
-                    _ = try update(remote, local: &local)
+                // Only explicit overrides opt out; historical source is not routing.
+                if local.refreshChannel == nil {
+                    _ = try update(remote, local: &local, operation: operation)
                 }
                 let code = remote.pickupCode ?? ""
                 if local.pickupCode.isEmpty, !code.isEmpty {
@@ -242,7 +264,8 @@ enum KDYZMMerger {
                     data.records[record].code = code
                 }
                 data.shipments[index] = local
-                result.updated += 1
+                if local != original { result.updated += 1 }
+                else { result.unchanged += 1 }
             } else {
                 guard let group = data.expressGroupID, data.groups.contains(where: { $0.id == group }) else { throw KDYZMError.invalid }
                 let detection = CarrierDetector.detect(number, context: remote.carrier)
@@ -258,7 +281,7 @@ enum KDYZMMerger {
                 case "arrived": local.status = .readyForPickup
                 default: break
                 }
-                _ = try update(remote, local: &local)
+                _ = try update(remote, local: &local, operation: operation)
                 data.shipments.append(local)
                 data.records.append(PickupRecord(groupID: group, code: local.pickupCode, location: remote.station ?? "", source: local.note, isCompleted: false, shipmentID: local.id))
                 result.imported += 1
@@ -288,8 +311,12 @@ struct KDYZMJob: Decodable {
 
 /// Fixed user-facing diagnostic, never contains server content or credentials.
 struct KDYZMTerminalResultError: LocalizedError {
+    var originalReason: DiagnosticReason = .terminalResult
+    var originalStage: DiagnosticStage = .merge
+    var cleanupReason: DiagnosticReason? = nil
     var errorDescription: String? {
-        "后台终态任务已清除，但结果过旧、冲突或不可用，未覆盖本地轨迹；本次未重复提交，可检查后再次手动刷新。"
+        if cleanupReason != nil { return "后台终态结果不可用，任务清理未完成；未覆盖本地轨迹，本次未重复提交，请检查后重试。" }
+        return "后台终态任务已清除，但结果过旧、冲突或不可用，未覆盖本地轨迹；本次未重复提交，可检查后再次手动刷新。"
     }
 }
 
@@ -299,19 +326,26 @@ struct KDYZMRefreshService {
     var client = KDYZMClient()
     var budget: TimeInterval = 12
     var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
-    func refresh(before: Shipment) async throws -> Bool {
-        try await connection.beginRefresh(before.id)
+    var diagnosticLog: DiagnosticLog = .shared
+    func refresh(before: Shipment, operation: UUID = UUID(), trace suppliedTrace: DiagnosticTrace? = nil) async throws -> Bool {
+        let trace = suppliedTrace ?? DiagnosticTrace(operation: operation, log: diagnosticLog)
+        trace.begin(.lease)
+        do { try await connection.beginRefresh(before.id) }
+        catch { trace.fail(error); throw error }
         do {
-            let result = try await perform(before: before)
+            let result = try await perform(before: before, trace: trace)
+            trace.finish()
             await connection.endRefresh(before.id)
             return result
         } catch {
+            trace.fail(error)
             await connection.endRefresh(before.id)
             throw error
         }
     }
-    private func perform(before: Shipment) async throws -> Bool {
+    private func perform(before: Shipment, trace: DiagnosticTrace) async throws -> Bool {
         guard !store.isReadOnly, let binding = before.backendBinding else { throw KDYZMError.invalid }
+        trace.begin(.credential)
         let credential = try await connection.credential()
         guard credential.baseURL == binding.origin else { throw KDYZMError.stale }
         let start = ProcessInfo.processInfo.systemUptime
@@ -326,23 +360,24 @@ struct KDYZMRefreshService {
         struct ReadJob: Decodable { var job: KDYZMJob }
         var job: KDYZMJob
         if let pending = before.backendRefreshJobID {
+            trace.begin(.jobResume)
             guard before.backendRefreshGeneration == credential.generation else {
-                try await clearJob(pending, before: before, credential: credential)
-                throw KDYZMError.stale
+                throw await cleanupFailure(KDYZMError.stale, id: pending, before: before, credential: credential, trace: trace)
             }
             do {
                 job = try await client.request(ReadJob.self, origin: binding.origin, path: "/v1/sync-jobs/" + KDYZMClient.segment(pending), credential: credential, timeout: remainingTimeout()).job
             } catch KDYZMError.jobGone {
-                try await clearJob(pending, before: before, credential: credential)
-                throw KDYZMError.jobGone
+                throw await cleanupFailure(KDYZMError.jobGone, id: pending, before: before, credential: credential, trace: trace)
             }
             _ = try job.success(for: binding, expectedID: pending)
         } else {
+            trace.begin(.jobCreate)
             let response = try await client.request(Accepted.self, origin: binding.origin,
                 path: "/v1/orders/" + KDYZMClient.segment(binding.orderID) + "/refresh", method: "POST", body: [:], credential: credential, status: 202, timeout: remainingTimeout())
             guard response.accepted, response.jobs.count == 1, let first = response.jobs.first else { throw KDYZMError.invalid }
             job = first
             _ = try job.success(for: binding)
+            trace.begin(.save)
             try await connection.commit(credential) {
                 let lease = try store.acquireTrackingQuery(id: before.id); defer { lease.release() }
                 try store.transaction { data in
@@ -354,6 +389,7 @@ struct KDYZMRefreshService {
                 }
             }
         }
+        trace.begin(.jobWait) // Saving the accepted ID succeeded; waiting is not a write.
         let expectedID = job.id
         while true {
             try Task.checkCancellation()
@@ -361,25 +397,28 @@ struct KDYZMRefreshService {
             if try job.success(for: binding, expectedID: expectedID) { break }
             if ["disabled", "completed", "expired", "error", "cooldown"].contains(job.state) {
                 // Cooldown means queue full in the pinned server, not an accepted queued job.
-                try await clearJob(expectedID, before: before, credential: credential)
-                throw job.state == "cooldown" ? KDYZMError.queued : KDYZMError.failed
+                let original = job.state == "cooldown" ? KDYZMError.queued : KDYZMError.failed
+                throw await cleanupFailure(original, id: expectedID, before: before, credential: credential, trace: trace)
             }
             let remaining = budget - (ProcessInfo.processInfo.systemUptime - start)
             let delay = max(0.5, (job.retryAt ?? 0) / 1000 - Date().timeIntervalSince1970)
             guard remaining > delay + 1 else { throw KDYZMError.queued }
             try await Task.sleep(nanoseconds: UInt64(min(delay, 10) * 1_000_000_000))
+            trace.begin(.jobPoll)
             do {
                 job = try await client.request(ReadJob.self, origin: binding.origin,
                     path: "/v1/sync-jobs/" + KDYZMClient.segment(expectedID), credential: credential, timeout: remainingTimeout()).job
             } catch KDYZMError.jobGone {
-                try await clearJob(expectedID, before: before, credential: credential)
-                throw KDYZMError.jobGone
+                throw await cleanupFailure(KDYZMError.jobGone, id: expectedID, before: before, credential: credential, trace: trace)
             }
         }
         // Completion is terminal even when its snapshot is rejected. Cleanup must
         // be a separate transaction: a throw inside the merge rolls its writes back.
+        var newlyDelivered = false
         do {
+        trace.begin(.snapshot)
         let snapshot = try await client.snapshot(credential, timeout: remainingTimeout())
+        trace.begin(.merge)
         _ = try remainingTimeout()
         try Task.checkCancellation()
         guard let remote = snapshot.shipments.first(where: { $0.id == binding.shipmentID && $0.accountId == binding.accountID && $0.orderId == binding.orderID }),
@@ -393,6 +432,7 @@ struct KDYZMRefreshService {
               (remote.logisticsUpdatedAt ?? 0) >= createdAt else {
             throw KDYZMError.empty
         }
+        trace.begin(.save)
         try await connection.commit(credential) {
             let lease = try store.acquireTrackingQuery(id: before.id); defer { lease.release() }
             try store.transaction { data in
@@ -402,22 +442,38 @@ struct KDYZMRefreshService {
                       data.shipments[index].backendRefreshGeneration == credential.generation,
                       data.records.contains(where: { $0.shipmentID == before.id }),
                       data.shipments[index].status != .archived else { throw KDYZMError.stale }
-                guard try KDYZMMerger.update(remote, local: &data.shipments[index], refresh: true) else { throw KDYZMError.empty }
+                let wasDelivered = data.shipments[index].status == .delivered
+                trace.begin(.merge)
+                guard try KDYZMMerger.update(remote, local: &data.shipments[index], refresh: true, operation: trace.operation) else { throw KDYZMError.empty }
+                newlyDelivered = !wasDelivered && data.shipments[index].status == .delivered
                 data.shipments[index].backendRefreshJobID = nil
                 data.shipments[index].backendRefreshGeneration = nil
+                trace.begin(.save)
                 // Record completion, code, group, location, source and reminder remain local.
             }
         }
         } catch {
             // Matching ID + identity + generation protects a newly accepted job.
             // A cleanup/authorization/lease failure remains an explicit error.
-            try await clearJob(expectedID, before: before, credential: credential)
-            reloadWidgets()
-            if error is CancellationError { throw error }
-            throw KDYZMTerminalResultError()
+            throw await cleanupFailure(error, id: expectedID, before: before, credential: credential, trace: trace, terminalResult: true)
         }
         reloadWidgets()
-        return false // Backend signed is not an automatic manual pickup completion.
+        return newlyDelivered // Shipment transition only; manual pickup remains local.
+    }
+    /// Cleanup records its own failure, never replaces the triggering reason/stage,
+    /// and never submits another POST. Successful cooldown cleanup preserves .queued.
+    private func cleanupFailure(_ original: Error, id expectedID: String, before: Shipment, credential: KDYZMCredential, trace: DiagnosticTrace, terminalResult: Bool = false) async -> Error {
+        let originalReason = TrackingRefreshService.diagnosticReason(original)
+        let originalStage = trace.stage ?? trace.failureStage ?? .merge
+        trace.fail(original)
+        trace.begin(.cleanup)
+        var cleanupReason: DiagnosticReason?
+        do { try await clearJob(expectedID, before: before, credential: credential); trace.finish() }
+        catch { cleanupReason = TrackingRefreshService.diagnosticReason(error); trace.fail(error) }
+        reloadWidgets()
+        if original is CancellationError { return original }
+        if cleanupReason == nil, !terminalResult { return original }
+        return KDYZMTerminalResultError(originalReason: originalReason, originalStage: originalStage, cleanupReason: cleanupReason)
     }
     private func clearJob(_ id: String, before: Shipment, credential: KDYZMCredential) async throws {
         try await connection.commit(credential) {

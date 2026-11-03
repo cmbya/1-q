@@ -202,6 +202,25 @@ final class SharedPickupStore {
         }
     }
 
+    // Import-only namespace checks: do not strand historical on-disk datasets.
+    // The sole cross-entity alias allowed is a legacy record and its own shipment.
+    private func validateImportIdentifiers(_ incoming: PickupDataset, against other: PickupDataset) throws {
+        let ticketIDs = Set((other.trainTickets ?? []).map(\.id))
+        let nonTicketIDs = Set(other.groups.map(\.id) + other.records.map(\.id) + other.shipments.map(\.id))
+        guard !incoming.groups.contains(where: { g in
+                  other.records.contains { $0.id == g.id } || other.shipments.contains { $0.id == g.id } || ticketIDs.contains(g.id)
+              }),
+              !incoming.records.contains(where: { r in
+                  other.groups.contains { $0.id == r.id } || other.shipments.contains { $0.id == r.id && r.shipmentID != $0.id } || ticketIDs.contains(r.id)
+              }),
+              !incoming.shipments.contains(where: { s in
+                  other.groups.contains { $0.id == s.id } || other.records.contains { $0.id == s.id && $0.shipmentID != s.id } || ticketIDs.contains(s.id)
+              }),
+              !(incoming.trainTickets ?? []).contains(where: { nonTicketIDs.contains($0.id) }) else {
+            throw PickupStorageError.invalidData("跨实体 ID 冲突，无法安全合并")
+        }
+    }
+
     private func write(_ data: PickupDataset) throws {
         try validate(data)
         let bytes = try encoder.encode(data)
@@ -301,15 +320,18 @@ final class SharedPickupStore {
         }
     }
 
-    // Widget callers own timeline reloads. Selection and expected-ID checking both
-    // happen under the dataset lock; stale buttons cannot advance a newer selection.
-    func browseTrainWidget(slot: TrainWidgetSlot, direction: Int, expectedTicketID: UUID?, now: Date = Date()) throws {
+    // Compare both selection and the complete binding under the dataset lock.
+    // Missing metadata from legacy buttons fails closed, even if the ticket is unchanged.
+    func browseTrainWidget(slot: TrainWidgetSlot, direction: Int, expectedTicketID: UUID?, expectedBinding: TrainWidgetBinding? = nil, now: Date = Date()) throws {
         guard direction == -1 || direction == 1 else {
             throw PickupStorageError.invalidData("切换方向必须为 -1 或 1。")
         }
         try transaction { data in
             let tickets = data.trainTickets ?? []
             let binding = TrainTicketSelection.binding(for: slot, in: data.trainWidgetBindings ?? [])
+            guard let expectedBinding, expectedBinding.slot == slot, binding == expectedBinding else {
+                throw PickupStorageError.staleCompletion
+            }
             let current = TrainTicketSelection.ticket(in: tickets, binding: binding, now: now)
             guard current?.id == expectedTicketID else { throw PickupStorageError.staleCompletion }
             let eligible = TrainTicketSelection.eligibleTickets(in: tickets, now: now)
@@ -359,6 +381,7 @@ final class SharedPickupStore {
                 incoming = PickupDataset(groups: [group], records: records, shipments: legacy)
             } else { incoming = try decoder.decode(PickupDataset.self, from: bytes) }
             try validate(incoming)
+            try validateImportIdentifiers(incoming, against: incoming)
             let numbers = incoming.shipments.map { CarrierDetector.sanitize($0.trackingNumber) }
             // Historical shipments may share a normalized number while retaining distinct IDs.
             // Import resolves matches against the pre-import dataset and rejects ambiguous mappings.
@@ -366,12 +389,15 @@ final class SharedPickupStore {
                 current.shipments.contains { CarrierDetector.sanitize($0.trackingNumber) == number }
             }
             return BackupPreview(incoming: incoming,
-                conflictingGroupIDs: incoming.groups.filter { g in current.groups.contains { $0.id == g.id && $0 != g } || current.records.contains { $0.id == g.id } || current.shipments.contains { $0.id == g.id } }.map(\.id),
-                conflictingRecordIDs: incoming.records.filter { r in current.records.contains { ($0.id == r.id && $0 != r) || (r.shipmentID != nil && $0.shipmentID == r.shipmentID && $0.id != r.id) } || current.groups.contains { $0.id == r.id } || current.shipments.contains { $0.id == r.id && r.shipmentID != $0.id } }.map(\.id),
-                conflictingShipmentIDs: incoming.shipments.filter { s in current.shipments.contains { $0.id == s.id && $0 != s } || current.groups.contains { $0.id == s.id } || current.records.contains { $0.id == s.id && $0.shipmentID != s.id } }.map(\.id),
+                conflictingGroupIDs: incoming.groups.filter { g in current.groups.contains { $0.id == g.id && $0 != g } || current.records.contains { $0.id == g.id } || current.shipments.contains { $0.id == g.id } || (current.trainTickets ?? []).contains { $0.id == g.id } }.map(\.id),
+                conflictingRecordIDs: incoming.records.filter { r in current.records.contains { ($0.id == r.id && $0 != r) || (r.shipmentID != nil && $0.shipmentID == r.shipmentID && $0.id != r.id) } || current.groups.contains { $0.id == r.id } || current.shipments.contains { $0.id == r.id && r.shipmentID != $0.id } || (current.trainTickets ?? []).contains { $0.id == r.id } }.map(\.id),
+                conflictingShipmentIDs: incoming.shipments.filter { s in current.shipments.contains { $0.id == s.id && $0 != s } || current.groups.contains { $0.id == s.id } || current.records.contains { $0.id == s.id && $0.shipmentID != s.id } || (current.trainTickets ?? []).contains { $0.id == s.id } }.map(\.id),
                 conflictingTrackingNumbers: conflicts,
                 conflictingTrainTicketIDs: (incoming.trainTickets ?? []).filter { ticket in
                     (current.trainTickets ?? []).contains { $0.id == ticket.id && $0 != ticket }
+                        || current.groups.contains { $0.id == ticket.id }
+                        || current.records.contains { $0.id == ticket.id }
+                        || current.shipments.contains { $0.id == ticket.id }
                 }.map(\.id),
                 conflictingTrainWidgetSlots: (incoming.trainWidgetBindings ?? []).filter { binding in
                     (current.trainWidgetBindings ?? []).contains { $0.slot == binding.slot && $0 != binding }
@@ -397,11 +423,9 @@ final class SharedPickupStore {
             if preview.hasConflicts && policy == nil { throw PickupStorageError.conflictConfirmationRequired }
             // Cross-entity identifiers are ambiguous and cannot safely be resolved by either policy.
             let incoming = preview.incoming
-            guard !incoming.groups.contains(where: { g in current.records.contains { $0.id == g.id } || current.shipments.contains { $0.id == g.id } }),
-                  !incoming.records.contains(where: { r in current.groups.contains { $0.id == r.id } || current.shipments.contains { $0.id == r.id && r.shipmentID != $0.id } }),
-                  !incoming.shipments.contains(where: { s in current.groups.contains { $0.id == s.id } || current.records.contains { $0.id == s.id && $0.shipmentID != s.id } }) else {
-                throw PickupStorageError.invalidData("跨实体 ID 冲突，无法安全合并")
-            }
+            try validate(incoming)
+            try validateImportIdentifiers(incoming, against: incoming)
+            try validateImportIdentifiers(incoming, against: current)
             func merge<T: Identifiable>(_ old: inout [T], _ incoming: [T]) where T.ID == UUID {
                 for item in incoming {
                     if let index = old.firstIndex(where: { $0.id == item.id }) {

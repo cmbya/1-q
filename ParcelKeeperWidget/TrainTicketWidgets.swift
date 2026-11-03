@@ -119,14 +119,14 @@ struct TrainTicketWidgetView: View {
 
     private var controls: some View {
         HStack(spacing: large ? 10 : 5) {
-            Button(intent: BrowseTrainTicketWidgetIntent(slot: entry.slot, direction: -1, expectedTicketID: entry.ticket?.id)) {
+            Button(intent: BrowseTrainTicketWidgetIntent(slot: entry.slot, direction: -1, expectedTicketID: entry.ticket?.id, expectedBinding: entry.binding)) {
                 Label("上一张", systemImage: "chevron.left")
             }
             .disabled(entry.isStorageError || entry.eligibleTicketIDs.isEmpty || (entry.ticket != nil && entry.eligibleTicketIDs.count == 1))
             Text("\(entry.position)/\(entry.eligibleTicketIDs.count)")
                 .monospacedDigit()
                 .accessibilityLabel("第 \(entry.position) 张，共 \(entry.eligibleTicketIDs.count) 张有效车票")
-            Button(intent: BrowseTrainTicketWidgetIntent(slot: entry.slot, direction: 1, expectedTicketID: entry.ticket?.id)) {
+            Button(intent: BrowseTrainTicketWidgetIntent(slot: entry.slot, direction: 1, expectedTicketID: entry.ticket?.id, expectedBinding: entry.binding)) {
                 Label("下一张", systemImage: "chevron.right")
             }
             .disabled(entry.isStorageError || entry.eligibleTicketIDs.isEmpty || (entry.ticket != nil && entry.eligibleTicketIDs.count == 1))

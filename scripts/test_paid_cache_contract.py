@@ -1,52 +1,52 @@
 #!/usr/bin/env python3
-"""Offline source assertions, NOT Swift compilation/XCTest/runtime verification."""
+"""Offline source contracts only; NOT Swift/XCTest/runtime verification."""
 from pathlib import Path
 import unittest
 ROOT = Path(__file__).resolve().parents[1]
 def text(path):
     return (ROOT / path).read_text()
 class PaidCacheContract(unittest.TestCase):
-    def test_client_cache_precedes_paid_dispatch(self):
+    def test_clients_always_dispatch_without_cache_io(self):
         for name in ['Tmini', 'UAPI']:
             source = text(f'ParcelKeeper/Services/{name}TrackingClient.swift')
-            query = source.split('    func query(trackingNumber:', 1)[1]
-            self.assertLess(query.index('cache.lookup(identity)'), query.index('network.data(for: request)'))
-            self.assertIn('let cachedResult = try cache.lookup(identity)', source)
-            self.assertIn('if !ignoreCache, let cached = cachedResult', source)
-            self.assertIn('ignoreCache: Bool = false', source)
-            self.assertIn('self.ignoreCache = ignoreCache', source)
-            self.assertIn('cache.store(', query)
-            self.assertIn('catch let error as PaidTrackingCacheError { throw error }', query)
-            if name == 'Tmini':
-                self.assertLess(query.index('cache.lookup(identity)'), query.index('usage.recordDispatch()'))
-            else:
-                self.assertLess(query.index('cache.lookup(identity)'), query.index('settings.recordUsage('))
-    def test_boundaries_storage_and_phone_identity(self):
-        source = text('ParcelKeeper/Services/PaidTrackingCache.swift')
-        for token in ['age >= 0 && age < ttl', 'case .delivered: ttl = 604800', 'case .outForDelivery: ttl = 1800', 'case .readyForPickup: ttl = 21600', 'default: ttl = 7200', 'result.isCached = true', 'isExcludedFromBackup = true',
-                      'LOCK_EX | LOCK_NB', '.atomic', 'entries.prefix(256)', '8_000_000', 'validateIdentity(identity)',
-                      '$0.startedAt > startedAt', '$0.result.queriedAt > result.queriedAt', 'UUID().uuidString']:
-            self.assertIn(token, source)
-        identity = source.split('struct Identity:', 1)[1].split('private struct Entry', 1)[0]
-        self.assertNotIn('let phone:', identity)
-        self.assertNotIn('let key:', identity)
-        self.assertNotIn('SHA256.hash(data: Data(phone', source)
-    def test_feedback_and_batch_cache_not_charged(self):
-        service = text('ParcelKeeper/Services/TrackingRefreshService.swift')
-        for token in ['cacheFeedback(result.isCached)', 'report.cachedCount += 1', 'report.uapiCount -= 1', 'report.tminiCount -= 1']:
-            self.assertIn(token, service)
-        self.assertIn('ignoreCache: ignoreCache', service)
+            for forbidden in ['cache.lookup(', 'cache.store(', 'cache.identity(', 'self.cache =', 'self.ignoreCache =']:
+                self.assertNotIn(forbidden, source)
+            self.assertEqual(source.count('await network.data(for: request)'), 1)
+            self.assertIn('.reloadIgnoringLocalCacheData', source)
+    def test_charging_and_configuration_guards_survive(self):
+        tmini = text('ParcelKeeper/Services/TminiTrackingClient.swift')
+        self.assertLess(tmini.index('try usage.recordDispatch()'), tmini.index('await network.data(for: request)'))
+        self.assertIn('try validateConfiguration(token)', tmini)
+        uapi = text('ParcelKeeper/Services/UAPITrackingClient.swift')
+        self.assertIn('settings.recordUsage(http, generation: credential.generation', uapi)
+        self.assertIn('try settings.validateCredential(credential)', uapi)
+        self.assertIn('URLQueryItem(name: "phone", value: phone)', uapi)
+    def test_ui_no_cache_controls_and_explicit_network_charge(self):
         view = text('ParcelKeeper/Views/ShipmentDetailView.swift')
-        self.assertIn('.confirmationDialog("忽略缓存并发起付费查询？"', view)
-        self.assertIn('refreshLogistics(mode: mode, ignoreCache: true)', view)
-        for path in ['ParcelKeeper/Views/ShipmentDetailView.swift', 'ParcelKeeper/Intents/ShipmentChoiceIntent.swift', 'ParcelKeeper/Intents/TrackingRefreshIntents.swift']:
-            source = text(path)
-            self.assertIn('cacheFeedback: { isCached = $0 }', source)
-            self.assertIn('isCached: isCached', source)
-    def test_xctest_coverage_declared(self):
-        source = text('ParcelKeeperTests/PaidTrackingCacheTests.swift')
-        self.assertEqual(source.count('    func test'), 7)
-        self.assertIn('XCTAssertEqual(try usage.summary().points, 4)', source)
-        self.assertIn('XCTAssertEqual(settings.usageSnapshot(), billing)', source)
+        for token in ['forceQueryMode', 'ignoreCache', '忽略缓存', '缓存时长', '普通刷新优先使用缓存']:
+            self.assertNotIn(token, view)
+        self.assertIn('每次查询都会联网', view)
+        self.assertIn('可能计费', view)
+    def test_actual_channel_and_latest_collection_use_shared_resolvers(self):
+        view = text('ParcelKeeper/Views/ShipmentDetailView.swift')
+        self.assertIn('LabeledContent("实际默认查询渠道", value: resolvedChannelName(shipment))', view)
+        self.assertIn('TrackingRefreshService.resolvedChannel(shipment)', view)
+        self.assertIn('TrackingRefreshService.resolvedChannel(current, mode: mode)', view)
+        self.assertIn('catch { return "不可用" }', view)
+        uapi = text('ParcelKeeper/Services/UAPITrackingClient.swift')
+        self.assertIn('MallDeliveryState.recipientCollected(latest: latest.track.context)', uapi)
+        self.assertIn('collected ? .delivered', uapi)
+        for file, token in [
+            ('PaidTrackingCacheTests', 'testTminiRepeatedQueriesDispatchAndAddFourPointsEachAndDisabledNeverSends'),
+            ('PaidTrackingCacheTests', 'testUAPIRepeatedQueriesDispatchUpdateBillingAndNeverReturnStaleSuccess'),
+            ('AuditHighRegressionTests', 'testQueriesIgnoreCorruptAndOversizedLegacyCacheWithoutChangingIt'),
+            ('UAPITrackingClientTests', 'testLatestRecipientCollectionCorrectsStaleTransportButNotAgentOrInstructions')
+        ]:
+            self.assertIn(token, text(f'ParcelKeeperTests/{file}.swift'))
+    def test_legacy_phone_lifecycle_remains_available(self):
+        source = text('ParcelKeeper/Services/PaidTrackingCache.swift')
+        self.assertIn('func mutatePhone(', source)
+        self.assertIn('guard try keys.read() == nil', source)
+        self.assertIn('历史兼容', source)
 if __name__ == '__main__':
     unittest.main()

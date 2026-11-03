@@ -159,7 +159,8 @@ final class KDYZMTests: XCTestCase {
         XCTAssertEqual(d.shipments.map(\.originPlatform), platforms.map { Optional($0) })
         let ids = d.shipments.map(\.id)
         let next = try KDYZMMerger.apply(s, origin: "https://example.com", to: &d)
-        XCTAssertEqual(next.imported, 0); XCTAssertEqual(next.updated, platforms.count)
+        XCTAssertEqual(next.imported, 0); XCTAssertEqual(next.updated, 0)
+        XCTAssertEqual(next.unchanged, platforms.count)
         XCTAssertEqual(d.shipments.map(\.id), ids)
         XCTAssertEqual(d.records.count, platforms.count)
         for i in platforms.indices {

@@ -23,7 +23,8 @@ class AuditMediumCoreContract(unittest.TestCase):
         self.assertIn('guard try keys.read() == nil', mutation)
         phones = service('ShipmentPhoneStore')
         self.assertEqual(phones.count('cache.mutatePhone('), 2)
-        self.assertIn('try read(for: shipment) != phone', phones)
+        self.assertIn('let unchanged = try read(for: shipment) == phone', phones)
+        self.assertNotIn('locked', mutation)
         shared = service('SharedPickupStore')
         self.assertIn('try clear(identity.shipment)', shared)
 
@@ -32,7 +33,9 @@ class AuditMediumCoreContract(unittest.TestCase):
         terminal = source.split('let snapshot = try await client.snapshot', 1)[1]
         self.assertIn('catch {', terminal)
         self.assertIn('try await clearJob(expectedID, before: before, credential: credential)', terminal)
-        self.assertIn('throw error', terminal)
+        self.assertIn('throw await cleanupFailure(error,', terminal)
+        self.assertIn('if original is CancellationError { return original }', terminal)
+        self.assertIn('originalReason: originalReason, originalStage: originalStage, cleanupReason: cleanupReason', terminal)
         self.assertIn('data.shipments[i].backendRefreshGeneration == (before.backendRefreshJobID == id ? before.backendRefreshGeneration : credential.generation)', source)
         self.assertIn('data.shipments[index].backendRefreshGeneration == credential.generation', source)
         self.assertEqual(source.count('method: "POST"'), 1)
@@ -40,8 +43,9 @@ class AuditMediumCoreContract(unittest.TestCase):
 
     def test_runtime_regressions_are_declared_not_executed_here(self):
         source = (ROOT / 'ParcelKeeperTests/AuditMediumCoreTests.swift').read_text()
-        self.assertEqual(source.count('    func test'), 8)
-        for token in ['testPhoneABAWithoutQueries', 'testAppDeleteClearsBothSecrets',
+        self.assertEqual(source.count('    func test'), 9)
+        for token in ['testPhoneSavesAndClearRetireLegacySecretsWithoutCacheAccess', 'testAppDeleteClearsBothSecrets',
+                      'testLegacySecretDeletionRequiresSuccessfulEmptyReadback',
                       'testPhoneDeletionFailureFailsClosed', 'testFailedPhoneSaveAlreadyInvalidates',
                       'testOldMainAppButtonRejects', 'testTerminalOldConflictAndNewJobRace',
                       'testShortcutNeverReopens', 'testRefreshPreservesManualCompletion']:

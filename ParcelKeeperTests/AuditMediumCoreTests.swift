@@ -8,9 +8,11 @@ final class AuditMediumCoreTests: XCTestCase {
         var accounts: [String: String] = [:]
         var failDelete = false
         var failSave = false
-        func read() throws -> String? { value }
+        var ignoreDelete = false
+        var failRead = false
+        func read() throws -> String? { if failRead { throw UAPIError.keychain }; return value }
         func save(_ key: String) throws { if failSave { throw UAPIError.keychain }; value = key }
-        func delete() throws { if failDelete { throw UAPIError.keychain }; value = nil }
+        func delete() throws { if failDelete { throw UAPIError.keychain }; if !ignoreDelete { value = nil } }
         func read(endpoint: String) throws -> String? { accounts[endpoint] }
         func save(_ key: String, endpoint: String) throws { if failSave { throw UAPIError.keychain }; accounts[endpoint] = key }
         func delete(endpoint: String) throws { if failDelete { throw UAPIError.keychain }; accounts.removeValue(forKey: endpoint) }
@@ -73,23 +75,44 @@ final class AuditMediumCoreTests: XCTestCase {
         _ = try service.upsert(delivered, inferLogistics: false)
         XCTAssertFalse(try store.snapshot().records[0].isCompleted)
     }
-    func testPhoneABAWithoutQueriesAndSameValueReuseAndClear() throws {
+    func testPhoneSavesAndClearRetireLegacySecretsWithoutCacheAccess() throws {
         let cacheKeys = Keys(); let phoneKeys = Keys()
-        let cache = PaidTrackingCache(directory: root.appendingPathComponent("cache"), phoneKeys: { _ in cacheKeys })
+        // A regular file cannot be opened as a cache directory/lock.
+        let blocked = root.appendingPathComponent("not-a-directory")
+        let original = Data("preserve historical file".utf8)
+        try original.write(to: blocked)
+        let cache = PaidTrackingCache(directory: blocked, phoneKeys: { _ in cacheKeys })
         let phones = ShipmentPhoneStore(keys: phoneKeys, cache: cache)
-        try phones.save("9276", for: shipment)
-        let a = try cache.identity(channel: "uapi", number: shipment.trackingNumber, generation: "g", phone: "9276")
-        try phones.save("9276", for: shipment)
-        XCTAssertEqual(a, try cache.identity(channel: "uapi", number: shipment.trackingNumber, generation: "g", phone: "9276"))
-        try phones.save("8351", for: shipment)
-        try phones.save("9276", for: shipment) // no intervening cache.identity/query
-        XCTAssertThrowsError(try cache.lookup(a))
-        let again = try cache.identity(channel: "uapi", number: shipment.trackingNumber, generation: "g", phone: "9276")
-        XCTAssertNotEqual(a.phoneToken, again.phoneToken)
+        for phone in ["9276", "9276", "8351", "9276"] {
+            cacheKeys.value = "legacy-context\n9276\nsecret-token"
+            try phones.save(phone, for: shipment)
+            XCTAssertNil(cacheKeys.value, "Even same-value saves retire historical secrets")
+            XCTAssertEqual(try phones.read(for: shipment), phone)
+        }
+        cacheKeys.value = "legacy-context\n9276\nsecret-token"
         try phones.clear(for: shipment)
         XCTAssertNil(cacheKeys.value)
         XCTAssertNil(try phones.read(for: shipment))
-        XCTAssertThrowsError(try cache.lookup(again))
+        XCTAssertEqual(try Data(contentsOf: blocked), original)
+    }
+    func testLegacySecretDeletionRequiresSuccessfulEmptyReadback() throws {
+        let legacy = Keys(); let authoritative = Keys()
+        let cache = PaidTrackingCache(directory: root.appendingPathComponent("unused"), phoneKeys: { _ in legacy })
+        let phones = ShipmentPhoneStore(keys: authoritative, cache: cache)
+        try phones.save("9276", for: shipment)
+        legacy.value = "historical-secret"
+        legacy.ignoreDelete = true
+        XCTAssertThrowsError(try phones.save("8351", for: shipment))
+        XCTAssertThrowsError(try phones.clear(for: shipment))
+        XCTAssertEqual(try phones.read(for: shipment), "9276")
+        legacy.ignoreDelete = false
+        legacy.failRead = true
+        XCTAssertThrowsError(try phones.clear(for: shipment))
+        XCTAssertEqual(try phones.read(for: shipment), "9276")
+        legacy.failRead = false
+        try phones.clear(for: shipment)
+        XCTAssertNil(legacy.value)
+        XCTAssertNil(try phones.read(for: shipment))
     }
     func testPhoneDeletionFailureFailsClosedAndRetirementRetriesBothSecrets() throws {
         let cacheKeys = Keys(); let phoneKeys = Keys()

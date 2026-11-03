@@ -11,17 +11,25 @@ struct BrowseTrainTicketWidgetIntent: AppIntent {
     @Parameter(title: "组件槽位") var slot: String
     @Parameter(title: "方向") var direction: Int
     @Parameter(title: "当前车票快照") var expectedTicketID: String?
+    @Parameter(title: "当前绑定快照") var expectedBinding: String?
 
     init() {}
-    init(slot: TrainWidgetSlot, direction: Int, expectedTicketID: UUID?) {
+    init(slot: TrainWidgetSlot, direction: Int, expectedTicketID: UUID?, expectedBinding: TrainWidgetBinding?) {
         self.slot = slot.rawValue
         self.direction = direction
         self.expectedTicketID = expectedTicketID?.uuidString
+        if let expectedBinding {
+            self.expectedBinding = try? String(data: JSONEncoder().encode(expectedBinding), encoding: .utf8)
+        }
     }
 
     func perform() async throws -> some IntentResult {
         guard let target = TrainWidgetSlot(rawValue: slot), direction == -1 || direction == 1 else {
             throw PickupStorageError.invalidData("组件槽位或切换方向无效。")
+        }
+        guard let rawBinding = expectedBinding, let bytes = rawBinding.data(using: .utf8),
+              let binding = try? JSONDecoder().decode(TrainWidgetBinding.self, from: bytes), binding.slot == target else {
+            throw PickupStorageError.staleCompletion
         }
         let expected: UUID?
         if let raw = expectedTicketID {
@@ -35,7 +43,7 @@ struct BrowseTrainTicketWidgetIntent: AppIntent {
         }
         let group = try AppGroupResolver.groupID()
         let store = try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData)
-        try store.browseTrainWidget(slot: target, direction: direction, expectedTicketID: expected)
+        try store.browseTrainWidget(slot: target, direction: direction, expectedTicketID: expected, expectedBinding: binding)
         WidgetCenter.shared.reloadTimelines(ofKind: target.kind)
         return .result()
     }

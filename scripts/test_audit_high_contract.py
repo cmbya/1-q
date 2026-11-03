@@ -8,9 +8,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 class AuditHighContract(unittest.TestCase):
     def test_instruction_is_not_completed_fact(self):
         source = (ROOT / 'ParcelKeeper/Services/MallDeliveryState.swift').read_text()
-        collected = source.split('let collected =', 1)[1].split('if collected', 1)[0]
+        collected = source.split('static func recipientCollected(latest: String) -> Bool {', 1)[1].split('private static func isConditional', 1)[0]
         # Only positive fact literals, not the request/condition exclusion list.
-        positive = re.search(r'return recipientCollected \|\| \[(.*?)\]\.contains', collected, re.S)
+        positive = re.search(r'\|\|\s*\[(.*?)\]\.contains', collected, re.S)
         if positive is None:
             self.fail('Missing explicit recipient/fact classification')
         terms = re.findall(r'"([^"\n]+)"', positive.group(1))
@@ -22,13 +22,12 @@ class AuditHighContract(unittest.TestCase):
         station = source.split('let station =', 1)[1].split('if station', 1)[0]
         self.assertTrue(any(term in '已签收，菜鸟驿站代收' for term in re.findall(r'"([^"\n]+)"', station)))
 
-    def test_force_still_reads_cache_before_dispatch(self):
+    def test_paid_queries_do_not_access_legacy_cache(self):
         for name in ['UAPITrackingClient', 'TminiTrackingClient']:
             source = (ROOT / f'ParcelKeeper/Services/{name}.swift').read_text()
-            query = source.split('let identity = try cache.identity', 1)[1]
-            before_dispatch = query.split('network.data(for:', 1)[0]
-            self.assertNotIn('if !ignoreCache, let cached = try cache.lookup', before_dispatch)
-            self.assertRegex(before_dispatch, r'let cachedResult = try cache.lookup\(identity\)')
+            for token in ['cache.identity(', 'cache.lookup(', 'cache.store(']:
+                self.assertNotIn(token, source)
+            self.assertEqual(source.count('await network.data(for: request)'), 1)
 
 if __name__ == '__main__':
     unittest.main()

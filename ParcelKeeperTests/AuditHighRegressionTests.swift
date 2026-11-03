@@ -13,7 +13,7 @@ final class AuditHighRegressionTests: XCTestCase {
         XCTAssertNil(MallDeliveryState.resolve(latest: "尚未完成取件"))
     }
 
-    func testForcedQueriesFailBeforeDispatchForCorruptAndOversizedCache() async throws {
+    func testQueriesIgnoreCorruptAndOversizedLegacyCacheWithoutChangingIt() async throws {
         for oversized in [false, true] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -28,25 +28,30 @@ final class AuditHighRegressionTests: XCTestCase {
             let network = UAPITrackingClientTests.Network()
             let uapi = UAPISettingsService(defaults: defaults, keys: UAPITrackingClientTests.Keys())
             try uapi.saveKey("synthetic-key"); try uapi.setEnabled(true, privacyConfirmed: true)
-            let billing = uapi.usageSnapshot()
-            do {
-                _ = try await UAPITrackingClient(settings: uapi, network: network, cache: cache, ignoreCache: true)
-                    .query(trackingNumber: "YT1234567890123", carrierCode: nil, phone: nil, refresh: true)
-                XCTFail("Corrupt cache must block payment")
-            } catch {}
-            XCTAssertEqual(network.requests.count, 0)
-            XCTAssertEqual(uapi.usageSnapshot(), billing)
+            let original = try Data(contentsOf: directory.appendingPathComponent("success-v1.json"))
+            phoneKeys.failure = true // No obsolete cache identity Keychain dependency either.
+            network.body = try JSONSerialization.data(withJSONObject: ["tracking_number": "YT1234567890123", "status_code": "in_transit", "tracks": [["time": "2026-11-02 10:00:00", "context": "运输中"]]])
+            network.headers = ["UAPI-Credits-Charged": "40"]
+            let client = UAPITrackingClient(settings: uapi, network: network, cache: cache)
+            for _ in 0..<2 {
+                let result = try await client.query(trackingNumber: "YT1234567890123", carrierCode: nil, phone: "9276", refresh: false)
+                XCTAssertFalse(result.isCached)
+            }
+            XCTAssertEqual(network.requests.count, 2)
+            XCTAssertEqual(uapi.usageSnapshot()?.chargedCredits, 40)
             let tmini = TminiSettingsService(defaults: defaults, keys: UAPITrackingClientTests.Keys())
             try tmini.saveKey("synthetic-key"); try tmini.setEnabled(true, privacyConfirmed: true)
             let usage = TminiUsageStore(directory: directory)
             let points = try usage.summary().points
-            do {
-                _ = try await TminiTrackingClient(settings: tmini, network: network, usage: usage, cache: cache, ignoreCache: true)
-                    .query(trackingNumber: "YT1234567890123")
-                XCTFail("Corrupt cache must block payment")
-            } catch {}
-            XCTAssertEqual(network.requests.count, 0)
-            XCTAssertEqual(try usage.summary().points, points)
+            network.body = try JSONSerialization.data(withJSONObject: ["code": "0000000000", "data": ["serviceCode": 0, "packageInfoList": [["trackingNo": "YT1234567890123", "state": "TRANSPORT", "trackingDetails": [["time": "20261102100000", "context": "运输中"]]]]]])
+            let tminiClient = TminiTrackingClient(settings: tmini, network: network, usage: usage, cache: cache)
+            for _ in 0..<2 {
+                let result = try await tminiClient.query(trackingNumber: "YT1234567890123")
+                XCTAssertFalse(result.isCached)
+            }
+            XCTAssertEqual(network.requests.count, 4)
+            XCTAssertEqual(try usage.summary().points, points + 8)
+            XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("success-v1.json")), original)
         }
     }
 }

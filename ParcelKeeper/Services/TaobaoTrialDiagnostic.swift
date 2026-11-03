@@ -13,12 +13,11 @@ struct TaobaoTrialDiagnostic: LocalizedError {
     init(stage: String, reason: TaobaoTrialError, status: Int?, root: [String: Any]?, transport: String = "无", attempt: Int = 1, byteCount: Int? = nil) {
         self.stage = stage; self.reason = reason; self.status = status
         self.transport = transport; self.attempt = attempt; self.byteCount = byteCount
-        let allowed: Set<String> = ["SUCCESS", "FAIL_SYS_SESSION_EXPIRED", "FAIL_SYS_TOKEN_EXOIRED", "FAIL_SYS_TOKEN_EXPIRED", "FAIL_SYS_TOKEN_EMPTY", "FAIL_SYS_USER_VALIDATE", "FAIL_SYS_ILLEGAL_ACCESS", "FAIL_SYS_API_NOT_FOUNDED", "FAIL_SYS_API_STOP_SERVICE", "FAIL_SYS_PARAM_MISSING", "FAIL_SYS_PARAM_FORMAT_ERROR", "FAIL_SYS_TRAFFIC_LIMIT", "FAIL_SYS_SERVICE_FAULT", "FAIL_SYS_LOGIN_REQUIRED"]
+        let allowed: Set<String> = ["SUCCESS", "FAIL_SYS_SESSION_EXPIRED", "FAIL_SYS_TOKEN_EXOIRED", "FAIL_SYS_TOKEN_EXPIRED", "FAIL_SYS_TOKEN_EMPTY", "FAIL_SYS_USER_VALIDATE", "FAIL_SYS_ILLEGAL_ACCESS", "FAIL_SYS_API_NOT_FOUNDED", "FAIL_SYS_API_STOP_SERVICE", "FAIL_SYS_PARAM_MISSING", "FAIL_SYS_PARAM_FORMAT_ERROR", "FAIL_SYS_TRAFFIC_LIMIT", "FAIL_SYS_SERVICE_FAULT", "FAIL_SYS_LOGIN_REQUIRED", "FAIL_BIZ_ORDER_NOT_FOUND"]
         let raw = root?["ret"] as? [String] ?? []
         codes = raw.isEmpty ? "缺少ret" : raw.prefix(4).map {
             let code = String($0.components(separatedBy: "::")[0])
-            let safeBusinessCode = code.count <= 80 && code.range(of: #"^(FAIL|ERROR)_[A-Z]+(?:_[A-Z]+)*$"#, options: .regularExpression) != nil
-            return allowed.contains(code) || safeBusinessCode ? code : "未识别返回码"
+            return allowed.contains(code) ? code : "未识别返回码"
         }.joined(separator: ",")
         if let root {
             let data = root["data"] as? [String: Any]

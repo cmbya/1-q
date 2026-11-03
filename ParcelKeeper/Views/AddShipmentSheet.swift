@@ -35,6 +35,10 @@ struct AddShipmentSheet: View {
         _pickupCode = State(initialValue: draft.pickupCode)
     }
 
+    private var validatedTrackingNumber: String? {
+        try? ShipmentShortcutParser.number(trackingNumber)
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -113,7 +117,7 @@ struct AddShipmentSheet: View {
                             Text("保存").fontWeight(.semibold)
                         }
                     }
-                    .disabled(CarrierDetector.sanitize(trackingNumber).count < 8 || isSaving)
+                    .disabled(validatedTrackingNumber == nil || isSaving)
                 }
             }
             .alert("这个运单已经保存过了", isPresented: $showingDuplicateAlert) {
@@ -139,8 +143,7 @@ struct AddShipmentSheet: View {
     }
 
     private func intelligentlyUpdateCarrier(for value: String) {
-        let normalized = CarrierDetector.sanitize(value)
-        guard normalized.count >= 8 else { return }
+        guard let normalized = try? ShipmentShortcutParser.number(value) else { return }
         let detection = CarrierDetector.detect(normalized)
         guard detection.carrier != CarrierDetector.unknown, detection.confidence >= 0.75 else { return }
         selectedCarrier = detection.carrier
@@ -152,7 +155,10 @@ struct AddShipmentSheet: View {
         let phone = queryPhone.isEmpty ? nil : queryPhone
         let shouldRemind = reminderEnabled
         let scheduledDate = reminderDate
-        let normalized = CarrierDetector.sanitize(trackingNumber)
+        guard let normalized = validatedTrackingNumber else {
+            saveError = ShipmentShortcutError.invalidNumber.localizedDescription
+            return
+        }
         let shipment = Shipment(
             trackingNumber: normalized,
             carrierName: selectedCarrier.name,
@@ -180,9 +186,7 @@ struct AddShipmentSheet: View {
             var queryWarning: String?
             if shouldQuery {
                 do {
-                    var isCached = false
-                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: phone, cacheFeedback: { isCached = $0 })
-                    if isCached { queryWarning = "已使用本地成功查询缓存；未联网、未新增收费，保留原查询时间。" }
+                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: phone)
                     try store.reload()
                     queryPhone = ""
                 } catch { queryWarning = "物流查询未完成：\(error.localizedDescription)"; try? store.reload() }

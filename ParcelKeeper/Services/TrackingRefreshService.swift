@@ -21,6 +21,7 @@ struct TrackingRefreshReport {
         let reason: String
     }
     var failures: [Failure] = []
+    var queued: [Failure] = []
     var failed: Int { failures.count }
     var newlyDelivered = 0
     var remaining = 0
@@ -33,6 +34,8 @@ struct TrackingRefreshReport {
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
         if let stoppedReason { value += " \(stoppedReason)" }
         for failure in failures { value += "\n\(failure.trackingNumber)：\(failure.reason)" }
+        if !queued.isEmpty { value += " 后台处理中／排队 \(queued.count) 票（不计失败）。" }
+        for pending in queued { value += "\n\(pending.trackingNumber)：\(pending.reason)" }
         return value
     }
 }
@@ -50,6 +53,7 @@ struct TrackingRefreshService {
     var mallClient: any MallTrackingQuerying = MallTrackingClient()
     var backendConnection: KDYZMConnection = .shared
     var backendClient = KDYZMClient()
+    var diagnosticLog: DiagnosticLog = .shared
 
     private enum Route: Equatable {
         case backend
@@ -89,6 +93,120 @@ struct TrackingRefreshService {
         }
         return .uapi
     }
+    static func resolvedChannel(_ shipment: Shipment, mode: TrackingRefreshMode = .automatic) throws -> String {
+        try route(shipment, mode: mode).source
+    }
+    static func routingDiagnostics(_ shipment: Shipment, mode: TrackingRefreshMode) -> [DiagnosticMetric: Int] {
+        [.hasBackendBinding: shipment.backendBinding == nil ? 0 : 1,
+         .explicitPaidChannel: ["uapi", "tmini"].contains(shipment.refreshChannel ?? "") ? 1 : 0,
+         .forcedPaidMode: mode == .uapi || mode == .tmini ? 1 : 0]
+    }
+    private static func routeEvent(_ route: Route) -> DiagnosticEvent {
+        switch route {
+        case .backend: return .trackingRouteBackend
+        case .taobao: return .trackingRouteTaobao
+        case .tmini: return .trackingRouteTmini
+        case .uapi: return .trackingRouteUAPI
+        case .mall: return .trackingRoutePDD
+        }
+    }
+    static func diagnosticReason(_ error: Error) -> DiagnosticReason {
+        if error is CancellationError { return .cancelled }
+        if let failure = error as? KDYZMTerminalResultError { return failure.originalReason }
+        if let failure = error as? TrackingTimeRejection { return failure.reason }
+        if let failure = error as? KDYZMSyncFailure {
+            switch failure {
+            case .decoding: return .parse
+            case .validation: return .validation
+            case .association: return .association
+            case .localRead, .localWrite, .presentation: return .storage
+            }
+        }
+        if error is PaidTrackingCacheError { return .storage }
+        if let failure = error as? MallDirectError { return diagnosticReason(failure.reason) }
+        if let failure = error as? MallWebError {
+            switch failure {
+            case .authentication: return .authentication
+            case .verification: return .verification
+            case .identityMismatch: return .identity
+            case .noTrace: return .noTrace
+            case .timeout: return .timeout
+            case .unsupported: return .unsupported
+            }
+        }
+        if let failure = error as? TaobaoTrackingError {
+            switch failure {
+            case .authentication: return .authentication
+            case .verification: return .verification
+            case .identityMismatch, .missingBinding: return .identity
+            case .noTrace: return .noTrace
+            case .unsupported: return .unsupported
+            }
+        }
+        if let failure = error as? ShipmentShortcutError {
+            switch failure {
+            case .olderUpdate: return .olderEvent
+            case .statusConflict: return .statusConflict
+            default: return .identity
+            }
+        }
+        if let failure = error as? KDYZMError {
+            switch failure {
+            case .queued: return .queued
+            case .unauthorized, .forbidden: return .authentication
+            case .stale: return .identity
+            case .empty: return .noTrace
+            case .network: return .network
+            case .rateLimited: return .rateLimited
+            case .keychain: return .storage
+            case .origin, .pairing, .alreadyBound: return .configuration
+            case .invalid: return .parse
+            case .failed: return .unavailable
+            case .jobGone: return .jobGone
+            }
+        }
+        if let failure = error as? TminiError {
+            switch failure {
+            case .configurationChanged: return .configurationChanged
+            case .authentication: return .authentication
+            case .notConfigured, .consent, .invalidKey: return .configuration
+            case .cancelled: return .cancelled
+            case .quota: return .quota
+            case .rateLimited: return .rateLimited
+            case .accounting: return .accounting
+            case .keychain: return .storage
+            case .noData: return .noTrace
+            case .invalidResponse: return .parse
+            case .invalidNumber: return .identity
+            case .maintenance: return .unavailable
+            case .unavailable: return .network
+            }
+        }
+        if let failure = error as? UAPIError {
+            switch failure {
+            case .authentication: return .authentication
+            case .notConfigured, .privacyConsentRequired, .invalidKey: return .configuration
+            case .quota: return .quota
+            case .rateLimited: return .rateLimited
+            case .noData: return .noTrace
+            case .invalidResponse: return .parse
+            case .invalidPhone, .invalidTrackingNumber: return .identity
+            case .keychain: return .storage
+            case .unavailable: return .network
+            case .cancelled: return .cancelled
+            }
+        }
+        if let failure = error as? PickupStorageError {
+            switch failure {
+            case .queryInProgress: return .busy
+            case .stalePreview, .notFound: return .identity
+            default: return .storage
+            }
+        }
+        if let failure = error as? URLError { return failure.code == .cancelled ? .cancelled : (failure.code == .timedOut ? .timeout : .network) }
+        if error is POSIXError { return .storage }
+        return .unknown
+    }
     func setRefreshChannel(id: UUID, channel: String?) throws {
         guard channel == nil || channel == "uapi" || channel == "tmini" else { throw TaobaoTrackingError.unsupported }
         let lease = try store.acquireTrackingQuery(id: id)
@@ -101,6 +219,7 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let failure = error as? TrackingTimeRejection { return failure.localizedDescription }
         if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
         if let failure = error as? TminiError { return failure.localizedDescription }
         if let terminal = error as? KDYZMTerminalResultError { return terminal.localizedDescription }
@@ -167,8 +286,8 @@ struct TrackingRefreshService {
         if let phone { try phones.save(phone, for: shipment) }
         else { try phones.clear(for: shipment) }
     }
-    static func live(ignoreCache: Bool = false) throws -> TrackingRefreshService {
-        TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient(ignoreCache: ignoreCache), tminiClient: TminiTrackingClient(ignoreCache: ignoreCache))
+    static func live(ignoreCache _: Bool = false) throws -> TrackingRefreshService {
+        TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient(), tminiClient: TminiTrackingClient())
     }
     static func isPending(_ shipment: Shipment) -> Bool {
         shipment.status != .delivered && shipment.status != .archived
@@ -184,21 +303,39 @@ struct TrackingRefreshService {
     }
     /// Returns whether this update newly completed a shipment.
     func refresh(id: UUID, phone: String? = nil, expectedTrackingNumber: String? = nil, pendingOnly: Bool = false, mode: TrackingRefreshMode = .automatic, cacheFeedback: (Bool) -> Void = { _ in }) async throws -> Bool {
+        let logID = UUID()
+        diagnosticLog.record(.trackingStarted, operation: logID)
+        let trace = DiagnosticTrace(operation: logID, log: diagnosticLog)
+        trace.begin(.preflight)
+        do {
+            let result = try await performRefresh(id: id, phone: phone, expectedTrackingNumber: expectedTrackingNumber, pendingOnly: pendingOnly, mode: mode, cacheFeedback: cacheFeedback, logID: logID, trace: trace)
+            trace.finish()
+            diagnosticLog.record(.trackingFinished, operation: logID)
+            return result
+        } catch {
+            let terminal = error as? KDYZMTerminalResultError
+            let stage = terminal?.originalStage ?? trace.failureStage ?? trace.stage ?? .preflight
+            trace.fail(error)
+            diagnosticLog.record(.trackingFailed, operation: logID, reason: Self.diagnosticReason(error), stage: stage)
+            throw error
+        }
+    }
+    private func performRefresh(id: UUID, phone: String?, expectedTrackingNumber: String?, pendingOnly: Bool, mode: TrackingRefreshMode, cacheFeedback: (Bool) -> Void, logID: UUID, trace: DiagnosticTrace) async throws -> Bool {
+        try Task.checkCancellation()
+        trace.begin(.localRead)
         // Resolve backend before the legacy lease: no lease spans backend networking.
         // Explicit UAPI override is honored, but backend failures never fall back to it.
         if let before = try store.snapshot().shipments.first(where: { $0.id == id }),
            (try? Self.route(before, mode: mode)) == .backend {
             guard before.status != .archived, !pendingOnly || Self.isPending(before) else { throw ShipmentShortcutError.statusConflict }
             if let expectedTrackingNumber, CarrierDetector.sanitize(before.trackingNumber) != expectedTrackingNumber { throw KDYZMError.stale }
-            let operation = UUID()
-            DiagnosticLog.shared.record(.trackingStarted, operation: operation)
+            diagnosticLog.record(.trackingRouteBackend, operation: logID, counts: Self.routingDiagnostics(before, mode: mode))
             do {
-                let result = try await KDYZMRefreshService(store: store, connection: backendConnection, client: backendClient, reloadWidgets: reloadWidgets).refresh(before: before)
-                DiagnosticLog.shared.record(.trackingFinished, operation: operation)
+                trace.finish()
+                let result = try await KDYZMRefreshService(store: store, connection: backendConnection, client: backendClient, reloadWidgets: reloadWidgets).refresh(before: before, operation: logID, trace: trace)
                 return result
             } catch {
                 // Store only fixed, safe messages, never transport/server strings or secrets.
-                DiagnosticLog.shared.record(.trackingFailed, operation: operation, reason: .unknown)
                 if !(error is CancellationError) {
                     if let lease = try? store.acquireTrackingQuery(id: id) {
                     defer { lease.release() }
@@ -221,13 +358,11 @@ struct TrackingRefreshService {
                 throw error
             }
         }
-        let logID = UUID()
-        DiagnosticLog.shared.record(.trackingStarted, operation: logID)
-        var logSucceeded = false
-        defer { DiagnosticLog.shared.record(logSucceeded ? .trackingFinished : .trackingFailed, operation: logID, reason: logSucceeded ? nil : .unknown) }
         try Task.checkCancellation()
+        trace.begin(.lease)
         let lease = try store.acquireTrackingQuery(id: id)
         defer { lease.release() }
+        trace.begin(.localRead)
         let snapshot = try store.snapshot()
         guard let before = snapshot.shipments.first(where: { $0.id == id }) else { throw PickupStorageError.notFound }
         guard before.status != .archived else { throw ShipmentShortcutError.statusConflict }
@@ -237,8 +372,10 @@ struct TrackingRefreshService {
         let linkedID = snapshot.records.first(where: { $0.shipmentID == id })?.id
         do {
         let route = try Self.route(before, mode: mode)
+        diagnosticLog.record(Self.routeEvent(route), operation: logID, counts: Self.routingDiagnostics(before, mode: mode))
         let result: UAPITrackingResult
         var tminiConfiguration: TminiConfiguration?
+        trace.begin(.request)
         switch route {
         case .backend:
             // Backend dispatch must happen before acquiring the legacy lease.
@@ -270,6 +407,7 @@ struct TrackingRefreshService {
         if let suppliedPhone { queryPhone = suppliedPhone } else { queryPhone = try phones.read(for: before) }
         result = try await client.query(trackingNumber: number, carrierCode: before.uapiCarrierCode, phone: queryPhone, refresh: true)
         }
+        trace.begin(.response)
         cacheFeedback(result.isCached)
         try Task.checkCancellation()
         guard result.trackingNumber == number else {
@@ -278,6 +416,7 @@ struct TrackingRefreshService {
             if route == .tmini { throw TminiError.invalidResponse }
             throw UAPIError.invalidResponse
         }
+        trace.begin(.merge)
         let delivered = try store.transaction { data -> Bool in
             if let tminiConfiguration { try tminiClient.validateConfiguration(tminiConfiguration) }
             guard let index = data.shipments.firstIndex(where: { $0.id == id }),
@@ -288,7 +427,7 @@ struct TrackingRefreshService {
             if let old = current.logisticsTime {
                 guard let incoming = result.logisticsTime, incoming >= old else { throw ShipmentShortcutError.olderUpdate }
             }
-            if let queried = current.lastQueriedAt, result.queriedAt < queried { throw ShipmentShortcutError.olderUpdate }
+            if let queried = current.lastQueriedAt, result.queriedAt < queried { throw TrackingTimeRejection(reason: .olderQuery) }
             if current.status == .delivered, let state = result.status, state != .delivered { throw ShipmentShortcutError.statusConflict }
             guard let linked = data.records.firstIndex(where: { $0.shipmentID == id }),
                   data.records[linked].id == linkedID else { throw PickupStorageError.invalidData("运单关联记录缺失或已改变") }
@@ -310,10 +449,10 @@ struct TrackingRefreshService {
             }
             data.records[linked].updatedAt = current.updatedAt
             data.shipments[index] = current
+            trace.begin(.save)
             return oldStatus != .delivered && current.status == .delivered
         }
         reloadWidgets()
-        logSucceeded = true
         return delivered
         } catch {
             // Never replace the original exception if recording the safe diagnostic fails.
@@ -383,6 +522,10 @@ struct TrackingRefreshService {
                 }) { report.newlyDelivered += 1 }
                 report.succeeded += 1
             } catch is CancellationError { throw CancellationError() }
+            catch KDYZMError.queued {
+                let number = (try? ShipmentShortcutParser.number(latest.trackingNumber)) ?? "无效运单号"
+                report.queued.append(.init(trackingNumber: number, reason: KDYZMError.queued.localizedDescription))
+            }
             catch UAPIError.cancelled { throw UAPIError.cancelled }
             catch TminiError.cancelled { throw TminiError.cancelled }
             catch {

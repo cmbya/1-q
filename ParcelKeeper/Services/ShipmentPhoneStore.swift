@@ -21,12 +21,12 @@ struct ShipmentPhoneStore {
     func save(_ phone: String, for shipment: Shipment) throws {
         try Self.validate(phone)
         let identity = try account(shipment)
-        // Identical saves keep normal cache reuse. Every real edit rotates even
-        // without a query between A -> B -> A. Callers own the tracking lease.
-        guard try read(for: shipment) != phone else { return }
+        // Even identical saves retire a historical Keychain context. No cache I/O.
+        // Callers own the tracking lease; keep the authoritative phone if cleanup fails.
+        let unchanged = try read(for: shipment) == phone
         do {
             try cache.mutatePhone(number: try ShipmentShortcutParser.number(shipment.trackingNumber)) {
-                try keys.save(phone, endpoint: identity)
+                if !unchanged { try keys.save(phone, endpoint: identity) }
                 guard try keys.read(endpoint: identity) == phone else { throw UAPIError.keychain }
             }
         } catch { throw UAPIError.keychain }

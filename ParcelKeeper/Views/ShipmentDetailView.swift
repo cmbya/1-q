@@ -17,7 +17,6 @@ struct ShipmentDetailView: View {
     @State private var hasSavedPhone = false
     @State private var querying = false
     @State private var queryMessage: String?
-    @State private var forceQueryMode: TrackingRefreshMode?
 
     private var shipment: Shipment? {
         store.shipment(id: shipmentID)
@@ -58,6 +57,7 @@ struct ShipmentDetailView: View {
                     Section("物流刷新与来源") {
                         LabeledContent("添加来源", value: ShipmentRefreshPresentation.origin(shipment))
                         LabeledContent("当前物流来源", value: ShipmentRefreshPresentation.source(shipment))
+                        LabeledContent("实际默认查询渠道", value: resolvedChannelName(shipment))
                         Picker("默认查询渠道", selection: Binding(
                             get: { shipment.refreshChannel ?? "automatic" },
                             set: { channel in
@@ -97,9 +97,7 @@ struct ShipmentDetailView: View {
                             .font(.footnote)
                         Button("仅本次使用Tmini付费刷新") { refreshLogistics(mode: .tmini) }
                             .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Button("Tmini：忽略缓存，立即查询（可能扣积分）") { forceQueryMode = .tmini }
-                            .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("普通刷新优先使用缓存：运输中／未知2小时，派送中30分钟，待取件6小时，已签收7天。到期不自动查询。")
+                        Text("每次查询都会联网，可能计费；每次派发新增4积分本地估算记账，实际收费以平台为准。不自动重试。")
                             .font(.footnote)
                     }
 
@@ -129,9 +127,7 @@ struct ShipmentDetailView: View {
                         Button(querying ? "正在查询" : "仅本次使用UAPI备用刷新（可能消耗积分）") {
                             refreshLogistics(mode: .uapi)
                         }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Button("UAPI：忽略缓存，立即查询（可能扣积分）") { forceQueryMode = .uapi }
-                            .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("这是单次明确选择，不修改默认渠道或添加来源。缓存时长与Tmini相同。")
+                        Text("每次查询都会联网，可能计费，实际扣费以平台返回为准。这是单次明确选择，不修改默认渠道或添加来源；不自动重试、不切换其他付费渠道。")
                             .font(.footnote)
                     }
 
@@ -239,32 +235,29 @@ struct ShipmentDetailView: View {
                 ContentUnavailableView("快递不存在", systemImage: "shippingbox")
             }
         }
-        .confirmationDialog("忽略缓存并发起付费查询？", isPresented: Binding(
-            get: { forceQueryMode != nil },
-            set: { if !$0 { forceQueryMode = nil } }
-        ), titleVisibility: .visible) {
-            Button("确认查询（可能扣积分）") {
-                if let mode = forceQueryMode {
-                    forceQueryMode = nil
-                    refreshLogistics(mode: mode, ignoreCache: true)
-                }
-            }
-            Button("取消", role: .cancel) { forceQueryMode = nil }
-        } message: {
-            Text("仅本次跳过所选渠道的有效期缓存，仍校验配置和运单身份，不切换其他渠道。Tmini发起请求会新增4积分本地记账；UAPI按平台规则计费。")
-        }
         .alert("操作未完成", isPresented: Binding(
             get: { reminderError != nil },
             set: { if !$0 { reminderError = nil } }
         )) { Button("知道了", role: .cancel) {} } message: { Text(reminderError ?? "") }
     }
 
-    private func refreshLogistics(mode: TrackingRefreshMode, ignoreCache: Bool = false) {
+    private func resolvedChannelName(_ shipment: Shipment) -> String {
+        do {
+            switch try TrackingRefreshService.resolvedChannel(shipment) {
+            case "kdyzm": return "取件助手后台"
+            case "taobao": return "淘宝"
+            case "pdd": return "拼多多"
+            case "uapi": return "UAPI（每次联网，可能计费）"
+            case "tmini": return "Tmini（每次联网，付费查询）"
+            default: return "不可用"
+            }
+        } catch { return "不可用" }
+    }
+
+    private func refreshLogistics(mode: TrackingRefreshMode) {
         guard !querying, !store.isHistoricalSnapshot, let current = shipment,
               current.status != .archived else { return }
-        let legacyUAPIOrigin = current.originPlatform == nil || current.originPlatform == "manual" || current.originPlatform == "uapi"
-        let usesUAPI = mode == .uapi || (mode == .automatic &&
-            (current.refreshChannel == "uapi" || (current.refreshChannel == nil && current.backendBinding == nil && legacyUAPIOrigin && current.taobaoOrderID == nil)))
+        let usesUAPI = (try? TrackingRefreshService.resolvedChannel(current, mode: mode)) == "uapi"
         let suppliedPhone = usesUAPI && !queryPhone.isEmpty ? queryPhone : nil
         querying = true
         Task { @MainActor in
@@ -275,7 +268,7 @@ struct ShipmentDetailView: View {
                 }
             }
             do {
-                let service = try TrackingRefreshService.live(ignoreCache: ignoreCache)
+                let service = try TrackingRefreshService.live()
                 var isCached = false
                 let completed = try await service.refresh(id: shipmentID, phone: suppliedPhone,
                     expectedTrackingNumber: CarrierDetector.sanitize(current.trackingNumber), mode: mode, cacheFeedback: { isCached = $0 })

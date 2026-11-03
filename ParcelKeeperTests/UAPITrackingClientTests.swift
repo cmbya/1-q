@@ -158,6 +158,73 @@ final class UAPITrackingClientTests: XCTestCase {
         let result = try await query()
         XCTAssertEqual(result.status, .delivered)
     }
+    func testLatestRecipientCollectionCorrectsStaleTransportButNotAgentOrInstructions() async throws {
+        try enable()
+        let cases: [(String, ShipmentStatus)] = [
+            ("收件人凭取件码完成取件，感谢使用菜鸟驿站", .delivered),
+            ("本人已取件", .delivered),
+            ("已从快递柜取出", .delivered),
+            ("已签收，菜鸟驿站代收", .inTransit),
+            ("快递员已取件", .inTransit),
+            ("请凭取件码完成取件", .inTransit),
+            ("尚未完成取件", .inTransit),
+            ("预计收件人凭取件码完成取件", .inTransit)
+        ]
+        for (latest, expected) in cases {
+            try payload(["tracks": [["time": "2026-10-30 10:00:00", "context": latest], ["time": "2026-10-29 09:00:00", "context": "本人已取件"]]])
+            let result = try await query()
+            XCTAssertEqual(result.status, expected, latest)
+            XCTAssertEqual(result.logisticsInfo, latest)
+        }
+    }
+
+    func testActualCollectionOverridesAllCoarseCompletionConflicts() async throws {
+        try enable()
+        let conflicts: [[String: Any]] = [
+            ["is_completed": true, "status_code": "in_transit"],
+            ["is_completed": false, "status_code": "delivered"],
+            ["is_completed": true, "status": "待取件"],
+            ["is_completed": false, "status": "已完成"],
+            ["is_completed": true, "status_code": "delivered", "status": "运输中"],
+            ["is_completed": false, "status_code": "delivered", "status": "待取件"]
+        ]
+        for conflict in conflicts {
+            for text in ["本人已取件", "已签收", "菜鸟驿站代收", "请本人已取件后确认", "如果包裹到站，本人已取件"] {
+                var fields = conflict
+                fields["tracks"] = [["time": "2026-10-30 10:00", "context": text], ["time": "2026-10-29 09:00", "context": "已揽收"]]
+                try payload(fields)
+                if text == "本人已取件" {
+                    let result = try await query()
+                    XCTAssertEqual(result.status, .delivered)
+                } else { await assertError(.invalidResponse) }
+            }
+        }
+    }
+    func testCollectionNeverBypassesResponseIdentityDateCountOrTieGuards() async throws {
+        try enable()
+        let collection = [["time": "2026-10-30 10:00", "context": "本人已取件"], ["time": "2026-10-29 09:00", "context": "已揽收"]]
+        let invalids: [[String: Any]] = [
+            ["tracking_number": "SF1234567890123"], ["track_count": 1], ["completed_at": "invalid"],
+            ["tracks": [["time": "invalid", "context": "本人已取件"], collection[1]]],
+            ["tracks": [collection[0], ["time": "2026-10-30 10:00", "context": "待取件"]]]
+        ]
+        for invalid in invalids {
+            var fields: [String: Any] = ["tracks": collection]
+            fields.merge(invalid) { _, new in new }
+            try payload(fields)
+            await assertError(.invalidResponse)
+        }
+    }
+    func testIndependentCollectionEventsDoNotShareConditionalScope() {
+        for events in [["本人已取件", "如有问题请联系"], ["如有问题请联系", "本人已取件"]] {
+            XCTAssertTrue(MallDeliveryState.recipientCollected(events: events))
+        }
+        XCTAssertFalse(MallDeliveryState.recipientCollected(events: []))
+        for event in ["如果包裹到站，本人已取件", "本人已取件，如有问题请联系", "预计明日，本人已取件", "已签收", "驿站代收", "请凭码取件"] {
+            XCTAssertFalse(MallDeliveryState.recipientCollected(events: [event]), event)
+        }
+    }
+
     func testHTTPFailuresAreTypedAndNeverRetried() async throws {
         try enable()
         for (code, expected) in [(401, UAPIError.authentication), (403, .authentication), (402, .quota), (404, .noData), (500, .unavailable), (302, .invalidResponse)] {

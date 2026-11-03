@@ -2,7 +2,9 @@ import Foundation
 import Darwin
 import CryptoKit
 
-/// Separate from business data/import/export. A broken cache fails closed, never pays silently.
+/// 历史兼容：仅供旧缓存测试及 ShipmentPhoneStore 的尾号退休/失效流程使用。
+/// UAPI/Tmini 查询不再调用 identity/lookup/store，不读取或删除历史缓存文件。
+/// mutatePhone 只做设备私有 Keychain 删除/回读；不访问缓存目录或锁，兼容退休日志。
 enum PaidTrackingCacheError: LocalizedError {
     case unavailable
     var errorDescription: String? { "本地付费查询缓存无法安全读取或保存；未自动重试，请在 App 检查缓存文件。" }
@@ -69,18 +71,15 @@ final class PaidTrackingCache {
             return Identity(channel: channel, number: number, carrier: carrier, generation: generation, phoneToken: token)
         }
     }
-    /// Lock order: tracking lease -> dataset (delete/retirement) -> paid cache.
-    /// Invalidate BEFORE changing the authoritative phone, even if that write fails.
-    /// The retirement journal retries this deletion after a crash or Keychain failure.
-    /// No dataset lock or lease is acquired here (avoids inverse lock ordering).
+    /// Legacy Keychain cleanup only: never opens/creates/deletes cache files or locks.
+    /// Retire the corresponding number's device-only secret BEFORE any phone mutation.
+    /// Callers own the tracking lease; delete/import journals retry on failure or crash.
     func mutatePhone(number: String, mutation: () throws -> Void) throws {
-        try locked { _ in
-            let name = SHA256.hash(data: Data(number.utf8)).map { String(format: "%02x", $0) }.joined()
-            let keys = phoneKeys("ParcelKeeper.PaidTrackingPhone." + name)
-            try keys.delete()
-            guard try keys.read() == nil else { throw PaidTrackingCacheError.unavailable }
-            try mutation()
-        }
+        let name = SHA256.hash(data: Data(number.utf8)).map { String(format: "%02x", $0) }.joined()
+        let keys = phoneKeys("ParcelKeeper.PaidTrackingPhone." + name)
+        try keys.delete()
+        guard try keys.read() == nil else { throw PaidTrackingCacheError.unavailable }
+        try mutation()
     }
     private func validateIdentity(_ identity: Identity) throws {
         guard identity.channel == "uapi" else { return }

@@ -8,23 +8,75 @@ enum DiagnosticEvent: String, Codable, CaseIterable {
     case mallProcessTerminated, mallBridgeRejected, mallResponseRejected, mallResponseAccepted
     case mallScriptReady, mallScriptFailed, mallCollectionProgress, mallCollectionFinished
     case mallDetailStarted, mallDetailFinished, mallTimeout
+    case syncStarted, syncFinished, syncFailed
+    case stageStarted, stageFinished, stageFailed
     case trackingStarted, trackingFinished, trackingFailed
+    case trackingRouteBackend, trackingRouteTaobao, trackingRoutePDD, trackingRouteUAPI, trackingRouteTmini
 }
 
 enum DiagnosticReason: String, Codable, CaseIterable {
     case frame, generation, envelope, url, interface, ownership, limit
     case authentication, verification, identity, noTrace, timeout, unsupported
     case cancelled, network, storage, unknown
+    case queued, olderEvent, statusConflict, configurationChanged, terminalResult
+    case quota, rateLimited, parse, accounting, configuration
+    case olderQuery, association, validation, busy, unavailable, jobGone
+}
+
+enum DiagnosticStage: String, Codable, CaseIterable {
+    case preflight, localRead, credential, snapshot, decoding, validation, association
+    case lease, request, response, merge, save, localWrite, presentation
+    case jobCreate, jobResume, jobWait, jobPoll, cleanup
+}
+
+/// Safe rejection classification without retaining arbitrary underlying errors.
+struct TrackingTimeRejection: LocalizedError {
+    let reason: DiagnosticReason
+    var errorDescription: String? { "物流结果早于已保存结果，未覆盖本地轨迹。" }
+}
+
+/// One operation across service/actor boundaries. Mutable stage state and ordered
+/// event submission are lock protected; no lock is held across an await.
+final class DiagnosticTrace: @unchecked Sendable {
+    let operation: UUID
+    let log: DiagnosticLog
+    private let lock = NSLock()
+    private var currentStage: DiagnosticStage?
+    private var failedStage: DiagnosticStage?
+    var stage: DiagnosticStage? { lock.lock(); defer { lock.unlock() }; return currentStage }
+    var failureStage: DiagnosticStage? { lock.lock(); defer { lock.unlock() }; return failedStage }
+    init(operation: UUID, log: DiagnosticLog = .shared) { self.operation = operation; self.log = log }
+    func begin(_ next: DiagnosticStage) {
+        lock.lock(); defer { lock.unlock() }
+        if let currentStage { log.record(.stageFinished, operation: operation, stage: currentStage) }
+        currentStage = next
+        log.record(.stageStarted, operation: operation, stage: next)
+    }
+    func finish() {
+        lock.lock(); defer { lock.unlock() }
+        guard let currentStage else { return }
+        log.record(.stageFinished, operation: operation, stage: currentStage)
+        self.currentStage = nil
+    }
+    func fail(_ error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        guard let currentStage else { return }
+        if failedStage == nil { failedStage = currentStage }
+        log.record(.stageFailed, operation: operation, reason: TrackingRefreshService.diagnosticReason(error), stage: currentStage)
+        self.currentStage = nil
+    }
 }
 
 enum DiagnosticMetric: String, Codable, CaseIterable {
     case rows, candidates, responses, bytes, httpStatus, errorCode, round
     case hasProgress, hasType, hasLink, hasDate, accepted, rejected
+    case hasBackendBinding, explicitPaidChannel, forcedPaidMode
 
     // Numeric fields are measurements only, never identifiers. Even accidental
     // large numbers cannot preserve phone/order/tracking identifiers verbatim.
     func bounded(_ value: Int) -> Int {
         switch self {
+        case .hasBackendBinding, .explicitPaidChannel, .forcedPaidMode: return min(1, max(0, value))
         case .hasProgress, .hasType, .hasLink, .hasDate: return min(200, max(0, value))
         case .httpStatus: return min(599, max(0, value))
         case .errorCode: return min(99_999, max(-99_999, value))
@@ -55,6 +107,8 @@ final class DiagnosticLog {
         let event: DiagnosticEvent
         let operation: UUID?
         let reason: DiagnosticReason?
+        // Optional additions preserve decoding of original schema=1 archives.
+        let stage: DiagnosticStage?
         let counts: [DiagnosticMetric: Int]
     }
     private struct Archive: Codable {
@@ -82,7 +136,7 @@ final class DiagnosticLog {
             .first?.appendingPathComponent("PrivateDiagnostics", isDirectory: true)
     }
 
-    func record(_ event: DiagnosticEvent, operation: UUID? = nil, reason: DiagnosticReason? = nil, counts: [DiagnosticMetric: Int] = [:]) {
+    func record(_ event: DiagnosticEvent, operation: UUID? = nil, reason: DiagnosticReason? = nil, stage: DiagnosticStage? = nil, counts: [DiagnosticMetric: Int] = [:]) {
         let timestamp = Date()
         queue.async {
             self.loadIfNeeded()
@@ -90,7 +144,7 @@ final class DiagnosticLog {
             var bounded: [DiagnosticMetric: Int] = [:]
             for (key, value) in counts { bounded[key] = key.bounded(value) }
             let alias = operation.map { self.alias(for: $0) }
-            self.archive.entries.append(Entry(timestamp: timestamp, event: event, operation: alias, reason: reason, counts: bounded))
+            self.archive.entries.append(Entry(timestamp: timestamp, event: event, operation: alias, reason: reason, stage: stage, counts: bounded))
             if self.archive.entries.count > Self.maximumEntries {
                 self.archive.entries.removeFirst(self.archive.entries.count - Self.maximumEntries)
             }
@@ -283,6 +337,7 @@ final class DiagnosticLog {
             var line = "\(formatter.string(from: entry.timestamp)) \(entry.event.rawValue)"
             if let operation = entry.operation { line += " operation=\(operation.uuidString)" }
             if let reason = entry.reason { line += " reason=\(reason.rawValue)" }
+            if let stage = entry.stage { line += " stage=\(stage.rawValue)" }
             for key in entry.counts.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
                 if let value = entry.counts[key] { line += " \(key.rawValue)=\(value)" }
             }

@@ -172,13 +172,10 @@ protocol UAPITrackingQuerying {
 final class UAPITrackingClient: UAPITrackingQuerying {
     private let settings: UAPISettingsService
     private let network: any AINetworking
-    private let cache: PaidTrackingCache
-    private let ignoreCache: Bool
-    init(settings: UAPISettingsService = UAPISettingsService(), network: any AINetworking = AISecureNetwork(), cache: PaidTrackingCache = PaidTrackingCache(), ignoreCache: Bool = false) {
+    // Legacy injection labels are ignored; queries never access historical cache storage.
+    init(settings: UAPISettingsService = UAPISettingsService(), network: any AINetworking = AISecureNetwork(), cache _: PaidTrackingCache? = nil, ignoreCache _: Bool = false) {
         self.settings = settings
         self.network = network
-        self.cache = cache
-        self.ignoreCache = ignoreCache
     }
     func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult {
         do {
@@ -187,12 +184,6 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             // Validate, never repair a supplied identifier before dispatch.
             guard (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw UAPIError.invalidTrackingNumber }
             if let phone, phone.utf8.count != 4 || !phone.utf8.allSatisfy({ (48...57).contains($0) }) { throw UAPIError.invalidPhone }
-            let identity = try cache.identity(channel: "uapi", number: trackingNumber, carrier: carrierCode ?? "", generation: credential.generation, phone: phone)
-            let cachedResult = try cache.lookup(identity)
-            if !ignoreCache, let cached = cachedResult {
-                try settings.validateCredential(credential)
-                return cached
-            }
             var components = URLComponents(string: "https://uapis.cn/api/v1/misc/tracking/query")!
             var items = [URLQueryItem(name: "tracking_number", value: trackingNumber)]
             if let carrierCode, !carrierCode.isEmpty { items.append(URLQueryItem(name: "carrier_code", value: carrierCode)) }
@@ -235,19 +226,9 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             }
             let sanitized = UAPITrackingResult(trackingNumber: result.trackingNumber, carrierName: safe(result.carrierName), carrierCode: safe(result.carrierCode), status: result.status, logisticsInfo: safe(result.logisticsInfo), logisticsTime: result.logisticsTime, queryInfo: safe(result.queryInfo), queriedAt: result.queriedAt)
             try settings.validateCredential(credential)
-            try cache.store(sanitized, identity: identity, startedAt: startedAt)
-            // The refresh merger remembers the server-resolved carrier after an auto-detect query.
-            // Seed that exact resolved identity too, so the next App/Shortcut refresh can hit.
-            if (carrierCode ?? "").isEmpty, !sanitized.carrierCode.isEmpty {
-                let resolvedIdentity = try cache.identity(channel: "uapi", number: trackingNumber, carrier: sanitized.carrierCode, generation: credential.generation, phone: phone)
-                try settings.validateCredential(credential)
-                try cache.store(sanitized, identity: resolvedIdentity, startedAt: startedAt)
-            }
-            try settings.validateCredential(credential)
             return sanitized
         } catch is CancellationError { throw UAPIError.cancelled }
         catch let error as UAPIError { throw error }
-        catch let error as PaidTrackingCacheError { throw error }
         catch let error as URLError where error.code == .cancelled { throw UAPIError.cancelled }
         catch { throw UAPIError.unavailable }
     }
@@ -293,17 +274,23 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             case "exception": mapped = .exception
             default: mapped = nil
             }
-            // Explicit completion wins only if other explicit fields do not deny it.
-            if is_completed == true, let mapped, mapped != .delivered { throw UAPIError.invalidResponse }
-            if is_completed == false, mapped == .delivered { throw UAPIError.invalidResponse }
+            // A validated newest recipient-collection fact corrects coarse status fields,
+            // including stale is_completed=false. Identity, dates/count and tie guards above
+            // remain mandatory. Generic/agent signatures and instructions never override.
+            let collected = MallDeliveryState.recipientCollected(latest: latest.track.context)
             let pickup = status.map { ["待取件", "待领取", "等待取件"].contains($0) } ?? false
-            if is_completed == true && pickup { throw UAPIError.invalidResponse }
             let explicitPending = status.map { ["待揽收", "已揽收", "运输中", "派送中", "待取件", "待领取", "等待取件", "异常"].contains($0) } ?? false
-            if (is_completed == true || mapped == .delivered) && explicitPending { throw UAPIError.invalidResponse }
             let chineseCompletion = status.map { ["已签收", "已妥投", "已完成"].contains($0) } ?? false
-            if chineseCompletion && (is_completed == false || mapped.map { $0 != .delivered } == true) { throw UAPIError.invalidResponse }
-            if mapped == .delivered && pickup { throw UAPIError.invalidResponse }
-            let state: ShipmentStatus? = (is_completed == true || chineseCompletion) ? .delivered : (pickup ? .readyForPickup : mapped)
+            // Without narrow actual collection evidence, conflicting fields still fail closed.
+            if !collected {
+                if is_completed == true, let mapped, mapped != .delivered { throw UAPIError.invalidResponse }
+                if is_completed == false, mapped == .delivered { throw UAPIError.invalidResponse }
+                if is_completed == true && pickup { throw UAPIError.invalidResponse }
+                if (is_completed == true || mapped == .delivered) && explicitPending { throw UAPIError.invalidResponse }
+                if chineseCompletion && (is_completed == false || mapped.map { $0 != .delivered } == true) { throw UAPIError.invalidResponse }
+                if mapped == .delivered && pickup { throw UAPIError.invalidResponse }
+            }
+            let state: ShipmentStatus? = collected ? .delivered : ((is_completed == true || chineseCompletion) ? .delivered : (pickup ? .readyForPickup : mapped))
             let name = carrier_name ?? ""
             let code = carrier_code ?? ""
             let history = dated.map { "\($0.track.time) \($0.track.context)" }.joined(separator: "\n")

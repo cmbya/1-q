@@ -66,9 +66,23 @@ class RemovedPlatformContract(unittest.TestCase):
             self.assertIn(f'    var {field}: {kind}', model)
         for field in ['backendBinding', 'backendEvents', 'backendLogisticsUpdatedAt', 'backendRefreshJobID', 'backendRefreshGeneration']:
             self.assertRegex(model, rf'    var {field}: [^\n]+\?')
-        for name in ['ParcelKeeper/Services/SharedPickupStore.swift',
-                     'ParcelKeeper/Services/DiagnosticLog.swift',
-                     'ParcelKeeper/Services/TaobaoTrackingClient.swift']:
+        # Diagnostics may gain fixed allowlisted route events; storage and old platform client remain untouched.
+        diagnostics = source('ParcelKeeper/Services/DiagnosticLog.swift')
+        old_diagnostics = subprocess.check_output(['git', 'show', 'HEAD:ParcelKeeper/Services/DiagnosticLog.swift'], cwd=ROOT).decode()
+        old_cases = set(re.findall(r'^    case ([^\n]+)', old_diagnostics, re.M))
+        for cases in old_cases:
+            self.assertIn('    case ' + cases, diagnostics)
+        self.assertIn('let counts: [DiagnosticMetric: Int]', diagnostics)
+        self.assertNotIn('let message: String', diagnostics)
+        # Authorized follow-up now repairs import namespace and stale train buttons.
+        # Preserve the original storage/migration/locking guarantees, not byte identity.
+        storage = source('ParcelKeeper/Services/SharedPickupStore.swift')
+        for token in ['func transaction', 'func snapshot', 'func previewBackup', 'func importBackup',
+                      'validateImportIdentifiers(incoming, against: incoming)',
+                      'validateImportIdentifiers(incoming, against: current)',
+                      'binding == expectedBinding', 'LOCK_EX', '.atomic']:
+            self.assertIn(token, storage)
+        for name in ['ParcelKeeper/Services/TaobaoTrackingClient.swift']:
             before = subprocess.check_output(['git', 'show', 'HEAD:' + name], cwd=ROOT).decode()
             self.assertEqual(source(name), before, name)
         web = source('ParcelKeeper/Services/MallWebClient.swift')

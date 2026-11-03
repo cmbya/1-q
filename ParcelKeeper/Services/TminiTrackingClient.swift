@@ -145,11 +145,9 @@ final class TminiTrackingClient: TminiTrackingQuerying {
     private let settings: TminiSettingsService
     private let network: any AINetworking
     private let usage: TminiUsageStore
-    private let cache: PaidTrackingCache
-    private let ignoreCache: Bool
-    init(settings: TminiSettingsService = TminiSettingsService(), network: any AINetworking = TminiSecureNetwork(), usage: TminiUsageStore = TminiUsageStore(), cache: PaidTrackingCache = PaidTrackingCache(), ignoreCache: Bool = false) {
-        self.settings = settings; self.network = network; self.usage = usage; self.cache = cache
-        self.ignoreCache = ignoreCache
+    // Legacy injection labels are ignored; every valid query dispatches one paid request.
+    init(settings: TminiSettingsService = TminiSettingsService(), network: any AINetworking = TminiSecureNetwork(), usage: TminiUsageStore = TminiUsageStore(), cache _: PaidTrackingCache? = nil, ignoreCache _: Bool = false) {
+        self.settings = settings; self.network = network; self.usage = usage
     }
     func configurationToken() throws -> TminiConfiguration { try settings.configurationToken() }
     func validateConfiguration(_ token: TminiConfiguration) throws { try settings.validateConfiguration(token) }
@@ -158,12 +156,6 @@ final class TminiTrackingClient: TminiTrackingQuerying {
             try Task.checkCancellation()
             guard (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw TminiError.invalidNumber }
             let token = try configurationToken()
-            let identity = try cache.identity(channel: "tmini", number: trackingNumber, generation: token.generation)
-            let cachedResult = try cache.lookup(identity)
-            if !ignoreCache, let cached = cachedResult {
-                try validateConfiguration(token)
-                return cached
-            }
             var components = URLComponents(string: "https://api.tmini.net/apis/autonumber")!
             components.queryItems = [URLQueryItem(name: "key", value: token.key), URLQueryItem(name: "trackingNo", value: trackingNumber)]
             guard let url = components.url else { throw TminiError.invalidNumber }
@@ -174,7 +166,6 @@ final class TminiTrackingClient: TminiTrackingQuerying {
             try Task.checkCancellation()
             try validateConfiguration(token)
             try usage.recordDispatch()
-            let startedAt = Date()
             let (data, response) = try await network.data(for: request)
             try Task.checkCancellation()
             try validateConfiguration(token)
@@ -189,12 +180,9 @@ final class TminiTrackingClient: TminiTrackingQuerying {
             }
             let result = try Self.parse(data, expectedNumber: trackingNumber, secret: token.key)
             try validateConfiguration(token)
-            try cache.store(result, identity: identity, startedAt: startedAt)
-            try validateConfiguration(token)
             return result
         } catch is CancellationError { throw TminiError.cancelled }
         catch let error as TminiError { throw error }
-        catch let error as PaidTrackingCacheError { throw error }
         catch let error as URLError where error.code == .cancelled { throw TminiError.cancelled }
         catch { throw TminiError.unavailable }
     }

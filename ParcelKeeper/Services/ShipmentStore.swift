@@ -150,20 +150,30 @@ final class ShipmentStore: ObservableObject {
         do { try change(action) } catch { lastErrorMessage = error.localizedDescription }
     }
     var activeShipments: [Shipment] { shipments.filter { $0.status != .archived } }
-    func syncKDYZM(connection: KDYZMConnection = .shared, client: KDYZMClient = KDYZMClient()) async throws -> KDYZMSyncReport {
+    func syncKDYZM(connection: KDYZMConnection = .shared, client: KDYZMClient = KDYZMClient(), diagnosticLog: DiagnosticLog = .shared) async throws -> KDYZMSyncReport {
+        let operation = UUID()
+        let trace = DiagnosticTrace(operation: operation, log: diagnosticLog)
+        diagnosticLog.record(.syncStarted, operation: operation, stage: .preflight)
+        trace.begin(.preflight)
+        do {
         guard let storage, !storage.isReadOnly else { throw PickupStorageError.appGroupUnavailable }
+        trace.begin(.localRead)
         let before: PickupDataset
         do { before = try storage.snapshot() }
         catch { throw KDYZMSyncFailure.localRead }
+        trace.begin(.credential)
         let credential = try await connection.credential()
+        trace.begin(.snapshot)
         let snapshot = try await client.snapshot(credential)
         try Task.checkCancellation()
+        trace.begin(.association)
         let remote = snapshot.shipments
         let numbers = Set(remote.map { CarrierDetector.sanitize($0.waybillNo) }.filter { !$0.isEmpty })
         let bindings = Set(remote.map { KDYZMBinding(origin: credential.baseURL, accountID: $0.accountId, orderID: $0.orderId, shipmentID: $0.id) })
         let affected = before.shipments.filter { shipment in
             numbers.contains(CarrierDetector.sanitize(shipment.trackingNumber)) || shipment.backendBinding.map { bindings.contains($0) } == true
         }
+        trace.begin(.lease)
         let report = try await connection.commit(credential) {
             var leases: [SharedPickupStore.TrackingQueryLease] = []
             defer { leases.forEach { $0.release() } }
@@ -171,6 +181,7 @@ final class ShipmentStore: ObservableObject {
                 leases.append(try storage.acquireTrackingQuery(id: id))
             }
             do { return try storage.transaction { data in
+                trace.begin(.association)
                 // Identity/deletion/channel/carrier changes while networking invalidate
                 // this sync; user-only note/code/group/completion edits are preserved.
                 guard !data.shipments.contains(where: { current in
@@ -178,7 +189,11 @@ final class ShipmentStore: ObservableObject {
                 }), affected.allSatisfy({ old in
                           data.shipments.first(where: { $0.id == old.id }).map { KDYZMMerger.sameIdentity($0, old) } ?? false
                       }) else { throw KDYZMError.stale }
-                do { return try KDYZMMerger.apply(snapshot, origin: credential.baseURL, to: &data) }
+                do {
+                    let result = try KDYZMMerger.apply(snapshot, origin: credential.baseURL, to: &data, operation: operation)
+                    trace.begin(.localWrite)
+                    return result
+                }
                 catch KDYZMError.invalid { throw KDYZMSyncFailure.association }
             } }
             catch let error as KDYZMSyncFailure { throw error }
@@ -186,10 +201,28 @@ final class ShipmentStore: ObservableObject {
             catch is CancellationError { throw CancellationError() }
             catch { throw KDYZMSyncFailure.localWrite }
         }
+        trace.begin(.presentation)
         WidgetCenter.shared.reloadAllTimelines()
         do { try reload() }
         catch { throw KDYZMSyncFailure.presentation }
+        trace.finish()
+        diagnosticLog.record(.syncFinished, operation: operation)
         return report
+        } catch {
+            // Snapshot decoding/validation occurs within the client, before merge.
+            if let failure = error as? KDYZMSyncFailure {
+                switch failure {
+                case .decoding: trace.begin(.decoding)
+                case .validation: trace.begin(.validation)
+                case .localWrite: trace.begin(.localWrite)
+                default: break
+                }
+            }
+            let stage = trace.failureStage ?? trace.stage ?? .preflight
+            trace.fail(error)
+            diagnosticLog.record(.syncFailed, operation: operation, reason: TrackingRefreshService.diagnosticReason(error), stage: stage)
+            throw error
+        }
     }
     func shipment(id: UUID) -> Shipment? { shipments.first { $0.id == id } }
     func contains(trackingNumber: String) -> Bool {

@@ -26,6 +26,27 @@ final class PaidTrackingCacheTests: XCTestCase {
     func identity(_ channel: String, generation: String = "generation-A", carrier: String = "", phone: String? = nil) throws -> PaidTrackingCache.Identity {
         try cache.identity(channel: channel, number: number, carrier: carrier, generation: generation, phone: phone)
     }
+    func testLegacyPhoneCleanupTouchesOnlyMatchingSecretAndPreservesFiles() throws {
+        _ = try identity("uapi", phone: "9276")
+        _ = try cache.identity(channel: "uapi", number: number + "9", generation: "g", phone: "8351")
+        let matching = try XCTUnwrap(secrets.first { $0.value.value?.contains("9276") == true }?.value)
+        let other = try XCTUnwrap(secrets.first { $0.value.value?.contains("8351") == true }?.value)
+        let historicalFile = directory.appendingPathComponent("success-v1.json")
+        let bytes = Data("unreadable historical cache must remain untouched".utf8)
+        try bytes.write(to: historicalFile)
+        var mutated = false
+        try cache.mutatePhone(number: number) { mutated = true }
+        XCTAssertTrue(mutated)
+        XCTAssertNil(matching.value)
+        XCTAssertNotNil(other.value)
+        XCTAssertEqual(try Data(contentsOf: historicalFile), bytes)
+    }
+    func testLegacyPhoneCleanupDoesNotCreateCacheDirectory() throws {
+        var mutated = false
+        try cache.mutatePhone(number: number) { mutated = true }
+        XCTAssertTrue(mutated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    }
     func testBothChannelsFullResultAndOriginalTimestamp() throws {
         for channel in ["uapi", "tmini"] {
             let key = try identity(channel)
@@ -78,7 +99,7 @@ final class PaidTrackingCacheTests: XCTestCase {
         try Data("broken".utf8).write(to: directory.appendingPathComponent("success-v1.json"))
         XCTAssertThrowsError(try cache.lookup(key, now: now))
     }
-    func testTminiHitNeverDispatchesOrAddsFourPointsAndDisabledDoesNotRead() async throws {
+    func testTminiRepeatedQueriesDispatchAndAddFourPointsEachAndDisabledNeverSends() async throws {
         let suite = "PaidTmini." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -90,20 +111,21 @@ final class PaidTrackingCacheTests: XCTestCase {
         let client = TminiTrackingClient(settings: settings, network: network, usage: usage, cache: cache)
         let first = try await client.query(trackingNumber: number)
         let second = try await client.query(trackingNumber: number)
-        XCTAssertFalse(first.isCached); XCTAssertTrue(second.isCached)
-        XCTAssertEqual(first.queriedAt, second.queriedAt)
-        XCTAssertEqual(network.requests.count, 1)
-        XCTAssertEqual(try usage.summary().points, 4)
+        XCTAssertFalse(first.isCached); XCTAssertFalse(second.isCached)
+        XCTAssertTrue(second.queriedAt >= first.queriedAt)
+        XCTAssertEqual(network.requests.count, 2)
+        XCTAssertEqual(try usage.summary().points, 8)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("success-v1.json").path))
         let forced = TminiTrackingClient(settings: settings, network: network, usage: usage, cache: cache, ignoreCache: true)
         let forcedResult = try await forced.query(trackingNumber: number)
         XCTAssertFalse(forcedResult.isCached)
-        XCTAssertEqual(network.requests.count, 2)
-        XCTAssertEqual(try usage.summary().points, 8)
+        XCTAssertEqual(network.requests.count, 3)
+        XCTAssertEqual(try usage.summary().points, 12)
         try settings.setEnabled(false)
         do { _ = try await forced.query(trackingNumber: number); XCTFail("Disabled must fail") } catch {}
-        XCTAssertEqual(network.requests.count, 2)
+        XCTAssertEqual(network.requests.count, 3)
     }
-    func testUAPIHitRefreshTrueDoesNotDispatchOrUpdateBillingAndFailuresNotCached() async throws {
+    func testUAPIRepeatedQueriesDispatchUpdateBillingAndNeverReturnStaleSuccess() async throws {
         let suite = "PaidUAPI." + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -114,22 +136,23 @@ final class PaidTrackingCacheTests: XCTestCase {
         network.headers = ["UAPI-Credits-Charged": "40"]
         let client = UAPITrackingClient(settings: settings, network: network, cache: cache)
         let first = try await client.query(trackingNumber: number, carrierCode: nil, phone: "9276", refresh: true)
-        let billing = settings.usageSnapshot()
-        network.code = 500
+        network.headers = ["UAPI-Credits-Charged": "0"]
         let second = try await client.query(trackingNumber: number, carrierCode: nil, phone: "9276", refresh: true)
-        XCTAssertTrue(second.isCached); XCTAssertEqual(first.queriedAt, second.queriedAt)
-        XCTAssertEqual(network.requests.count, 1); XCTAssertEqual(settings.usageSnapshot(), billing)
+        XCTAssertFalse(first.isCached); XCTAssertFalse(second.isCached)
+        XCTAssertEqual(network.requests.count, 2)
+        XCTAssertEqual(settings.usageSnapshot()?.chargedCredits, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("success-v1.json").path))
         network.code = 500
         let forced = UAPITrackingClient(settings: settings, network: network, cache: cache, ignoreCache: true)
         let sentBeforeForce = network.requests.count
         do { _ = try await forced.query(trackingNumber: number, carrierCode: nil, phone: "9276", refresh: true); XCTFail("Force must not return cached success on failure") } catch {}
         XCTAssertEqual(network.requests.count, sentBeforeForce + 1)
-        let retained = try await client.query(trackingNumber: number, carrierCode: nil, phone: "9276", refresh: true)
-        XCTAssertTrue(retained.isCached)
+        do { _ = try await client.query(trackingNumber: number, carrierCode: nil, phone: "9276", refresh: true); XCTFail("Ordinary repeat must not return old success") }
+        catch { XCTAssertEqual(error as? UAPIError, .unavailable) }
         try settings.saveKey("replacement-key")
         for _ in 0..<2 {
             do { _ = try await client.query(trackingNumber: number, carrierCode: nil, phone: "9276", refresh: true); XCTFail("Failure is not success") } catch {}
         }
-        XCTAssertEqual(network.requests.count, sentBeforeForce + 3)
+        XCTAssertEqual(network.requests.count, sentBeforeForce + 4)
     }
 }

@@ -20,7 +20,7 @@ class KDYZMContract(unittest.TestCase):
         client = (ROOT/'ParcelKeeper/Services/KDYZMClient.swift').read_text()
         store = (ROOT/'ParcelKeeper/Services/ShipmentStore.swift').read_text()
         refresh = (ROOT/'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
-        for token in ['guard local.status != .archived', 'latest == old', 'Set(newest)', 'local.status != .readyForPickup', 'local.pickupCode.isEmpty', 'data.records[record].code = code', 'local.refreshChannel == nil', 'local.logisticsSource == "kdyzm"', 'timeout: remainingTimeout()', 'case "signed": local.status = .delivered']:
+        for token in ['guard local.status != .archived', 'latest == old', 'Set(newest)', 'local.status != .readyForPickup', 'local.pickupCode.isEmpty', 'data.records[record].code = code', 'local.refreshChannel == nil', 'local.logisticsSource = "kdyzm"', 'timeout: remainingTimeout()', 'case "signed": local.status = .delivered']:
             self.assertIn(token, merge)
         for token in ['preview.scope.validated()', 'static func validToken', 'pcd_', 'config.timeoutIntervalForResource = request.timeoutInterval', 'min(12, timeout)']:
             self.assertIn(token, client)

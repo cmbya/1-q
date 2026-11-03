@@ -359,6 +359,102 @@ final class SharedPickupStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dataURL.path))
     }
 
+    func testPreviewRejectsEveryInternalCrossEntityIDCollisionWithoutWrites() throws {
+        let s = try store()
+        let before = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        let group = PickupGroup(name: "incoming", sortOrder: 0)
+        let value = shipment()
+        let linked = PickupRecord(groupID: group.id, code: value.pickupCode, source: value.note, shipmentID: value.id)
+        let standalone = PickupRecord(groupID: group.id, code: "42")
+        let ticket = TrainTicket(fields: TrainTicketFields(departureDate: "2026-10-31", trainNumber: "G123",
+            departureStation: "北京南", departureTime: "23:00", arrivalStation: "上海虹桥",
+            arrivalDate: "2026-11-01", arrivalTime: "05:00"))
+        let valid = PickupDataset(groups: [group], records: [linked, standalone], shipments: [value], trainTickets: [ticket])
+        // All six unordered entity pairs; a linked record may only share its own shipment's ID.
+        for pair in 0..<7 {
+            var invalid = valid
+            switch pair {
+            case 0: invalid.records[1].id = group.id
+            case 1:
+                invalid.shipments[0].id = group.id
+                invalid.records[0].shipmentID = group.id
+            case 2: invalid.trainTickets?[0].id = group.id
+            case 3: invalid.records[1].id = value.id
+            case 4: invalid.trainTickets?[0].id = standalone.id
+            case 5: invalid.trainTickets?[0].id = value.id
+            default:
+                invalid.records[0].id = group.id
+            }
+            XCTAssertThrowsError(try s.previewBackup(JSONEncoder().encode(invalid))) { error in
+                guard case PickupStorageError.invalidData = error else { return XCTFail("Unexpected error: \(error)") }
+            }
+            XCTAssertEqual(try s.snapshot(), before)
+            XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+        }
+        // Strict import checks must not turn a historical on-disk collision into a migration/read failure.
+        var historical = before
+        historical.records.append(PickupRecord(id: historical.groups[0].id, groupID: historical.groups[0].id, code: "history"))
+        try JSONEncoder().encode(historical).write(to: dataURL)
+        XCTAssertEqual(try s.snapshot(), historical)
+        try s.transaction { $0.groups[0].name = "still writable" }
+    }
+
+    func testLegacyAliasedRecordShipmentIDsRemainRoundTrippableAndReimportable() throws {
+        let s = try store()
+        _ = try s.snapshot()
+        let value = shipment()
+        let preview = try s.previewBackup(JSONEncoder().encode([value]))
+        XCTAssertEqual(preview.incoming.records.first?.id, value.id)
+        XCTAssertEqual(preview.incoming.records.first?.shipmentID, value.id)
+        _ = try s.importBackup(preview, policy: nil)
+        let saved = try s.snapshot()
+        for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
+            _ = try s.importBackup(s.previewBackup(s.exportBackup()), policy: policy)
+            XCTAssertEqual(try s.snapshot(), saved)
+        }
+        let fresh = try store(root.appendingPathComponent("aliased-restore"))
+        _ = try fresh.importBackup(fresh.previewBackup(s.exportBackup()), policy: nil)
+        XCTAssertEqual(try fresh.snapshot().shipments, saved.shipments)
+        XCTAssertEqual(try fresh.snapshot().records, saved.records)
+        XCTAssertNoThrow(try fresh.previewBackup(fresh.exportBackup()))
+    }
+
+    func testTrainIDsCannotCollideWithExistingOtherEntitiesInEitherImportDirection() throws {
+        let s = try store()
+        let base = try s.snapshot()
+        let value = shipment()
+        let record = PickupRecord(groupID: base.groups[0].id, code: value.pickupCode, source: value.note, shipmentID: value.id)
+        let ticket = TrainTicket(fields: TrainTicketFields(departureDate: "2026-10-31", trainNumber: "G123",
+            departureStation: "北京南", departureTime: "23:00", arrivalStation: "上海虹桥",
+            arrivalDate: "2026-11-01", arrivalTime: "05:00"))
+        try s.transaction { $0.shipments = [value]; $0.records = [record]; $0.trainTickets = [ticket] }
+        let before = try s.snapshot()
+        let bytes = try Data(contentsOf: dataURL)
+        var backups: [PickupDataset] = []
+        for id in [base.groups[0].id, record.id, value.id] {
+            var incoming = PickupDataset(groups: [PickupGroup(name: "new", sortOrder: 0)], records: [], shipments: [], trainTickets: [ticket])
+            incoming.trainTickets?[0].id = id
+            backups.append(incoming)
+        }
+        let group = PickupGroup(name: "new", sortOrder: 0)
+        var groupCollision = group; groupCollision.id = ticket.id
+        backups.append(PickupDataset(groups: [groupCollision], records: [], shipments: []))
+        backups.append(PickupDataset(groups: [group], records: [PickupRecord(id: ticket.id, groupID: group.id, code: "42")], shipments: []))
+        var shipmentCollision = value; shipmentCollision.id = ticket.id; shipmentCollision.trackingNumber = "OTHER"
+        backups.append(PickupDataset(groups: [group], records: [PickupRecord(groupID: group.id, code: shipmentCollision.pickupCode,
+            source: shipmentCollision.note, shipmentID: ticket.id)], shipments: [shipmentCollision]))
+        for incoming in backups {
+            let preview = try s.previewBackup(JSONEncoder().encode(incoming))
+            XCTAssertTrue(preview.hasConflicts)
+            for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
+                XCTAssertThrowsError(try s.importBackup(preview, policy: policy))
+                XCTAssertEqual(try s.snapshot(), before)
+                XCTAssertEqual(try Data(contentsOf: dataURL), bytes)
+            }
+        }
+    }
+
     func testBackupRoundTripAndConflictPoliciesAndStalePreview() throws {
         let s = try store()
         let initial = try s.snapshot()
