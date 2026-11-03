@@ -59,12 +59,25 @@ enum ReminderReconciliation {
     }
 }
 
-final class NotificationManager {
+final class NotificationManager: NSObject, UNUserNotificationCenterDelegate {
     static let shared = NotificationManager()
+    static var foregroundPresentationOptions: UNNotificationPresentationOptions { [.banner, .list, .sound] }
 
     private let center = UNUserNotificationCenter.current()
 
-    private init() {}
+    private override init() { super.init() }
+
+    // The center holds its delegate weakly; this process-lifetime singleton owns it.
+    // Registration neither asks permission nor schedules/reconciles notifications.
+    func registerForForegroundPresentation() {
+        center.delegate = self
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler(Self.foregroundPresentationOptions)
+    }
 
     func requestAuthorization() async -> Bool {
         do {

@@ -17,11 +17,11 @@
 - 不添加签名、设备token、UUID或PassKey。复用现有AISecureNetwork拒绝重定向；Cookie不进全局Cookie jar，域、路径、有效期及头注入检查。
 - 每次读取第一页，最多8笔活跃实物订单详情，总预算30秒；单票20秒。每个请求有超时与主动取消，取消后不发后续请求；无自动重试或付费fallback。
 - 解析orderList、multiPackageTrackInfoList、carriageInfo及每包裹orderTrackShowList；服务／虚拟、取消／已完成等不作为新快递。无真实单号不拿订单号顶替，拆包不混轨迹，重复／错配拒绝。当前没有无运单订单工作台。
-- 401或业务code=3归登录失效，403/429归需验证；未知JSON／结构归解析失败，不当空成功。响应接收后检查大小5MiB（复用网络层不是流式内存硬上限）。服务端Cookie轮换只在本次操作内跟随，不自动重写持久会话；长期有效性需实测。
+- 401或业务code=3归登录失效，403/429归需验证；未知JSON／结构归解析失败，不当空成功。响应接收后检查大小5MiB（复用网络层不是流式内存硬上限）。验证返回轮换后的fresh Cookie供用户确认保存；后续读取／查询仅在显式会话代次和原快照仍匹配时保存轮换值。长期有效性需实测。
 
 ### 官方手机网页
 - 页面：`https://plogin.m.jd.com/login/login`、`https://trade.m.jd.com/order/orderlist_jdm.shtml`。
-- App前台WebKit，document-start捕获页面自身fetch/XHR，字段白名单投递native，DOM备用要求订单参数与唯一运单头。无Cookie／原始响应JS桥；未知结构不能当0订单。
+- App前台WebKit，document-start捕获页面自身fetch/XHR，字段白名单投递native。物流详情无可信容器证据，因此停用整页DOM物流兜底，避免推荐区节点混入；订单列表DOM及安全验证识别保留。无Cookie／原始响应JS桥；未知结构不能当0订单。
 - 当前第一页，最多8个详情，总预算30秒；单票列表+详情20秒，每页12秒。缺席历史订单明确失败，不猜身份；不能在后台执行WebKit时明确不支持。
 
 已有backendBinding继续使用后台；显式UAPI/Tmini选择不变。物流新旧时间拦截不恢复。两条链路均保留详细安全诊断：阶段、固定原因、HTTP及白名单网络错误码、数量；不输出Cookie、密码、完整URL、订单或单号、原始响应。见`JD-DETAILED-DIAGNOSTICS.md`。

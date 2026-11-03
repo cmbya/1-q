@@ -37,8 +37,16 @@ enum TrainTicketRecognition {
     private static func fieldLines(_ text: String) -> String {
         text.replacingOccurrences(of: "(?:" + fieldNames + ")\\s*[:：]", with: "\n$0", options: .regularExpression)
     }
+    // Remove only the gate-owned token, never an entire line that may also
+    // contain a real train number. Share this evidence with local/AI guards.
+    static func trainEvidence(_ text: String) -> String {
+        let gatePattern = #"检票口[ \t]*[:：]?[ \t]*[A-Za-z0-9]+(?:[、,，/\-][A-Za-z0-9]+)*"#
+        return text.replacingOccurrences(of: gatePattern, with: "", options: .regularExpression)
+    }
     static func hasMultiplePassengers(_ value: String) -> Bool {
-        value.range(of: #"[、/]"#, options: .regularExpression) != nil
+        let passengerListPattern = #"[\p{L}*＊·][\p{L}*＊· .-]*\s*[、/,，;；]\s*[\p{L}*＊·]"#
+        return value.range(of: passengerListPattern, options: .regularExpression) != nil
+            || value.range(of: #"[、/]"#, options: .regularExpression) != nil
             || value.range(of: #"[\p{Han}][\p{Han}*＊·]{0,15}[\s,，;；]+[\p{Han}][\p{Han}*＊·]{0,15}"#, options: .regularExpression) != nil
     }
     private static let singleValueFieldGroups = [
@@ -56,7 +64,7 @@ enum TrainTicketRecognition {
                 throw TrainTicketRecognitionError.ambiguous
             }
         }
-        let trains = matches(#"(?i)(?<![A-Z0-9])[GDCZTKYLS]\d{1,5}(?![A-Z0-9])"#, text)
+        let trains = matches(#"(?i)(?<![A-Z0-9])[GDCZTKYLS]\d{1,5}(?![A-Z0-9])"#, trainEvidence(text))
         let trainLabels = matches(#"车次\s*[:：]"#, text)
         let passengers = matches(#"(?:乘车人|旅客|姓名)[ \t]*[:：]?[ \t]*([^\n]+)"#, fieldLines(text))
         let departureLabels = matches(#"(?:出发日期|乘车日期)\s*[:：]"#, text)
@@ -109,7 +117,7 @@ enum TrainTicketRecognition {
         f.departureDate = normalizedDate(label("出发日期|乘车日期")) ?? ""
         f.arrivalDate = normalizedDate(label("到达日期")) ?? ""
         f.trainNumber = label("车次")
-        if f.trainNumber.isEmpty { f.trainNumber = matches(#"(?i)(?<![A-Z0-9])[GDCZTKYLS]\d{1,5}(?![A-Z0-9])"#, evidence).first?[0] ?? "" }
+        if f.trainNumber.isEmpty { f.trainNumber = matches(#"(?i)(?<![A-Z0-9])[GDCZTKYLS]\d{1,5}(?![A-Z0-9])"#, trainEvidence(evidence)).first?[0] ?? "" }
         f.departureStation = label("出发站|始发站")
         f.arrivalStation = label("到达站|终到站")
         f.departureTime = normalizedTime(label("发车时间|出发时间")) ?? ""

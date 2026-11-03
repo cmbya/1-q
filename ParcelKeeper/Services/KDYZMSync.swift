@@ -117,6 +117,23 @@ struct KDYZMSyncReport {
         "新增 \(imported) 票，更新 \(updated) 票，未变化 \(unchanged) 票，跳过 \(skipped) 票；\(noWaybill) 个订单尚无运单。同步只读取后台快照，不代表后台已完成平台采集；零订单也不保证购物账号没有订单。"
     }
 }
+/// Flat ordered union of history lines. Merge content, not nested snapshots: this
+/// preserves intermediate paid/platform histories through repeated source switches
+/// without recursively embedding the previous aggregate or duplicating nodes.
+enum TrackingQueryHistory {
+    static func merged(_ histories: String?...) -> String {
+        var seen = Set<String>()
+        var lines: [String] = []
+        for history in histories.compactMap({ $0 }) {
+            for line in history.components(separatedBy: "\n") {
+                if line == "【原有历史】" { continue } // flatten legacy aggregate marker
+                if seen.insert(line).inserted { lines.append(line) }
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
 enum KDYZMMerger {
     static func carrierKey(_ raw: String) -> String {
         if let c = CarrierDetector.carrierMentioned(in: raw) { return c.code }
@@ -145,8 +162,10 @@ enum KDYZMMerger {
         let combined = Array(Set((local.backendEvents ?? []) + incoming)).sorted {
             $0.time == $1.time ? $0.description < $1.description : $0.time > $1.time
         }
-        if local.backendEvents == nil { local.backendPreviousHistory = local.queryInfo }
-        let priorHistory = local.backendPreviousHistory
+        let priorHistory = local.logisticsSource != "kdyzm" || local.backendEvents == nil
+            ? TrackingQueryHistory.merged(local.queryInfo, local.backendPreviousHistory)
+            : TrackingQueryHistory.merged(local.backendPreviousHistory)
+        local.backendPreviousHistory = priorHistory.isEmpty ? nil : priorHistory
         local.backendEvents = combined
         local.backendLogisticsUpdatedAt = successTime
         local.logisticsInfo = incoming.sorted {
@@ -158,9 +177,7 @@ enum KDYZMMerger {
             let time = (try? KDYZMTime.date($0.time)).map { ShipmentDateDisplay.string($0) } ?? $0.timeText
             return [time, $0.description, $0.location].filter { !$0.isEmpty }.joined(separator: " · ")
         }.joined(separator: "\n") + (remote.logisticsTruncated == true ? "\n【后台轨迹已截断，非完整历史；本地已有节点保留】" : "")
-        if let priorHistory, !priorHistory.isEmpty, priorHistory != local.queryInfo {
-            local.queryInfo = (local.queryInfo ?? "") + "\n【原有历史】\n" + priorHistory
-        }
+        local.queryInfo = TrackingQueryHistory.merged(local.queryInfo, priorHistory)
         // signed is a logistics fact, not proof the user collected the parcel.
         // Never mutate PickupRecord.isCompleted from remote signed/picked.
         if recipientCollected { local.status = .delivered }

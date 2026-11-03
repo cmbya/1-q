@@ -159,6 +159,8 @@ struct AddShipmentSheet: View {
             saveError = ShipmentShortcutError.invalidNumber.localizedDescription
             return
         }
+        // Parsed logistics belong to the original waybill, not an edited identifier.
+        let preservesDraftIdentity = normalized == (try? ShipmentShortcutParser.number(initialDraft.trackingNumber))
         let shipment = Shipment(
             trackingNumber: normalized,
             carrierName: selectedCarrier.name,
@@ -166,7 +168,10 @@ struct AddShipmentSheet: View {
             status: status,
             note: note.trimmingCharacters(in: .whitespacesAndNewlines),
             pickupCode: pickupCode.trimmingCharacters(in: .whitespacesAndNewlines),
-            reminderDate: nil
+            reminderDate: nil,
+            logisticsInfo: preservesDraftIdentity ? initialDraft.logisticsInfo : nil,
+            logisticsTime: preservesDraftIdentity ? initialDraft.logisticsTime : nil,
+            queryInfo: preservesDraftIdentity ? initialDraft.queryInfo : nil
         )
 
         guard store.beginReminderOperation() else { saveError = "提醒操作正在进行，请稍后重试。"; return }

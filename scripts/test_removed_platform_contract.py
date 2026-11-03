@@ -42,8 +42,10 @@ class RemovedPlatformContract(unittest.TestCase):
         view = source('ParcelKeeper/Views/MallImportView.swift')
         login = view.split('let cookies = try await browser.capture()', 1)[1].split('browser.destroy(); saved()', 1)[0]
         imported = view.split('private func saveImportedCookie()', 1)[1].split('private func safeFailure', 1)[0]
-        for body, save in [(login, 'MallSession(platform: browser.platform).save'), (imported, 'session.save(parsed)')]:
-            self.assertLess(body.index('browser.verify(cookies)' if body is login else '.verifySession()'), body.index(save))
+        self.assertLess(login.index('browser.verify(cookies)'), login.index('MallSession(platform: browser.platform).save(fresh, expectedGeneration: generation)'))
+        self.assertLess(imported.index('.verifiedCookies()'), imported.index('MallSession(platform: currentPlatform).save(fresh, expectedGeneration: generation)'))
+        verify = view.split('func verifiedCookies()', 1)[1].split('func fetchOrders()', 1)[0]
+        self.assertIn('try await verifySession()', verify)
         self.assertIn('try await MallImportClient(platform: platform, cookies: cookies).verifySession()', view)
         self.assertIn('case .pddDirect: try await MallDirectClient(platform: platform, cookies: cookies).verifySession()', view)
         direct = source('ParcelKeeper/Services/MallDirectClient.swift')

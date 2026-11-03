@@ -95,16 +95,18 @@ struct BatchImportSheet: View {
 
         for index in drafts.indices where drafts[index].isSelected {
             let draft = drafts[index]
-            let shipment = Shipment(
-                trackingNumber: CarrierDetector.sanitize(draft.trackingNumber),
-                carrierName: draft.carrier.name,
-                carrierCode: draft.carrier.code,
-                status: draft.status,
-                note: draft.note.trimmingCharacters(in: .whitespacesAndNewlines),
-                pickupCode: draft.pickupCode.trimmingCharacters(in: .whitespacesAndNewlines)
-            )
-
             do {
+                let shipment = Shipment(
+                    trackingNumber: try ShipmentShortcutParser.number(draft.trackingNumber),
+                    carrierName: draft.carrier.name,
+                    carrierCode: draft.carrier.code,
+                    status: draft.status,
+                    note: draft.note.trimmingCharacters(in: .whitespacesAndNewlines),
+                    pickupCode: draft.pickupCode.trimmingCharacters(in: .whitespacesAndNewlines),
+                    logisticsInfo: draft.logisticsInfo,
+                    logisticsTime: draft.logisticsTime,
+                    queryInfo: draft.queryInfo
+                )
                 try store.addThrowing(shipment)
                 added += 1
                 drafts[index].isSelected = false

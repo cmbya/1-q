@@ -49,6 +49,34 @@ final class AIServiceTests: XCTestCase {
         let envelope: [String: Any] = ["choices": [["message": ["content": String(data: content, encoding: .utf8)!]]]]
         return String(data: try! JSONSerialization.data(withJSONObject: envelope), encoding: .utf8)!
     }
+    func testTrainAIAllowsGateTokenButRejectsPassengerListsBeforeRequest() async throws {
+        try enableShipmentAI()
+        let raw = "出发日期：2026-11-04\n车次：G123\n出发站：北京南\n发车时间：09:00\n到达站：上海虹桥\n检票口：C2\n乘车人：John Smith"
+        let expected = try TrainTicketRecognition.parse(raw)
+        let content = String(data: try JSONEncoder().encode(expected), encoding: .utf8)!
+        let envelope: [String: Any] = ["choices": [["message": ["content": content]]]]
+        network.responses = [(200, String(data: try JSONSerialization.data(withJSONObject: envelope), encoding: .utf8)!)]
+        let result = try await service.extractTrainTicket(raw)
+        XCTAssertEqual(result, expected)
+        XCTAssertEqual(network.requests.count, 1)
+        for list in ["John Smith; Jane Doe", "John Smith；Jane Doe"] {
+            network.requests = []
+            do { _ = try await service.extractTrainTicket(raw.replacingOccurrences(of: "John Smith", with: list)); XCTFail("Passenger list accepted") }
+            catch { guard case TrainTicketRecognitionError.ambiguous = error else { return XCTFail("\(error)") } }
+            XCTAssertTrue(network.requests.isEmpty)
+        }
+    }
+
+    func testMissingShipmentNumberIsRejectedBeforeNetworkWithoutFallback() async throws {
+        try enableShipmentAI()
+        for text in ["没有运单号", "订单号：AB123456", "手机号：13800138000", "运单号：SF12345678-90123"] {
+            network.requests = []
+            do { _ = try await service.extractShipment(text); XCTFail("Missing number accepted: \(text)") }
+            catch { guard case ShipmentShortcutError.missingNumber = error else { return XCTFail("\(error)") } }
+            XCTAssertTrue(network.requests.isEmpty, "Must not send sensitive text or try fallback models")
+        }
+    }
+
     func testWrappedLockerAndShortDrinkCodesKeepAIProvenance() async throws {
         try service.saveConfiguration(config(), privacyConfirmed: true)
         try service.reuseKey(from: nil, expectedEndpoint: config().baseURL)

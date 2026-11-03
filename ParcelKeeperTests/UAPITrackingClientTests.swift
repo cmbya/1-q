@@ -18,8 +18,10 @@ final class UAPITrackingClientTests: XCTestCase {
         var headers: [String: String] = [:]
         var body = Data()
         var error: Error?
+        var onRequest: (() throws -> Void)?
         func data(for request: URLRequest) async throws -> (Data, URLResponse) {
             requests.append(request)
+            try onRequest?()
             if let error { throw error }
             return (body, HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: headers)!)
         }
@@ -307,6 +309,38 @@ final class UAPITrackingClientTests: XCTestCase {
         XCTAssertNil(settings.usageSnapshot())
     }
 
+    func testConfigChangedDuringResponseRejectsResultAndUsageWithoutRetry() async throws {
+        for replace in [false, true] {
+            try enable(); try payload()
+            network.headers = ["UAPI-Credits-Charged": "40"]
+            let previousRequests = network.requests.count
+            network.onRequest = {
+                if replace { try self.settings.saveKey("synthetic-replacement") }
+                else { try self.settings.setEnabled(false) }
+            }
+            do { _ = try await query(); XCTFail("Retired request must not succeed") }
+            catch { XCTAssertEqual(error as? UAPIError, .configurationChanged) }
+            XCTAssertNil(settings.usageSnapshot())
+            XCTAssertEqual(network.requests.count, previousRequests + 1)
+            network.onRequest = nil
+        }
+    }
+    func testConfigurationCommitRejectsRetiredTokenWithoutRunningOperation() throws {
+        try enable()
+        let token = try settings.configurationToken()
+        var wrote = false
+        try settings.withConfiguration(token) { wrote = true }
+        XCTAssertTrue(wrote)
+        wrote = false
+        try settings.setEnabled(false)
+        XCTAssertThrowsError(try settings.withConfiguration(token) { wrote = true }) { XCTAssertEqual($0 as? UAPIError, .configurationChanged) }
+        XCTAssertFalse(wrote)
+        try settings.setEnabled(true, privacyConfirmed: true)
+        let replacementToken = try settings.configurationToken()
+        try settings.saveKey("replacement")
+        XCTAssertThrowsError(try settings.withConfiguration(replacementToken) { wrote = true })
+        XCTAssertFalse(wrote)
+    }
     func testMalformedAndCancellationDoNotLeakProviderErrors() async throws {
         try enable()
         network.body = Data("not json".utf8); await assertError(.invalidResponse)

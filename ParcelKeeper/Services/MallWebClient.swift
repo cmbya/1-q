@@ -77,9 +77,15 @@ struct MallTrackingClient: MallTrackingQuerying {
     func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
         try Task.checkCancellation()
-        let cookies = try MallSession(platform: platform).load()
-        if platform == .jd { return try await JDInAppClient(cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
-        return try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
+        let generation = MallSession.generation(for: platform)
+        let cookies = try MallSession.withGeneration(platform: platform, expected: generation) {
+            try MallSession(platform: platform).load()
+        }
+        let result: UAPITrackingResult
+        if platform == .jd { result = try await JDInAppClient(cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
+        else { result = try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
+        try Task.checkCancellation()
+        return try MallSession.withGeneration(platform: platform, expected: generation) { result }
     }
 }
 enum MallWebError: LocalizedError, Equatable {
@@ -97,6 +103,24 @@ enum MallWebError: LocalizedError, Equatable {
     }
 }
 struct MallSession {
+    // Synchronous only: never retain this lock across await. Recursive so guarded
+    // business commits can load/save without a check-then-write race.
+    private static let sessionLock = NSRecursiveLock()
+    private static var generations: [MallPlatform: UUID] = [:]
+    private static func currentGeneration(for platform: MallPlatform) -> UUID {
+        if let value = generations[platform] { return value }
+        let value = UUID(); generations[platform] = value; return value
+    }
+    private static func advanceGeneration(for platform: MallPlatform) { generations[platform] = UUID() }
+    static func generation(for platform: MallPlatform) -> UUID {
+        sessionLock.lock(); defer { sessionLock.unlock() }
+        return currentGeneration(for: platform)
+    }
+    static func withGeneration<T>(platform: MallPlatform, expected: UUID, operation: () throws -> T) throws -> T {
+        sessionLock.lock(); defer { sessionLock.unlock() }
+        guard currentGeneration(for: platform) == expected else { throw CancellationError() }
+        return try operation()
+    }
     let platform: MallPlatform
     var keys: any AIKeyStore
     init(platform: MallPlatform, keys: (any AIKeyStore)? = nil) {
@@ -146,6 +170,7 @@ struct MallSession {
         return names.contains("PDDAccessToken") && (names.contains("pdd_user_id") || names.contains("pdduid"))
     }
     func load() throws -> [TaobaoTrialCookie] {
+        Self.sessionLock.lock(); defer { Self.sessionLock.unlock() }
         do {
             guard let text = try keys.read(), text.utf8.count < 100_000 else { throw MallWebError.authentication }
             let cookies = try JSONDecoder().decode([TaobaoTrialCookie].self, from: Data(text.utf8))
@@ -156,16 +181,46 @@ struct MallSession {
             return active
         } catch { throw MallWebError.authentication }
     }
-    func save(_ cookies: [TaobaoTrialCookie]) throws {
-        guard !cookies.isEmpty, cookies.allSatisfy({ Self.valid($0, platform: platform) }) else { throw MallWebError.authentication }
-        do {
-            let data = try JSONEncoder().encode(cookies)
-            guard data.count < 100_000, let text = String(data: data, encoding: .utf8) else { throw MallWebError.authentication }
-            try keys.save(text)
-            guard try keys.read() == text else { throw MallWebError.authentication }
-        } catch { throw MallWebError.authentication }
+    private static func encoded(_ cookies: [TaobaoTrialCookie]) throws -> Data {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(cookies.sorted { ($0.domain, $0.path, $0.name) < ($1.domain, $1.path, $1.name) })
+    }
+    private func prepared(_ cookies: [TaobaoTrialCookie]) throws -> String {
+        guard !cookies.isEmpty, cookies.allSatisfy({ Self.valid($0, platform: platform) }),
+              Self.hasLoginCredentials(cookies, platform: platform) else { throw MallWebError.authentication }
+        // Preserve the existing bare Cookie-array Keychain JSON schema.
+        let data = try Self.encoded(cookies)
+        guard data.count < 100_000, let text = String(data: data, encoding: .utf8) else { throw MallWebError.authentication }
+        return text
+    }
+    private func write(_ text: String) throws {
+        try keys.save(text)
+        guard try keys.read() == text else { throw MallWebError.authentication }
+    }
+    func save(_ cookies: [TaobaoTrialCookie], expectedGeneration: UUID? = nil) throws {
+        let text = try prepared(cookies)
+        Self.sessionLock.lock(); defer { Self.sessionLock.unlock() }
+        if let expectedGeneration {
+            guard Self.currentGeneration(for: platform) == expectedGeneration else { throw CancellationError() }
+        }
+        // A write may have changed Keychain even when it throws or readback fails.
+        defer { Self.advanceGeneration(for: platform) }
+        do { try write(text) } catch { throw MallWebError.authentication }
+    }
+    @discardableResult
+    func saveRotated(_ cookies: [TaobaoTrialCookie], replacing original: [TaobaoTrialCookie], expectedGeneration: UUID) throws -> Bool {
+        let text = try prepared(cookies)
+        Self.sessionLock.lock(); defer { Self.sessionLock.unlock() }
+        guard Self.currentGeneration(for: platform) == expectedGeneration else { return false }
+        guard let active = try? load(), try Self.encoded(active) == Self.encoded(original) else { return false }
+        // Compare-and-save prevents an old request replacing newer rotation/login.
+        if try Self.encoded(cookies) == Self.encoded(original) { return true }
+        do { try write(text); return true }
+        catch { Self.advanceGeneration(for: platform); throw MallWebError.authentication }
     }
     func clear() throws {
+        Self.sessionLock.lock(); defer { Self.sessionLock.unlock() }
+        defer { Self.advanceGeneration(for: platform) }
         do { try keys.delete(); guard try keys.read() == nil else { throw MallWebError.authentication } }
         catch { throw MallWebError.authentication }
     }

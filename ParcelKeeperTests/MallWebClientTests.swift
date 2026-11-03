@@ -58,6 +58,99 @@ final class MallWebClientTests: XCTestCase {
         XCTAssertThrowsError(try session.clear())
     }
 
+    func testExplicitSaveClearAndUncertainWritesInvalidateOnlyTheirPlatform() throws {
+        let keys = MallMemoryKeys()
+        let session = MallSession(platform: .jd, keys: keys)
+        let cookies = try MallCookieImport.parse("thor=fixture", platform: .jd)
+        let jd = MallSession.generation(for: .jd), pdd = MallSession.generation(for: .pdd)
+        try session.save(cookies)
+        XCTAssertNotEqual(jd, MallSession.generation(for: .jd))
+        XCTAssertEqual(pdd, MallSession.generation(for: .pdd))
+        var committed = false
+        XCTAssertThrowsError(try MallSession.withGeneration(platform: .jd, expected: jd) { committed = true })
+        XCTAssertFalse(committed)
+        let beforeFailure = MallSession.generation(for: .jd)
+        keys.fail = true
+        XCTAssertThrowsError(try session.save(cookies))
+        XCTAssertNotEqual(beforeFailure, MallSession.generation(for: .jd))
+        let beforeClear = MallSession.generation(for: .jd)
+        XCTAssertThrowsError(try session.clear())
+        XCTAssertNotEqual(beforeClear, MallSession.generation(for: .jd))
+    }
+    func testChangedThenThrowAndReadbackMismatchStillInvalidate() throws {
+        let keys = MallMemoryKeys()
+        let session = MallSession(platform: .jd, keys: keys)
+        let cookies = try MallCookieImport.parse("thor=fixture", platform: .jd)
+        var generation = MallSession.generation(for: .jd)
+        keys.saveThenThrow = true
+        XCTAssertThrowsError(try session.save(cookies))
+        XCTAssertNotNil(keys.value)
+        XCTAssertNotEqual(generation, MallSession.generation(for: .jd))
+        keys.saveThenThrow = false; keys.readbackMismatch = true
+        generation = MallSession.generation(for: .jd)
+        XCTAssertThrowsError(try session.save(cookies))
+        XCTAssertNotEqual(generation, MallSession.generation(for: .jd))
+    }
+    func testFreshExplicitSaveAndRotationCannotResurrectOldSession() throws {
+        let keys = MallMemoryKeys()
+        let session = MallSession(platform: .jd, keys: keys)
+        let old = try MallCookieImport.parse("thor=old", platform: .jd)
+        let fresh = try MallCookieImport.parse("thor=fresh", platform: .jd)
+        let newer = try MallCookieImport.parse("thor=newer", platform: .jd)
+        try session.save(old)
+        let generation = MallSession.generation(for: .jd)
+        XCTAssertTrue(try session.saveRotated(fresh, replacing: old, expectedGeneration: generation))
+        XCTAssertEqual(generation, MallSession.generation(for: .jd))
+        XCTAssertFalse(try session.saveRotated(newer, replacing: old, expectedGeneration: generation))
+        XCTAssertEqual(try session.load().first?.value, "fresh")
+        try session.save(newer)
+        XCTAssertFalse(try session.saveRotated(old, replacing: fresh, expectedGeneration: generation))
+        XCTAssertEqual(try session.load().first?.value, "newer")
+        try session.clear()
+        XCTAssertFalse(try session.saveRotated(newer, replacing: fresh, expectedGeneration: generation))
+        XCTAssertThrowsError(try session.save(newer, expectedGeneration: generation))
+        XCTAssertNil(keys.value)
+    }
+    func testRotationWriteFailureInvalidatesAndLegacyJSONArrayStillLoads() throws {
+        let keys = MallMemoryKeys()
+        let legacy = MallSession(platform: .jd, keys: keys)
+        let old = try MallCookieImport.parse("thor=old", platform: .jd)
+        let fresh = try MallCookieImport.parse("thor=fresh", platform: .jd)
+        keys.value = String(data: try JSONEncoder().encode(old), encoding: .utf8)
+        XCTAssertEqual(try legacy.load().first?.value, "old")
+        let generation = MallSession.generation(for: .jd)
+        keys.failWrite = true
+        XCTAssertThrowsError(try legacy.saveRotated(fresh, replacing: old, expectedGeneration: generation))
+        XCTAssertNotEqual(generation, MallSession.generation(for: .jd))
+        XCTAssertEqual(try legacy.load().first?.value, "old")
+    }
+    func testGenerationGuardSerializesConcurrentClearAndBusinessCommit() throws {
+        let keys = MallMemoryKeys()
+        let target = MallSession(platform: .jd, keys: keys)
+        try target.save(MallCookieImport.parse("thor=fixture", platform: .jd))
+        let generation = MallSession.generation(for: .jd)
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let clearStarted = DispatchSemaphore(value: 0), cleared = DispatchSemaphore(value: 0)
+        let commitFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            try? MallSession.withGeneration(platform: .jd, expected: generation) {
+                entered.signal(); _ = release.wait(timeout: .now() + 3)
+                commitFinished.signal()
+            }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        DispatchQueue.global().async {
+            clearStarted.signal(); try? target.clear(); cleared.signal()
+        }
+        XCTAssertEqual(clearStarted.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(cleared.wait(timeout: .now() + 0.05), .timedOut)
+        release.signal()
+        XCTAssertEqual(commitFinished.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(cleared.wait(timeout: .now() + 3), .success)
+        XCTAssertThrowsError(try MallSession.withGeneration(platform: .jd, expected: generation) { XCTFail("stale commit") })
+        XCTAssertThrowsError(try target.load())
+    }
+
     func testPDDOrdersDoNotUseOrderNumberAsWaybill() throws {
         let root: [String: Any] = ["orders": [["order_sn": "261001-123456789", "tracking_number": "", "order_goods": [["goods_name": "商品"]]]]]
         let orders = try MallWebParser.orders(root, platform: .pdd)
@@ -105,10 +198,17 @@ final class MallWebClientTests: XCTestCase {
 private final class MallMemoryKeys: AIKeyStore {
     var value: String?
     var fail = false
+    var failWrite = false
+    var saveThenThrow = false
+    var readbackMismatch = false
     func read(endpoint: String) throws -> String? { try read() }
     func save(_ value: String, endpoint: String) throws { try save(value) }
     func delete(endpoint: String) throws { try delete() }
-    func read() throws -> String? { if fail { throw MallWebError.authentication }; return value }
-    func save(_ value: String) throws { if fail { throw MallWebError.authentication }; self.value = value }
+    func read() throws -> String? { if fail { throw MallWebError.authentication }; return readbackMismatch ? "mismatch" : value }
+    func save(_ value: String) throws {
+        if fail || failWrite { throw MallWebError.authentication }
+        self.value = value
+        if saveThenThrow { throw MallWebError.authentication }
+    }
     func delete() throws { if fail { throw MallWebError.authentication }; value = nil }
 }

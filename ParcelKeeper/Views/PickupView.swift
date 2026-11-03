@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PickupView: View {
     @EnvironmentObject private var store: ShipmentStore
+    @Binding var selectedGroupID: UUID?
     @State private var showingAdd = false
     @State private var showingGroups = false
     @State private var showingImport = false
@@ -11,18 +12,26 @@ struct PickupView: View {
     @State private var editing: PickupRecord?
     @State private var error: String?
 
+    private var visibleGroups: [PickupGroup] {
+        guard let selectedGroupID, store.groups.contains(where: { $0.id == selectedGroupID }) else { return store.groups }
+        return store.groups.filter { $0.id == selectedGroupID }
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 Section {
                     Button("粘贴文字识别取码", systemImage: "doc.on.clipboard") { showingImport = true }
+                    if selectedGroupID != nil {
+                        Button("查看全部分组") { selectedGroupID = nil }
+                    }
                 }
                 Picker("状态", selection: $filter) {
                     Text("未完成").tag(0)
                     Text("已完成").tag(1)
                     Text("全部").tag(2)
                 }.pickerStyle(.segmented)
-                ForEach(store.groups) { group in
+                ForEach(visibleGroups) { group in
                     Section(group.name) {
                         let records = store.pickupRecords.filter {
                             !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&

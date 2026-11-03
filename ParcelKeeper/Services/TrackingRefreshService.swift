@@ -8,7 +8,8 @@ enum TrackingRefreshMode: String, Codable, CaseIterable {
 struct TrackingRefreshReport {
     var succeeded = 0
     var skipped = 0
-    /// Number of tickets dispatched to each source (successes and failures).
+    /// Tickets attempted by route, including local preflight failures.
+    /// Compatibility field names, not actual HTTP request/billing counters.
     var taobaoCount = 0
     var uapiCount = 0
     var tminiCount = 0
@@ -28,8 +29,8 @@ struct TrackingRefreshReport {
     var stoppedReason: String?
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
-        value += " 取件助手后台派发\(backendCount)票。淘宝派发\(taobaoCount)票，京东派发\(jdCount)票，拼多多派发\(pddCount)票，UAPI派发\(uapiCount)票（实际收费以接口为准）。"
-        value += " Tmini派发\(tminiCount)票（付费渠道）。"
+        value += " 按渠道尝试票数：取件助手后台\(backendCount)票，淘宝\(taobaoCount)票，京东\(jdCount)票，拼多多\(pddCount)票，UAPI\(uapiCount)票，Tmini\(tminiCount)票。"
+        value += " 包含本地预检失败，不代表实际网络请求或收费次数；付费以接口实际计费为准。"
         if cachedCount > 0 { value += " 本地缓存命中 \(cachedCount) 票（未联网、未新增收费）。" }
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
         if let stoppedReason { value += " \(stoppedReason)" }
@@ -185,6 +186,7 @@ struct TrackingRefreshService {
         }
         if let failure = error as? UAPIError {
             switch failure {
+            case .configurationChanged: return .configurationChanged
             case .authentication: return .authentication
             case .notConfigured, .privacyConsentRequired, .invalidKey: return .configuration
             case .quota: return .quota
@@ -371,6 +373,18 @@ struct TrackingRefreshService {
         let number = try ShipmentShortcutParser.number(before.trackingNumber)
         if let expectedTrackingNumber, number != expectedTrackingNumber { throw PickupStorageError.stalePreview }
         let linkedID = snapshot.records.first(where: { $0.shipmentID == id })?.id
+        var mallGeneration: (platform: MallPlatform, expected: UUID)?
+        var uapiConfiguration: UAPIConfiguration?
+        // Generation guard outside dataset transaction, never across await.
+        func commitResult<T>(_ operation: () throws -> T) throws -> T {
+            if let mallGeneration {
+                return try MallSession.withGeneration(platform: mallGeneration.platform, expected: mallGeneration.expected, operation: operation)
+            }
+            if let uapiConfiguration {
+                return try client.withConfiguration(uapiConfiguration, operation: operation)
+            }
+            return try operation()
+        }
         do {
         let route = try Self.route(before, mode: mode)
         diagnosticLog.record(Self.routeEvent(route), operation: logID, counts: Self.routingDiagnostics(before, mode: mode))
@@ -388,12 +402,15 @@ struct TrackingRefreshService {
             result = try await taobaoClient.query(orderID: orderID, trackingNumber: number)
         case .mall(let platform):
             guard let orderID = before.platformOrderID,
-                  Shipment.validPlatformOrderID(orderID, platform: platform) else { throw MallWebError.unsupported }
+                  Shipment.validPlatformOrderID(orderID, platform: platform),
+                  let mallPlatform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
+            mallGeneration = (mallPlatform, MallSession.generation(for: mallPlatform))
             result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number, sourceURL: before.platformLogisticsURL.flatMap { Shipment.logisticsEntry($0, orderID: orderID) })
         case .tmini:
             tminiConfiguration = try tminiClient.configurationToken()
             result = try await tminiClient.query(trackingNumber: number)
         case .uapi:
+        uapiConfiguration = try client.configurationToken()
         // Shortcut optional text can arrive as "" instead of nil. Only an
         // entirely blank input means omitted; never repair nonblank credentials.
         let suppliedPhone: String?
@@ -418,7 +435,8 @@ struct TrackingRefreshService {
             throw UAPIError.invalidResponse
         }
         trace.begin(.merge)
-        let delivered = try store.transaction { data -> Bool in
+        let delivered = try commitResult {
+        try store.transaction { data -> Bool in
             if let tminiConfiguration { try tminiClient.validateConfiguration(tminiConfiguration) }
             guard let index = data.shipments.firstIndex(where: { $0.id == id }),
                   CarrierDetector.sanitize(data.shipments[index].trackingNumber) == number else { throw PickupStorageError.notFound }
@@ -432,7 +450,7 @@ struct TrackingRefreshService {
             let oldStatus = current.status
             current.logisticsInfo = result.logisticsInfo
             current.logisticsTime = result.logisticsTime
-            current.queryInfo = result.queryInfo
+            current.queryInfo = TrackingQueryHistory.merged(result.queryInfo, current.queryInfo, current.backendPreviousHistory)
             current.lastQueriedAt = result.queriedAt
             if !result.carrierName.isEmpty { current.carrierName = result.carrierName }
             if route == .uapi, !result.carrierCode.isEmpty { current.uapiCarrierCode = result.carrierCode }
@@ -450,13 +468,15 @@ struct TrackingRefreshService {
             trace.begin(.save)
             return oldStatus != .delivered && current.status == .delivered
         }
+        }
         reloadWidgets()
         return delivered
         } catch {
             // Never replace the original exception if recording the safe diagnostic fails.
             // No data transaction/lock spans the network await.
             if !(error is CancellationError), (error as? UAPIError) != .cancelled, (error as? TminiError) != .cancelled {
-                try? store.transaction { data in
+                try? commitResult {
+                try store.transaction { data in
                     guard let index = data.shipments.firstIndex(where: { $0.id == id }),
                           Self.sameIdentity(data.shipments[index], before),
                           data.shipments[index].status == before.status,
@@ -466,6 +486,7 @@ struct TrackingRefreshService {
                           let linkedID,
                           data.records.contains(where: { $0.id == linkedID && $0.shipmentID == id }) else { return }
                     data.shipments[index].lastRefreshError = Self.safeReason(error, platform: (try? Self.route(before, mode: mode))?.platform ?? before.originPlatform)
+                }
                 }
                 reloadWidgets()
             }
@@ -541,6 +562,10 @@ struct TrackingRefreshService {
                     report.stoppedReason = reason
                 }
                 if let failure = error as? MallWebError, failure.stopsBatch, let platform = route?.platform {
+                    blockedPlatforms.insert(platform)
+                    report.stoppedReason = reason
+                }
+                if let failure = error as? JDLoggedError, failure.stopsBatch, let platform = route?.platform {
                     blockedPlatforms.insert(platform)
                     report.stoppedReason = reason
                 }

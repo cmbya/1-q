@@ -6,6 +6,7 @@ final class JDDiagnostics {
     let operation: UUID
     let log: DiagnosticLog
     let trace: DiagnosticTrace
+    private let lock = NSLock()
     private var ended = false
     private var eventCounts: [DiagnosticEvent: Int] = [:]
     init(_ stage: DiagnosticStage, operation: UUID = UUID(), log: DiagnosticLog = .shared) {
@@ -14,8 +15,13 @@ final class JDDiagnostics {
         log.record(.jdOperationStarted, operation: operation, stage: stage)
         trace.begin(stage)
     }
-    func begin(_ stage: DiagnosticStage) { trace.begin(stage) }
+    func begin(_ stage: DiagnosticStage) {
+        lock.lock(); defer { lock.unlock() }
+        guard !ended else { return }
+        trace.begin(stage)
+    }
     func event(_ event: DiagnosticEvent, reason: DiagnosticReason? = nil, counts: [DiagnosticMetric: Int] = [:]) {
+        lock.lock(); defer { lock.unlock() }
         guard !ended else { return }
         // A broken page must not evict the final cause with a bridge-error flood.
         let count = eventCounts[event, default: 0]
@@ -24,10 +30,12 @@ final class JDDiagnostics {
         log.record(event, operation: operation, reason: reason, stage: trace.stage, counts: counts)
     }
     func finish() {
+        lock.lock(); defer { lock.unlock() }
         guard !ended else { return }; ended = true
         trace.finish(); log.record(.jdOperationFinished, operation: operation)
     }
     func fail(_ error: Error) {
+        lock.lock(); defer { lock.unlock() }
         guard !ended else { return }; ended = true
         let stage = trace.stage ?? .preflight
         let reason: DiagnosticReason

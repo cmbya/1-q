@@ -82,18 +82,26 @@ final class KDYZMNetworkTests: XCTestCase {
         XCTAssertNil(keys.value)
         XCTAssertEqual(t.requests.map(\.httpMethod), ["DELETE", "GET", "DELETE", "GET"])
     }
-    func testFailedEmptyAndOlderLogisticsPreserveEverything() throws {
+    func testFailedEmptyPreserveButOlderLogisticsIsApplied() throws {
         var local = Shipment(trackingNumber: "JD123456789012", carrierName: "京东物流", carrierCode: "jd", logisticsInfo: "旧轨迹", logisticsTime: Date(timeIntervalSince1970: 200), queryInfo: "旧完整轨迹", lastQueriedAt: Date(timeIntervalSince1970: 200))
         let original = local
         var remote = KDYZMRemoteShipment(id: "s", orderId: "o", accountId: "a", waybillNo: local.trackingNumber, carrier: local.carrierName, status: "transit", logisticsEvents: [.init(time: 100_000, timeText: "", description: "过早轨迹", location: "")], logisticsState: "error", logisticsUpdatedAt: 100_000)
         XCTAssertFalse(try KDYZMMerger.update(remote, local: &local, refresh: true))
         XCTAssertEqual(local, original)
         remote.logisticsState = "ok"
-        XCTAssertFalse(try KDYZMMerger.update(remote, local: &local, refresh: true))
-        XCTAssertEqual(local, original)
+        XCTAssertTrue(try KDYZMMerger.update(remote, local: &local, refresh: true))
+        XCTAssertEqual(local.logisticsTime, Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(local.logisticsInfo, "过早轨迹")
+        XCTAssertEqual(local.backendLogisticsUpdatedAt, Date(timeIntervalSince1970: 100))
+        XCTAssertNotNil(local.lastQueriedAt)
+        XCTAssertTrue(local.queryInfo?.contains("旧完整轨迹") == true)
+        let accepted = local
         remote.logisticsEvents = []
         XCTAssertFalse(try KDYZMMerger.update(remote, local: &local, refresh: true))
-        XCTAssertEqual(local, original)
+        XCTAssertEqual(local, accepted)
+        remote.logisticsState = "error"
+        XCTAssertFalse(try KDYZMMerger.update(remote, local: &local, refresh: true))
+        XCTAssertEqual(local, accepted)
     }
     func testEveryBackendPlatformRefreshUsesGenericJobAndPreservesManualRecord() async throws {
         for platform in ["taobao", "pdd", "jd", "douyin", "future_market"] {

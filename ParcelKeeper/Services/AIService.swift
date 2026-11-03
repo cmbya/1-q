@@ -403,6 +403,7 @@ final class AIService {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= 10000 else { throw AIServiceError.configuration }
         let numbers = ShipmentShortcutParser.numbers(in: text)
         guard numbers.count <= 1 else { throw ShipmentShortcutError.ambiguous }
+        guard !numbers.isEmpty else { throw ShipmentShortcutError.missingNumber }
         _ = try request(config, path: "chat/completions", body: Data())
         let models = [config.defaultModel] + config.fallbackModels
         guard !config.defaultModel.isEmpty, Set(models).count == models.count else { throw AIServiceError.configuration }

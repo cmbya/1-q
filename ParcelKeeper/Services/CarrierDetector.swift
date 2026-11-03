@@ -168,6 +168,11 @@ enum CarrierDetector {
 
     static func carrierMentioned(in text: String) -> CarrierOption? {
         let upper = text.uppercased()
+        // Canonical names must round-trip, including carriers without aliases.
+        if let exact = allCarriers.first(where: {
+            $0 != unknown && $0.name.uppercased() == upper.trimmingCharacters(in: .whitespacesAndNewlines)
+        }) { return exact }
+        if let named = allCarriers.first(where: { $0 != unknown && upper.contains($0.name.uppercased()) }) { return named }
         for (carrier, keywords) in carrierKeywords {
             if keywords.contains(where: { upper.contains($0.uppercased()) }) {
                 return carrier
@@ -207,8 +212,9 @@ enum CarrierDetector {
         return value.count >= 8 && value.count <= 28 && digitCount >= 6
     }
 
-    private static func isLikelyPhoneNumber(_ value: String) -> Bool {
-        value.count == 11 && value.first == "1" && value.allSatisfy(\.isNumber)
+    // One phone policy for extraction and strict manual/JSON validation.
+    static func isLikelyPhoneNumber(_ value: String) -> Bool {
+        matches(value, pattern: #"^1[3-9][0-9]{9}$"#)
     }
 
     private static func containsTrackingLabel(_ text: String) -> Bool {

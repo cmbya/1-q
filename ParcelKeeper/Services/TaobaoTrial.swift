@@ -193,6 +193,7 @@ final class TaobaoTrialClient {
             let bytes: Data; let response: URLResponse
             do { (bytes, response) = try await network.data(for: request) }
             catch is CancellationError { throw CancellationError() }
+            catch let error as URLError where error.code == .cancelled { throw CancellationError() }
             catch {
                 let failure = error as NSError
                 let domain = failure.domain == NSURLErrorDomain ? "NSURLErrorDomain" : "其他网络错误"

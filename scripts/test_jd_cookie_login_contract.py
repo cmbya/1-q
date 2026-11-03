@@ -36,7 +36,7 @@ class JDCookieLoginContract(unittest.TestCase):
         self.assertIn('JDDiagnostics(.credential)', imported)
         self.assertIn('jdDiagnostics?.begin(.jdSessionSave)', imported)
         self.assertIn('jdDiagnostics?.fail(error)', imported)
-        self.assertLess(imported.index('.verifySession()'), imported.index('session.save(parsed)'))
+        self.assertLess(imported.index('.verifiedCookies()'), imported.index('save(fresh, expectedGeneration: generation)'))
         self.assertIn('platform: currentPlatform, cookies: parsed', imported)
         self.assertIn('platform == currentPlatform', imported)
         self.assertIn('browser = MallLoginBrowser(platform: platform', source)

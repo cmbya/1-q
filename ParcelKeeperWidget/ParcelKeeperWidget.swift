@@ -56,7 +56,30 @@ struct PickupGroupSelection: WidgetConfigurationIntent {
 struct OpenPickupAppIntent: AppIntent {
     static var title: LocalizedStringResource = "打开快递管家"
     static var openAppWhenRun: Bool = true
-    func perform() async throws -> some IntentResult { .result() }
+    @Parameter(title: "分组 ID") var groupID: String?
+
+    // Missing parameters from existing widget actions still open the pickup list.
+    init() {}
+    init(groupID: UUID?) { self.groupID = groupID?.uuidString }
+
+    static func destination(groupID: UUID?) -> URL {
+        // Only typed UUIDs reach URL construction; no record codes/private text.
+        URL(string: "parcelkeeper://pickup" + (groupID.map { "/" + $0.uuidString } ?? ""))!
+    }
+
+    func perform() async throws -> some IntentResult & OpensIntent {
+        let selected: UUID?
+        if let raw = groupID {
+            guard let parsed = UUID(uuidString: raw),
+                  parsed.uuidString.caseInsensitiveCompare(raw) == .orderedSame else {
+                throw PickupStorageError.invalidData("组件分组参数无效，请重新配置组件")
+            }
+            selected = parsed
+        } else { selected = nil }
+        // App validates existence against its reloaded dataset. A deleted group
+        // safely opens all groups, and this intent never completes a pickup.
+        return .result(opensIntent: OpenURLIntent(Self.destination(groupID: selected)))
+    }
 }
 
 struct CompletePickupIntent: AppIntent {
@@ -145,8 +168,14 @@ struct PickupProvider: AppIntentTimelineProvider {
 
 struct PickupWidgetView: View {
     @Environment(\.widgetFamily) private var family
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let entry: PickupEntry
-    private var capacity: Int { family == .systemSmall ? 3 : family == .systemMedium ? 3 : 7 }
+    // Widgets cannot scroll: show fewer rows instead of shrinking readable text.
+    private var capacity: Int {
+        if dynamicTypeSize.isAccessibilitySize { return 1 }
+        if dynamicTypeSize >= .xLarge { return family == .systemLarge ? 3 : 1 }
+        return family == .systemLarge ? 6 : 2
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(entry.title).font(.headline).lineLimit(1)
@@ -167,16 +196,16 @@ struct PickupWidgetView: View {
                             .accessibilityLabel("标记取件码 \(record.code) 完成")
                             .privacySensitive()
                         }
-                        Button(intent: OpenPickupAppIntent()) {
+                        Button(intent: OpenPickupAppIntent(groupID: entry.groupID)) {
                             VStack(alignment: .leading, spacing: 1) {
-                                Text(record.code).font(.system(size: family == .systemSmall ? 12 : 14, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
-                                if !record.location.isEmpty { Text(record.location).font(.system(size: family == .systemSmall ? 9 : 11)).lineLimit(1) }
+                                Text(record.code).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                if !record.location.isEmpty { Text(record.location).font(.caption).lineLimit(1) }
                             }
                         }
                         .buttonStyle(.plain)
                         .privacySensitive()
                         .accessibilityElement(children: .combine)
-                        .accessibilityHint("打开 App")
+                        .accessibilityHint("打开 App 中的此取件分组")
                         Spacer(minLength: 0)
                     }
                 }
@@ -189,6 +218,8 @@ struct PickupWidgetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .containerBackground(.fill.tertiary, for: .widget)
+        // Completion AppIntent buttons still take precedence over background taps.
+        .widgetURL(OpenPickupAppIntent.destination(groupID: entry.groupID))
     }
 }
 

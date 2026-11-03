@@ -28,6 +28,14 @@ struct MallImportClient {
         }
     }
 
+    func verifiedCookies() async throws -> [TaobaoTrialCookie] {
+        if platform == .jd && MallSession.hasJDPCSession(cookies) {
+            return try await JDPCClient(cookies: cookies).verifySession()
+        }
+        try await verifySession()
+        return cookies
+    }
+
     func fetchOrders() async throws -> [MallCandidate] {
         switch route {
         case .jdInApp: return try await JDInAppClient(cookies: cookies).fetchOrders()
@@ -45,9 +53,11 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     private var setup: Task<Void, Never>?
     private(set) var active = true
     private(set) var jdDiagnostics: JDDiagnostics?
+    let sessionGeneration: UUID
 
     init(platform: MallPlatform, cookies: [TaobaoTrialCookie]) {
         self.platform = platform
+        sessionGeneration = MallSession.generation(for: platform)
         if platform == .jd { jdDiagnostics = JDDiagnostics(.jdLogin) }
         let config = WKWebViewConfiguration()
         config.websiteDataStore = platform == .jd ? WKWebsiteDataStore.nonPersistent() : MallBrowserContext.store(for: platform)
@@ -129,11 +139,8 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     func verify(_ cookies: [TaobaoTrialCookie]) async throws {
         guard active, let web else { throw CancellationError() }
         if platform == .jd {
-            if MallSession.hasJDPCSession(cookies) {
-                try await JDPCClient(cookies: cookies).verifySession()
-            } else {
-                try await JDInAppClient(cookies: cookies, browserStore: web.configuration.websiteDataStore).verifySession()
-            }
+            // Fresh official mobile context never borrows a PC thor session.
+            try await JDInAppClient(cookies: cookies, browserStore: web.configuration.websiteDataStore).verifySession()
         } else {
             try await MallImportClient(platform: platform, cookies: cookies).verifySession()
         }
@@ -158,6 +165,9 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
             guard let origin = URL(string: "https://" + cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
                   platform.allowed(origin), cookie.expiresDate.map({ $0 > Date() }) ?? true else { return nil }
             if platform == .jd {
+                // A mobile login may receive unrelated PC cookies. Do not publish
+                // thor from this entry or let it select the PC connector later.
+                guard cookie.name != "thor" else { return nil }
                 return TaobaoTrialCookie(name: cookie.name, value: cookie.value, domain: cookie.domain,
                                          path: cookie.path, secure: cookie.isSecure, expires: cookie.expiresDate,
                                          httpOnly: cookie.isHTTPOnly)
@@ -208,6 +218,7 @@ private struct MallLoginSheet: View {
                     Button(saving ? "正在保存" : "验证并保存会话") {
                         saving = true
                         browser.beginJDValidation()
+                        let generation = browser.sessionGeneration
                         saveTask = Task { @MainActor in
                             defer { saving = false; browser.jdDiagnostics?.fail(CancellationError()) }
                             do {
@@ -225,10 +236,12 @@ private struct MallLoginSheet: View {
                                 guard browser.active, !Task.isCancelled, !readOnly else { return }
                                 guard MallSession.hasLoginCredentials(fresh, platform: browser.platform) else { throw MallWebError.authentication }
                                 browser.jdDiagnostics?.begin(.jdSessionSave)
-                                try MallSession(platform: browser.platform).save(fresh)
-                                browser.commitJDContext()
-                                browser.finishJDLogin()
-                                browser.destroy(); saved(); dismiss()
+                                try MallSession.withGeneration(platform: browser.platform, expected: generation) {
+                                    try MallSession(platform: browser.platform).save(fresh, expectedGeneration: generation)
+                                    browser.commitJDContext()
+                                    browser.finishJDLogin()
+                                    browser.destroy(); saved(); dismiss()
+                                }
                             } catch is CancellationError { browser.jdDiagnostics?.fail(CancellationError()) }
                             catch {
                                 browser.jdDiagnostics?.fail(error)
@@ -253,6 +266,7 @@ struct MallImportView: View {
     @State private var browser: MallLoginBrowser?
     @State private var hasSession = false
     @State private var candidates: [MallCandidate] = []
+    @State private var candidateGeneration: UUID?
     @State private var selected = Set<String>()
     @State private var message: String?
     @State private var busy = false
@@ -360,6 +374,7 @@ struct MallImportView: View {
     private func saveImportedCookie() {
         guard !busy, !store.isHistoricalSnapshot else { return }
         let currentPlatform = platform
+        let generation = MallSession.generation(for: currentPlatform)
         let jdDiagnostics = currentPlatform == .jd ? JDDiagnostics(.credential) : nil
         let parsed: [TaobaoTrialCookie]
         do { parsed = try MallCookieImport.parse(cookieText, platform: currentPlatform) }
@@ -378,16 +393,20 @@ struct MallImportView: View {
             }
             do {
                 jdDiagnostics?.begin(.jdVerify)
-                try await MallImportClient(platform: currentPlatform, cookies: parsed).verifySession()
+                let fresh = try await MallImportClient(platform: currentPlatform, cookies: parsed).verifiedCookies()
                 try Task.checkCancellation()
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else { return }
                 jdDiagnostics?.begin(.jdSessionSave)
-                try session.save(parsed)
-                jdDiagnostics?.finish()
-                await MallBrowserContext.clear(currentPlatform)
-                guard operationID == id, platform == currentPlatform else { return }
-                hasSession = true; cookieImport = false; candidates = []; selected = []
-                message = "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
+                let oldContext = try MallSession.withGeneration(platform: currentPlatform, expected: generation) {
+                    try MallSession(platform: currentPlatform).save(fresh, expectedGeneration: generation)
+                    let old = MallBrowserContext.detach(currentPlatform)
+                    jdDiagnostics?.finish()
+                    hasSession = true; cookieImport = false; candidates = []; selected = []; candidateGeneration = nil
+                    message = "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
+                    return old
+                }
+                // Clean only the detached old store, never a concurrent new login.
+                await MallBrowserContext.removeData(from: oldContext)
             } catch is CancellationError { jdDiagnostics?.fail(CancellationError()) }
             catch {
                 jdDiagnostics?.fail(error)
@@ -420,11 +439,16 @@ struct MallImportView: View {
             defer { if operationID == id { busy = false; task = nil; operationID = nil } }
             do {
                 guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
-                try MallSession(platform: currentPlatform).clear()
-                let oldContext = MallBrowserContext.detach(currentPlatform)
-                await MallBrowserContext.removeData(from: oldContext)
+                let cleared = try MallSession.withGeneration(platform: currentPlatform, expected: MallSession.generation(for: currentPlatform)) {
+                    try MallSession(platform: currentPlatform).clear()
+                    hasSession = false
+                    return (MallBrowserContext.detach(currentPlatform), MallSession.generation(for: currentPlatform))
+                }
+                await MallBrowserContext.removeData(from: cleared.0)
                 guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
-                hasSession = false; message = "本平台会话与网页上下文已清除，其他平台不受影响。"
+                try MallSession.withGeneration(platform: currentPlatform, expected: cleared.1) {
+                    hasSession = false; message = "本平台会话与网页上下文已清除，其他平台不受影响。"
+                }
             } catch {
                 guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
                 message = "清除失败，请重试；不能确认本机会话已删除。"
@@ -437,11 +461,14 @@ struct MallImportView: View {
         candidates = []; selected = []; message = nil
         let id = UUID(); operationID = id; busy = true
         let currentPlatform = platform
+        let generation = MallSession.generation(for: currentPlatform)
         let jdDiagnostics = currentPlatform == .jd ? JDDiagnostics(.localRead) : nil
         task = Task { @MainActor in
             defer { if operationID == id { busy = false; operationID = nil; task = nil } }
             do {
-                let cookies = try session.load()
+                let cookies = try MallSession.withGeneration(platform: currentPlatform, expected: generation) {
+                    try MallSession(platform: currentPlatform).load()
+                }
                 jdDiagnostics?.begin(.jdFetch)
                 let values: [MallCandidate]
                 values = try await MallImportClient(platform: currentPlatform, cookies: cookies).fetchOrders()
@@ -449,20 +476,29 @@ struct MallImportView: View {
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else {
                     jdDiagnostics?.fail(CancellationError()); return
                 }
-                jdDiagnostics?.finish()
-                candidates = values
-                let outcome = values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。"
-                message = [message, outcome].compactMap { $0 }.joined(separator: "\n")
+                try MallSession.withGeneration(platform: currentPlatform, expected: generation) {
+                    jdDiagnostics?.finish()
+                    candidates = values; candidateGeneration = generation
+                    let outcome = values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。"
+                    message = [message, outcome].compactMap { $0 }.joined(separator: "\n")
+                }
             } catch is CancellationError { jdDiagnostics?.fail(CancellationError()) }
             catch {
                 jdDiagnostics?.fail(error)
-                if operationID == id { message = "读取订单失败：" + safeFailure(error) + " 未导入，未调用UAPI。" }
+                if operationID == id {
+                    try? MallSession.withGeneration(platform: currentPlatform, expected: generation) {
+                        message = "读取订单失败：" + safeFailure(error) + " 未导入，未调用UAPI。"
+                    }
+                }
             }
         }
     }
 
     private func importSelected() {
-        guard !busy, !store.isHistoricalSnapshot else { return }
+        guard !busy, !store.isHistoricalSnapshot, let generation = candidateGeneration,
+              MallSession.generation(for: platform) == generation else {
+            candidates = []; selected = []; candidateGeneration = nil; return
+        }
         let values = candidates.filter { selected.contains($0.trackingNumber) }
         let id = UUID(); operationID = id; busy = true
         let currentPlatform = platform
@@ -473,12 +509,17 @@ struct MallImportView: View {
             var platformStopped = false
             let started = ProcessInfo.processInfo.systemUptime
             for candidate in values {
-                guard !Task.isCancelled, operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else { return }
+                guard !Task.isCancelled, operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot,
+                      MallSession.generation(for: currentPlatform) == generation else { return }
                 let ticketID: UUID
                 let jdDiagnostics = currentPlatform == .jd ? JDDiagnostics(.localWrite) : nil
                 do {
-                    let existed = store.contains(trackingNumber: candidate.trackingNumber)
-                    ticketID = try store.importMall(candidate, platform: currentPlatform.rawValue)
+                    let imported = try MallSession.withGeneration(platform: currentPlatform, expected: generation) {
+                        let existed = store.contains(trackingNumber: candidate.trackingNumber)
+                        return (try store.importMall(candidate, platform: currentPlatform.rawValue), existed)
+                    }
+                    ticketID = imported.0
+                    let existed = imported.1
                     jdDiagnostics?.finish()
                     if existed { summary.bound += 1 } else { summary.added += 1 }
                 } catch {
@@ -503,11 +544,13 @@ struct MallImportView: View {
                 do {
                     _ = try await withTaskCancellationHandler(operation: { try await request.value }, onCancel: { request.cancel() })
                     deadline.cancel()
-                    guard !Task.isCancelled, operationID == id else { return }
+                    guard !Task.isCancelled, operationID == id,
+                          MallSession.generation(for: currentPlatform) == generation else { return }
                     summary.refreshed += 1
                 } catch {
                     deadline.cancel()
-                    guard !Task.isCancelled, operationID == id else { return }
+                    guard !Task.isCancelled, operationID == id,
+                          MallSession.generation(for: currentPlatform) == generation else { return }
                     summary.refreshFailed += 1
                     // Never display raw web errors: responses may contain session material.
                     details.append(candidate.trackingNumber + "：关联已保存，物流未更新：" + safeFailure(error))
@@ -517,9 +560,13 @@ struct MallImportView: View {
                 }
             }
             guard !Task.isCancelled, operationID == id, platform == currentPlatform else { return }
-            do { try store.reload() } catch { details.append("无法重新读取本地记录，请返回列表核对保存结果。") }
-            message = ([summary.message] + details).joined(separator: "\n")
-            selected = []
+            do {
+                try MallSession.withGeneration(platform: currentPlatform, expected: generation) {
+                    do { try store.reload() } catch { details.append("无法重新读取本地记录，请返回列表核对保存结果。") }
+                    message = ([summary.message] + details).joined(separator: "\n")
+                    selected = []
+                }
+            } catch { return }
         }
     }
 }

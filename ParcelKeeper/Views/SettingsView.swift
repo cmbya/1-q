@@ -4,6 +4,7 @@ import UserNotifications
 
 struct SettingsView: View {
     @EnvironmentObject private var store: ShipmentStore
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var exportURL: URL?
     @State private var showingImporter = false
@@ -86,6 +87,10 @@ struct SettingsView: View {
             }
             .navigationTitle("设置")
             .task { await refreshNotificationStatus() }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await refreshNotificationStatus() }
+            }
             .fileImporter(
                 isPresented: $showingImporter,
                 allowedContentTypes: [.json],

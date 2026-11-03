@@ -5,6 +5,10 @@ struct ParcelKeeperApp: App {
     @StateObject private var store = ShipmentStore()
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        NotificationManager.shared.registerForForegroundPresentation()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

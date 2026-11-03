@@ -9,8 +9,13 @@ struct JDPCClient {
     var network: any AINetworking = AISecureNetwork()
     var diagnosticLog: DiagnosticLog = .shared
 
-    func verifySession() async throws {
-        try await perform(.jdVerify, seconds: 20) { session in _ = try await session.orders() }
+    @discardableResult
+    func verifySession() async throws -> [TaobaoTrialCookie] {
+        try await perform(.jdVerify, seconds: 20) { session in
+            _ = try await session.orders()
+            guard MallSession.hasJDPCSession(session.cookies) else { throw MallWebError.authentication }
+            return session.cookies
+        }
     }
     func fetchOrders() async throws -> [MallCandidate] {
         try await perform(.jdFetch, seconds: 30) { session in
@@ -44,6 +49,7 @@ struct JDPCClient {
     private func perform<T>(_ stage: DiagnosticStage, seconds: TimeInterval,
                             operation: (JDPCSession) async throws -> T) async throws -> T {
         let diagnostics = JDDiagnostics(stage, log: diagnosticLog)
+        let generation = MallSession.generation(for: .jd)
         do {
             diagnostics.begin(.credential)
             try Task.checkCancellation()
@@ -52,6 +58,13 @@ struct JDPCClient {
                                       deadline: ProcessInfo.processInfo.systemUptime + seconds)
             let result = try await operation(session)
             try Task.checkCancellation()
+            try MallSession.withGeneration(platform: .jd, expected: generation) {
+                // Verification returns fresh credentials to the explicit save UI.
+                // Cancelling verification must not silently replace a saved session.
+                if stage != .jdVerify {
+                    _ = try MallSession(platform: .jd).saveRotated(session.cookies, replacing: cookies, expectedGeneration: generation)
+                }
+            }
             diagnostics.finish(); return result
         } catch {
             let stage = diagnostics.trace.stage ?? .preflight

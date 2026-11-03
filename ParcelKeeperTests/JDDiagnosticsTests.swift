@@ -40,6 +40,21 @@ final class JDDiagnosticsTests: XCTestCase {
         XCTAssertEqual(text.components(separatedBy: "\n").filter { $0.contains("jdOperationFailed") }.count, 1)
         XCTAssertFalse(text.contains("jdOperationFinished"))
     }
+    func testConcurrentEventFloodAndTerminationRemainBounded() {
+        let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let log = DiagnosticLog(directory: root)
+        let operation = JDDiagnostics(.jdQuery, log: log)
+        DispatchQueue.concurrentPerform(iterations: 100) { _ in operation.event(.jdBridgeRejected, reason: .envelope) }
+        DispatchQueue.concurrentPerform(iterations: 100) { index in
+            if index.isMultiple(of: 2) { operation.finish() }
+            else { operation.fail(MallWebError.authentication) }
+            operation.begin(.jdOrdersParse)
+        }
+        let lines = log.snapshotForTesting().text.components(separatedBy: "\n")
+        XCTAssertEqual(lines.filter { $0.contains("jdBridgeRejected") }.count, 20)
+        XCTAssertEqual(lines.filter { $0.contains("jdOperationFinished") || $0.contains("jdOperationFailed") }.count, 1)
+        XCTAssertNil(operation.trace.stage)
+    }
     func testClientPreflightFailureActuallyWritesDiagnostic() async throws {
         let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
         let log = DiagnosticLog(directory: root)

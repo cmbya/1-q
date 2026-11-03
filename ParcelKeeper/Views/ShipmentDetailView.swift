@@ -11,7 +11,6 @@ struct ShipmentDetailView: View {
     @State private var reminderDate = Date().addingTimeInterval(8 * 60 * 60)
     @State private var showingDeleteConfirmation = false
     @State private var reminderBusy = false
-    @State private var reminderInitialized = false
     @State private var reminderError: String?
     @State private var queryPhone = ""
     @State private var hasSavedPhone = false
@@ -169,25 +168,33 @@ struct ShipmentDetailView: View {
                     }
 
                     Section("提醒") {
-                        Toggle("设置提醒", isOn: $reminderEnabled)
-                            .onChange(of: reminderEnabled) { _, enabled in
-                                if reminderInitialized { handleReminderToggle(enabled, shipment: shipment) }
+                        // Only user binding setters write reminders; reloads and
+                        // compensation update state without another system write.
+                        Toggle("设置提醒", isOn: Binding(
+                            get: { reminderEnabled },
+                            set: { enabled in
+                                reminderEnabled = enabled
+                                handleReminderToggle(enabled, shipment: shipment)
                             }
+                        ))
 
                         if reminderEnabled {
                             DatePicker(
                                 "提醒时间",
-                                selection: $reminderDate,
+                                selection: Binding(
+                                    get: { reminderDate },
+                                    set: { date in
+                                        reminderDate = date
+                                        if reminderEnabled { scheduleReminder(shipment: shipment, date: date) }
+                                    }
+                                ),
                                 in: Date()...,
                                 displayedComponents: [.date, .hourAndMinute]
                             )
-                            .onChange(of: reminderDate) { _, newDate in
-                                if reminderInitialized && reminderEnabled { scheduleReminder(shipment: shipment, date: newDate) }
-                            }
                         }
                     }
 
-                    .disabled(reminderBusy || store.isHistoricalSnapshot)
+                    .disabled(reminderBusy || store.reminderOperationInProgress || store.isHistoricalSnapshot)
 
                     Section("记录") {
                         LabeledContent("添加时间", value: ShipmentDateDisplay.string(shipment.createdAt))
@@ -211,9 +218,7 @@ struct ShipmentDetailView: View {
                 .navigationTitle(shipment.carrierName)
                 .navigationBarTitleDisplayMode(.inline)
                 .onAppear {
-                    reminderEnabled = shipment.reminderDate != nil
-                    reminderDate = shipment.reminderDate ?? Date().addingTimeInterval(8 * 60 * 60)
-                    reminderInitialized = true
+                    synchronizeReminderControls()
                     do { hasSavedPhone = try TrackingRefreshService.live().savedPhone(id: shipmentID) != nil }
                     catch { queryMessage = "无法读取已保存尾号：\(error.localizedDescription)" }
                 }
@@ -235,6 +240,8 @@ struct ShipmentDetailView: View {
                 ContentUnavailableView("快递不存在", systemImage: "shippingbox")
             }
         }
+        .onChange(of: shipment?.reminderDate) { _, _ in synchronizeReminderControls() }
+        .onChange(of: store.reminderOperationInProgress) { _, _ in synchronizeReminderControls() }
         .alert("操作未完成", isPresented: Binding(
             get: { reminderError != nil },
             set: { if !$0 { reminderError = nil } }
@@ -247,6 +254,7 @@ struct ShipmentDetailView: View {
             case "kdyzm": return "取件助手后台"
             case "taobao": return "淘宝"
             case "pdd": return "拼多多"
+            case "jd": return "京东（App内会话）"
             case "uapi": return "UAPI（每次联网，可能计费）"
             case "tmini": return "Tmini（每次联网，付费查询）"
             default: return "不可用"
@@ -299,7 +307,7 @@ struct ShipmentDetailView: View {
             scheduleReminder(shipment: shipment, date: reminderDate)
         } else {
             guard store.beginReminderOperation() else { restoreReminderControls(); reminderError = "提醒操作正在进行，请稍后重试。"; return }
-            defer { store.endReminderOperation() }
+            defer { store.endReminderOperation(); synchronizeReminderControls() }
             do {
                 try store.updateReminderThrowing(id: shipmentID, date: nil)
                 NotificationManager.shared.cancelReminder(for: shipmentID)
@@ -311,12 +319,18 @@ struct ShipmentDetailView: View {
     }
 
     private func restoreReminderControls() {
-        reminderInitialized = false
-        let saved = store.shipment(id: shipmentID)?.reminderDate
+        // Failed writes share the same idle-only projection as external reloads.
+        // A running local operation restores from its defer after unlocking.
+        synchronizeReminderControls()
+    }
+
+    private func synchronizeReminderControls() {
+        // Reload can arrive while scheduling/compensation/reconciliation awaits.
+        // Defer to unlock, then reflect committed state (also in read-only history).
+        guard !(reminderBusy || store.reminderOperationInProgress) else { return }
+        let saved = shipment?.reminderDate
         reminderEnabled = saved != nil
-        if let saved { reminderDate = saved }
-        // SwiftUI delivers onChange after state updates; suppress restoration callbacks.
-        DispatchQueue.main.async { reminderInitialized = true }
+        reminderDate = saved ?? Date().addingTimeInterval(8 * 60 * 60)
     }
 
     private func requireReminderWriteAccess() -> Bool {
@@ -335,7 +349,7 @@ struct ShipmentDetailView: View {
         guard store.beginReminderOperation() else { restoreReminderControls(); reminderError = "提醒操作正在进行，请稍后重试。"; return }
         reminderBusy = true
         Task { @MainActor in
-            defer { reminderBusy = false; store.endReminderOperation() }
+            defer { reminderBusy = false; store.endReminderOperation(); synchronizeReminderControls() }
             guard requireReminderWriteAccess() else { return }
             guard await NotificationManager.shared.requestAuthorization() else {
                 restoreReminderControls()

@@ -77,6 +77,21 @@ final class JDPCClientTests: XCTestCase {
         catch is CancellationError { }
         XCTAssertTrue(network.requests.isEmpty)
     }
+    func testVerificationReturnsResponseRotatedCookieWithoutSavingIt() async throws {
+        let input = try cookies()
+        let network = JDPCFixtureNetwork([list()], headers: ["Set-Cookie": "thor=ROTATED_SYNTHETIC; Domain=.jd.com; Path=/; Secure; HttpOnly"])
+        let fresh = try await JDPCClient(cookies: input, network: network).verifySession()
+        XCTAssertEqual(fresh.first { $0.name == "thor" }?.value, "ROTATED_SYNTHETIC")
+        XCTAssertEqual(input.first?.value, "SYNTHETIC")
+        XCTAssertEqual(network.requests.first?.value(forHTTPHeaderField: "Cookie"), "thor=SYNTHETIC")
+    }
+    func testPCParserSupportsNestedOrderCarriageInfoWithoutWholePageFallback() throws {
+        let group: [String: Any] = ["orderCarriageInfo": ["carriageId": "JD123456789", "carrier": "京东快递"],
+            "orderTrackShowList": [["CreationTime": "2026-11-01 10:00:00", "Content": "运输中"]]]
+        let values = try JDPCParser.parcels(["multiPackageTrackInfoList": [["trackGroupInfo": group], ["trackGroupInfo": ["orderTrackShowList": []]]]], orderID: order)
+        XCTAssertEqual(values.count, 1)
+        XCTAssertEqual(values.first?.number, "JD123456789")
+    }
     func testRedirectAndOversizeResponsesAreRejected() async throws {
         for network in [JDPCFixtureNetwork([list()], status: 302), JDPCFixtureNetwork([list()], otherURL: URL(string: "https://example.test")), JDPCFixtureNetwork([list()], oversized: true)] {
             do { try await JDPCClient(cookies: cookies(), network: network).verifySession(); XCTFail() }
@@ -92,8 +107,9 @@ private final class JDPCFixtureNetwork: AINetworking {
     let status: Int
     let otherURL: URL?
     let oversized: Bool
-    init(_ responses: [[String: Any]], status: Int = 200, otherURL: URL? = nil, oversized: Bool = false) {
-        self.responses = responses; self.status = status; self.otherURL = otherURL; self.oversized = oversized
+    let headers: [String: String]?
+    init(_ responses: [[String: Any]], status: Int = 200, otherURL: URL? = nil, oversized: Bool = false, headers: [String: String]? = nil) {
+        self.responses = responses; self.status = status; self.otherURL = otherURL; self.oversized = oversized; self.headers = headers
     }
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         requests.append(request)
@@ -102,6 +118,6 @@ private final class JDPCFixtureNetwork: AINetworking {
         let data: Data
         if oversized { data = Data(repeating: 65, count: 5 * 1024 * 1024 + 1) }
         else { data = try JSONSerialization.data(withJSONObject: body) }
-        return (data, HTTPURLResponse(url: otherURL ?? request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+        return (data, HTTPURLResponse(url: otherURL ?? request.url!, statusCode: status, httpVersion: nil, headerFields: headers)!)
     }
 }

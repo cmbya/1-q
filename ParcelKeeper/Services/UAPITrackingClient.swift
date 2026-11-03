@@ -15,11 +15,11 @@ struct UAPITrackingResult: Codable {
 enum UAPIError: LocalizedError, Equatable {
     case notConfigured, privacyConsentRequired, authentication, quota
     case rateLimited(Double?)
-    case noData, invalidResponse, invalidPhone, invalidTrackingNumber, invalidKey, keychain, unavailable, cancelled
+    case noData, invalidResponse, invalidPhone, invalidTrackingNumber, invalidKey, keychain, unavailable, cancelled, configurationChanged
 
     var stopsBatch: Bool {
         switch self {
-        case .notConfigured, .privacyConsentRequired, .authentication, .quota, .rateLimited, .keychain, .cancelled: return true
+        case .notConfigured, .privacyConsentRequired, .authentication, .quota, .rateLimited, .keychain, .cancelled, .configurationChanged: return true
         default: return false
         }
     }
@@ -38,6 +38,7 @@ enum UAPIError: LocalizedError, Equatable {
         case .keychain: return "无法访问 UAPI 的 Keychain 凭据。"
         case .unavailable: return "UAPI 服务或网络暂不可用，未自动重试。"
         case .cancelled: return "UAPI 查询已取消。"
+        case .configurationChanged: return "UAPI 配置已更改，未保存晚到结果，请手动重新查询。"
         }
     }
 }
@@ -75,8 +76,13 @@ struct UAPIUsageSnapshot: Codable, Equatable {
     }
 }
 
-/// Only opt-in and non-secret usage snapshots enter preferences. Credentials use a separate, device-only
-/// Keychain service (the existing AIKeychainStore never syncs or backs up its item).
+/// Opaque, non-Codable commit token. Never contains an API key.
+struct UAPIConfiguration: Equatable {
+    fileprivate let generation: String
+}
+
+/// Only opt-in and non-secret usage snapshots enter preferences. Credentials use
+/// the isolated device-only Keychain service, never results, UI or backups.
 final class UAPISettingsService {
     private let defaults: UserDefaults
     private let keys: any AIKeyStore
@@ -160,22 +166,53 @@ final class UAPISettingsService {
         return (key, usageGeneration())
     }
     fileprivate func validateCredential(_ credential: (key: String, generation: String)) throws {
-        let current = try requestCredential()
-        guard current.key == credential.key, current.generation == credential.generation else { throw UAPIError.notConfigured }
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        try withConfiguration(UAPIConfiguration(generation: credential.generation)) {
+            guard try storedKey() == credential.key else { throw UAPIError.configurationChanged }
+        }
+    }
+    func configurationToken() throws -> UAPIConfiguration {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard isEnabled(), try storedKey() != nil else { throw UAPIError.notConfigured }
+        return UAPIConfiguration(generation: usageGeneration())
+    }
+    func validateConfiguration(_ token: UAPIConfiguration) throws {
+        try withConfiguration(token) {}
+    }
+    /// Same lock as key/enabled changes; held only across a synchronous local commit.
+    func withConfiguration<T>(_ token: UAPIConfiguration, operation: () throws -> T) throws -> T {
+        Self.lock.lock(); defer { Self.lock.unlock() }
+        guard isEnabled(), token.generation == usageGeneration(), try storedKey() != nil else {
+            throw UAPIError.configurationChanged
+        }
+        return try operation()
     }
 }
 
 protocol UAPITrackingQuerying {
+    func configurationToken() throws -> UAPIConfiguration?
+    func withConfiguration<T>(_ token: UAPIConfiguration, operation: () throws -> T) throws -> T
     func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult
+}
+
+// Legacy/synthetic injected clients have no settings authority. Production overrides
+// these protocol requirements, so existential dispatch uses the atomic guard.
+extension UAPITrackingQuerying {
+    func configurationToken() throws -> UAPIConfiguration? { nil }
+    func withConfiguration<T>(_ token: UAPIConfiguration, operation: () throws -> T) throws -> T { try operation() }
 }
 
 final class UAPITrackingClient: UAPITrackingQuerying {
     private let settings: UAPISettingsService
     private let network: any AINetworking
     // Legacy injection labels are ignored; queries never access historical cache storage.
-    init(settings: UAPISettingsService = UAPISettingsService(), network: any AINetworking = AISecureNetwork(), cache _: PaidTrackingCache? = nil, ignoreCache _: Bool = false) {
+    init(settings: UAPISettingsService = UAPISettingsService(), network: any AINetworking = UAPIBoundedNetwork(), cache _: PaidTrackingCache? = nil, ignoreCache _: Bool = false) {
         self.settings = settings
         self.network = network
+    }
+    func configurationToken() throws -> UAPIConfiguration? { try settings.configurationToken() }
+    func withConfiguration<T>(_ token: UAPIConfiguration, operation: () throws -> T) throws -> T {
+        try settings.withConfiguration(token, operation: operation)
     }
     func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult {
         do {
@@ -193,9 +230,10 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             guard let url = components.url else { throw UAPIError.invalidTrackingNumber }
             var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
             request.httpMethod = "GET"
+            request.httpShouldHandleCookies = false
             request.setValue("Bearer \(credential.key)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            // Exactly one charged request. AISecureNetwork refuses all redirects.
+            // One request attempt; UAPIBoundedNetwork bounds bytes and refuses redirects.
             let startedAt = Date()
             try settings.validateCredential(credential)
             let (data, response) = try await network.data(for: request)

@@ -22,10 +22,10 @@ await capture({body:{orderList:[]}},'https://evil.example/api');assert.equal(mes
 await capture({code:3});assert.equal(messages[3].error,'authentication');
 const xhr=new context.XMLHttpRequest();xhr.open('POST','https://api.m.jd.com/api?functionId=order_list_m');xhr.send();xhr.responseURL=xhr.url;xhr.responseText=JSON.stringify({body:{orderList:[]}});xhr.listener();assert.equal(messages[4].kind,'orders');
 const snapshot=vm.runInContext('window.__parcelJDSnapshot()',context);assert.equal(snapshot.recognized,false);
-// DOM fallback needs concrete order + one visible waybill; recommendations cannot manufacture identity.
+// Whole-page logistics DOM is unproven even with one order/waybill; reject it.
 context.location.href='https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=123456789';
 context.document.body.innerText='订单号：123456789\n运单号：JD12345678\n物流公司：京东快递\n2026-11-01 10:00:00\n包裹已到达驿站';
-let dom=vm.runInContext('window.__parcelJDSnapshot()',context);assert.equal(dom.recognized,true);assert.equal(dom.parcels[0].number,'JD12345678');assert.equal(dom.parcels[0].points.length,1);
+let dom=vm.runInContext('window.__parcelJDSnapshot()',context);assert.equal(dom.recognized,false);
 context.document.body.innerText+='\n运单号：SF12345678';dom=vm.runInContext('window.__parcelJDSnapshot()',context);assert.equal(dom.recognized,false);
 context.document.body.innerText='订单号：987654321\n运单号：JD12345678\n2026-11-01 10:00:00\n包裹已签收';assert.equal(vm.runInContext('window.__parcelJDSnapshot()',context).recognized,false);
 context.location.href='https://trade.m.jd.com/order/orderlist_jdm.shtml';context.document.body.innerText='暂无订单';assert.equal(vm.runInContext('window.__parcelJDSnapshot()',context).recognized,true);

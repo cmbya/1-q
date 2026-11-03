@@ -32,13 +32,12 @@ enum ShipmentShortcutParser {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard value.range(of: #"^[A-Z0-9]{8,28}$"#, options: .regularExpression) != nil,
               value.filter(\.isNumber).count >= 6,
-              value.range(of: #"^1[3-9][0-9]{9}$"#, options: .regularExpression) == nil else { throw ShipmentShortcutError.invalidNumber }
+              !CarrierDetector.isLikelyPhoneNumber(value) else { throw ShipmentShortcutError.invalidNumber }
         return value
     }
     static func status(_ text: String) -> ShipmentStatus? {
         // Classify ONE event, never a concatenated history. A station/cabinet
         // receipt is custody, not evidence that the recipient collected it.
-        let raw = text
         let text = text.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? text
         if ["异常", "拒收", "退回", "滞留"].contains(where: text.contains) { return .exception }
         if ["未签收", "尚未签收", "待签收", "等待领取", "待取件", "待领取", "尚未领取", "未领取", "等待取件", "请取件"].contains(where: text.contains) { return .readyForPickup }
@@ -46,18 +45,25 @@ enum ShipmentShortcutParser {
         if ["未取件", "未完成", "未收货"].contains(where: text.contains) {
             return ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) ? .readyForPickup : nil
         }
-        if raw.range(of: #"(?:请|請)[^，。；;！!？?\n]*完成取件"#, options: .regularExpression) != nil { return .readyForPickup }
+        let conditionalCompletion = completionIsConditional(text)
+        if conditionalCompletion { return .readyForPickup }
         if ["本人签收", "收件人签收", "已领取", "已取件", "已收货", "完成取件"].contains(where: text.contains) { return .delivered }
-        if ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) { return .readyForPickup }
-        if ["已签收", "签收成功", "已完成"].contains(where: text.contains) { return .delivered }
+        // A destination name is not an arrival. Specific receipt evidence stays
+        // ahead of generic transit terms such as 已到达; motion beats bare names.
+        if text.range(of: #"(?:已到达|已送达|已放入)[^，。；;！!？?\n]{0,20}(?:驿站|快递柜|丰巢|代收点)|(?:驿站|快递柜|丰巢|代收点)[^，。；;！!？?\n]{0,12}(?:已到站|已入库|已入柜|已签收|代收)"#, options: .regularExpression) != nil { return .readyForPickup }
         if ["派送中", "配送中", "正在派送", "正在配送", "快递员派送"].contains(where: text.contains) { return .outForDelivery }
         if ["运输中", "转运", "已发出", "已揽收", "已到达", "正在发往"].contains(where: text.contains) { return .inTransit }
+        if ["驿站", "快递柜", "丰巢", "代收点", "代收", "取件码"].contains(where: text.contains) { return .readyForPickup }
+        if ["已签收", "签收成功", "已完成"].contains(where: text.contains) { return .delivered }
         return nil
+    }
+    private static func completionIsConditional(_ text: String) -> Bool {
+        text.range(of: #"(?:请|若|如果|假如)[^，。；;！!？?\n]*(?:完成取件|已取件|已领取|已收货|已签收|签收成功|已完成)"#, options: .regularExpression) != nil
     }
     /// An unclassified denial is not permission for an explicit delivered value.
     static func deniesCompletion(_ raw: String) -> Bool {
         let text = raw.applyingTransform(StringTransform("Traditional-Simplified"), reverse: false) ?? raw
-        return ["未取件", "未完成", "未收货", "未签收", "尚未签收", "待签收", "未领取", "尚未领取", "非本人签收", "非收件人签收", "未经本人签收", "未经收件人签收", "未由本人签收", "未由收件人签收", "不是本人签收", "不是收件人签收"].contains(where: text.contains)
+        return completionIsConditional(text) || ["未取件", "未完成", "未收货", "未签收", "尚未签收", "待签收", "未领取", "尚未领取", "非本人签收", "非收件人签收", "未经本人签收", "未经收件人签收", "未由本人签收", "未由收件人签收", "不是本人签收", "不是收件人签收"].contains(where: text.contains)
     }
     static func date(_ raw: String) -> Date? {
         let iso = ISO8601DateFormatter()
@@ -112,7 +118,8 @@ enum ShipmentShortcutParser {
             if stateText.flatMap(status) == .delivered, let info, deniesCompletion(info) { throw ShipmentShortcutError.statusConflict }
             if let expected = stateText.flatMap(status), let observed = info.flatMap(status), expected != observed { throw ShipmentShortcutError.statusConflict }
             return ShipmentShortcutInput(trackingNumber: id, carrierName: field(["carrierName", "快递服务商", "快递公司"]), logisticsInfo: info,
-                status: stateText.flatMap(status) ?? info.flatMap(status), logisticsTime: time)
+                status: stateText.flatMap(status) ?? info.flatMap(status), logisticsTime: time,
+                queryInfo: field(["queryInfo"]))
         }
         if let labeled = try labeledResult(in: text, trackingNumber: id) { return labeled }
         let event = try latestEvent(in: text)

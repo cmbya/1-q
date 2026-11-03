@@ -47,7 +47,7 @@ enum SmartShipmentParser {
         var drafts: [ShipmentImportDraft] = []
         var failures: [Failure] = []
         for context in contexts {
-            let parsed: ShipmentShortcutInput
+            var parsed: ShipmentShortcutInput
             do {
                 parsed = try ShipmentShortcutParser.parse(context)
             } catch {
@@ -55,7 +55,9 @@ enum SmartShipmentParser {
                                         message: error.localizedDescription))
                 continue
             }
-            let detection = CarrierDetector.detect(parsed.trackingNumber, context: context)
+            // Original query is display data, never status/time evidence.
+            if parsed.queryInfo == nil { parsed.queryInfo = context }
+            let detection = CarrierDetector.detect(parsed.trackingNumber, context: parsed.carrierName ?? context)
             // Pickup codes in historical events must not be reused on a newer
             // return/delivery. For dated histories inspect only the selected event.
             let codeContext = parsed.logisticsTime == nil ? context : (parsed.logisticsInfo ?? context)
@@ -65,7 +67,10 @@ enum SmartShipmentParser {
                 confidence: detection.confidence,
                 status: parsed.status ?? .inTransit,
                 note: inferNote(from: context),
-                pickupCode: parsed.status == .readyForPickup ? extractPickupCode(from: codeContext) : ""
+                pickupCode: parsed.status == .readyForPickup ? extractPickupCode(from: codeContext) : "",
+                logisticsInfo: parsed.logisticsInfo,
+                logisticsTime: parsed.logisticsTime,
+                queryInfo: parsed.queryInfo
             ))
         }
         return ParseReport(drafts: drafts, failures: failures)

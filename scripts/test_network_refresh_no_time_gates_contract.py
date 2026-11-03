@@ -7,10 +7,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class NetworkRefreshNoTimeGatesContract(unittest.TestCase):
     def test_network_result_does_not_compare_saved_timestamps(self):
         source = (ROOT / 'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
-        merge = source.split('let delivered = try store.transaction')[1].split('reloadWidgets()')[0]
+        merge = source.split('trace.begin(.merge)', 1)[1].split('reloadWidgets()', 1)[0]
+        self.assertIn('let delivered = try commitResult', merge)
+        self.assertIn('try store.transaction', merge)
         for gate in ['incoming >= old', 'result.queriedAt < queried', 'throw ShipmentShortcutError.olderUpdate']:
             self.assertNotIn(gate, merge)
-        for assignment in ['current.logisticsInfo = result.logisticsInfo', 'current.logisticsTime = result.logisticsTime', 'current.queryInfo = result.queryInfo', 'current.lastQueriedAt = result.queriedAt', 'current.status = state']:
+        for assignment in ['current.logisticsInfo = result.logisticsInfo', 'current.logisticsTime = result.logisticsTime', 'current.queryInfo = TrackingQueryHistory.merged(result.queryInfo, current.queryInfo, current.backendPreviousHistory)', 'current.lastQueriedAt = result.queriedAt', 'current.status = state']:
             self.assertIn(assignment, merge)
         for guard in ['Self.sameIdentity(current, before)', 'current.status != .archived', 'current.status == .delivered', 'data.records[linked].id == linkedID', 'validateConfiguration']:
             self.assertIn(guard, merge)

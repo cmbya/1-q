@@ -414,12 +414,16 @@ function capture(raw, requestURL, requestBody, responseURL) {
     let parcels;
     if (Array.isArray(b.multiPackageTrackInfoList) && b.multiPackageTrackInfoList.length <= 40) {
       parcels = b.multiPackageTrackInfoList.map(p => {
-        const c = p.carriageInfo || {}, g = p.trackGroupInfo || {};
+        const g = p.trackGroupInfo || {}, c = p.carriageInfo || g.orderCarriageInfo || {};
         return {number:text(c.carriageId,40),carrier:text(c.carrier,100),points:points(g.orderTrackShowList,'CreationTime','Content')};
-      });
+      }).filter(p => p.number !== '');
     } else if (Object.prototype.hasOwnProperty.call(b,'carriageId') && Array.isArray(b.tracePointVOList)) {
       parcels = [{number:text(b.carriageId,40),carrier:text(b.carrier,100),points:points(b.tracePointVOList,'createTime','wlStateDesc')}];
     } else { diagnostic('schema'); return; }
+    // Missing waybills are not a recognized detail response: allow later page
+    // responses/snapshots instead of ending the browser with an empty identity.
+    parcels = parcels.filter(p => p.number !== '');
+    if (!parcels.length) { diagnostic('schema'); return; }
     emit({kind:'logistics',recognized:true,orderID,parcels});
   } catch (_) { diagnostic('json'); }
 }
@@ -479,20 +483,12 @@ window.__parcelJDSnapshot = () => {
   if (here.pathname === '/order/deal_wuliu_jdm.shtml') {
     const orderID = here.searchParams.get('dealId');
     if (!id(orderID) || !safeLink(here.href,orderID)) return {recognized:false};
-    // A single unambiguous visible waybill header is mandatory for DOM fallback.
-    const numbers = [...body.matchAll(/(?:运单号|快递单号|物流单号)\s*[:：]?\s*([A-Za-z0-9]{6,40})(?![A-Za-z0-9])/g)].map(m=>m[1]);
-    const explicit = [...body.matchAll(/订单(?:号|编号)\s*[:：]?\s*(\d{6,32})/g)].map(m=>m[1]);
-    if (new Set(numbers).size !== 1 || explicit.some(v=>v!==orderID)) return {recognized:false};
-    const carrier = (body.match(/(?:承运商|物流公司|配送公司)\s*[:：]?\s*([^\n]{1,100})/) || [])[1] || '';
-    const nodes = []; const lines = body.split(/\n/).map(v=>v.trim()).filter(Boolean);
-    for (let i=0;i<lines.length;i++) {
-      const match = lines[i].match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?)(?:\s+(.+))?$/);
-      if (!match) continue;
-      const description = match[2] || lines[i+1] || '';
-      if (/快件|包裹|签收|揽收|到达|派送|配送|投递|取件|运输|转运|出库/.test(description)) nodes.push({time:match[1],text:description.slice(0,4000)});
-      if (nodes.length >= 300) break;
-    }
-    return {kind:'logistics',recognized:nodes.length > 0,orderID,parcels:[{number:numbers[0],carrier,points:nodes}]};
+    // No evidenced page-local logistics container is available. A page URL and
+    // one waybill header do not prove that dated DOM text belongs to that parcel
+    // (recommendations may contain later delivery events without any waybill).
+    // Fail closed rather than invent CSS selectors or scan the whole page.
+    // The authenticated structured response capture above remains enabled.
+    return {recognized:false};
   }
   return {recognized:false};
 };

@@ -35,9 +35,9 @@ class JDImportUIContract(unittest.TestCase):
         imported = view.split('private func saveImportedCookie()', 1)[1].split('private func safeFailure', 1)[0]
         self.assertIn('browser.verify(cookies)', login)
         self.assertIn('JDInAppClient(cookies: cookies, browserStore: web.configuration.websiteDataStore).verifySession()', view)
-        self.assertIn('MallImportClient(platform: currentPlatform, cookies: parsed).verifySession()', imported)
-        for text, save in [(login, 'MallSession(platform: browser.platform).save(fresh)'), (imported, 'session.save(parsed)')]:
-            self.assertLess(text.index('browser.verify(cookies)' if text is login else '.verifySession()'), text.index(save))
+        self.assertIn('MallImportClient(platform: currentPlatform, cookies: parsed).verifiedCookies()', imported)
+        for text, save in [(login, 'MallSession(platform: browser.platform).save(fresh, expectedGeneration: generation)'), (imported, 'save(fresh, expectedGeneration: generation)')]:
+            self.assertLess(text.index('browser.verify(cookies)' if text is login else '.verifiedCookies()'), text.index(save))
             self.assertIn('Task.isCancelled' if text is login else 'Task.checkCancellation()', text)
         self.assertIn('MallImportClient(platform: currentPlatform, cookies: cookies).fetchOrders()', view)
 
