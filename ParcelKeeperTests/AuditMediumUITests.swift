@@ -8,6 +8,10 @@ final class AuditMediumUITests: XCTestCase {
         func read() throws -> String? { value }
         func save(_ key: String) throws { value = key }
         func delete() throws { value = nil }
+        private var endpoints: [String: String] = [:]
+        func read(endpoint: String) throws -> String? { endpoints[endpoint] }
+        func save(_ key: String, endpoint: String) throws { endpoints[endpoint] = key }
+        func delete(endpoint: String) throws { endpoints.removeValue(forKey: endpoint) }
     }
     private func cookie(_ name: String, expires: Date? = nil, domain: String = ".yangkeduo.com", path: String = "/") -> TaobaoTrialCookie {
         .init(name: name, value: "fixture", domain: domain, path: path, secure: true, expires: expires)
