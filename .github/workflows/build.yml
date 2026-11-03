@@ -22,11 +22,59 @@ on:
       - ".github/workflows/build.yml"
 
 jobs:
+  test:
+    if: ${{ !inputs.build_only }}
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DIAGNOSTIC_CONDITION: ${{ inputs.widget_diagnostics && 'WIDGET_DIAGNOSTICS' || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Select Xcode and start fixed simulator
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          xcodebuild -version
+          mkdir -p build
+          DEVICE_ID=$(xcrun simctl create ParcelKeeper-CI com.apple.CoreSimulator.SimDeviceType.iPhone-16 com.apple.CoreSimulator.SimRuntime.iOS-18-5)
+          echo "DEVICE_ID=$DEVICE_ID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE_ID"
+      - name: Install XcodeGen and generate project
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          xcodegen generate
+      - name: Build simulator tests
+        run: |
+          set -euo pipefail
+          xcodebuild -project ParcelKeeper.xcodeproj -scheme ParcelKeeper -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -derivedDataPath build/TestDerivedData -showBuildTimingSummary "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG $DIAGNOSTIC_CONDITION" build-for-testing | tee build/simulator-build.log
+      - name: Wait for simulator readiness
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          xcrun simctl bootstatus "$DEVICE_ID" -b | tee build/simulator-boot.log
+      - name: Run complete simulator test suite
+        run: |
+          set -euo pipefail
+          xcodebuild -project ParcelKeeper.xcodeproj -scheme ParcelKeeper -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -derivedDataPath build/TestDerivedData -resultBundlePath build/TestResults.xcresult -parallel-testing-enabled NO "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG $DIAGNOSTIC_CONDITION" test-without-building | tee build/test.log
+      - name: Upload test diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ParcelKeeper-test-results-${{ github.run_attempt }}
+          path: |
+            build/*.log
+            build/TestResults.xcresult
+          if-no-files-found: warn
+
   build:
     runs-on: macos-15-intel
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
     env:
       DIAGNOSTIC_CONDITION: ${{ inputs.widget_diagnostics && 'WIDGET_DIAGNOSTICS' || '' }}
 
@@ -45,17 +93,10 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
           xcodebuild -version
 
-      - name: Test on available iPhone simulator
-        if: ${{ !inputs.build_only }}
-        run: |
-          set -o pipefail
-          mkdir -p build
-          DEVICE_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if x.get("isAvailable") and x["name"].startswith("iPhone")))')
-          xcodebuild -project ParcelKeeper.xcodeproj -scheme ParcelKeeper -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE_ID" -resultBundlePath build/TestResults.xcresult "SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG $DIAGNOSTIC_CONDITION" test | tee test.log
-
       - name: Build unsigned iPhone app
         run: |
-          set -o pipefail
+          set -euo pipefail
+          mkdir -p build
           xcodebuild \
             -project ParcelKeeper.xcodeproj \
             -scheme ParcelKeeper \
@@ -63,14 +104,16 @@ jobs:
             -sdk iphoneos \
             -destination "generic/platform=iOS" \
             -derivedDataPath build/DerivedData \
+            -showBuildTimingSummary \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             "SWIFT_ACTIVE_COMPILATION_CONDITIONS=$DIAGNOSTIC_CONDITION" \
-            clean build | tee build.log
+            clean build | tee build/build.log
 
       - name: Package unsigned IPA
         run: |
+          set -euo pipefail
           APP_PATH=$(find build/DerivedData/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
           test -n "$APP_PATH"
           mkdir -p build/Payload
@@ -79,7 +122,12 @@ jobs:
           zip -qry ParcelKeeper-unsigned.ipa Payload
 
       - name: Verify packaged icon and widget metadata
-        run: python3 scripts/verify_ipa.py build/ParcelKeeper-unsigned.ipa
+        run: |
+          set -euo pipefail
+          python3 scripts/verify_ipa.py build/ParcelKeeper-unsigned.ipa
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Payload/ParcelKeeper.app/Info.plist > build/VERSION.txt
+          printf '%s\n' "$GITHUB_SHA" > build/SOURCE_SHA.txt
+          (cd build && shasum -a 256 ParcelKeeper-unsigned.ipa VERSION.txt SOURCE_SHA.txt > SHA256SUMS.txt)
 
       - name: Upload IPA and build log
         uses: actions/upload-artifact@v4
@@ -87,19 +135,43 @@ jobs:
           name: ParcelKeeper-unsigned
           path: |
             build/ParcelKeeper-unsigned.ipa
-            build.log
+            build/SHA256SUMS.txt
+            build/SOURCE_SHA.txt
+            build/VERSION.txt
+            build/build.log
           if-no-files-found: error
 
+  publish:
+    needs: [test, build]
+    if: ${{ success() && needs.test.result == 'success' && needs.build.result == 'success' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && !inputs.widget_diagnostics && !inputs.build_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download this run's IPA
+        uses: actions/download-artifact@v4
+        with:
+          name: ParcelKeeper-unsigned
+          path: build
+      - name: Verify transferred artifact and source
+        run: |
+          set -euo pipefail
+          (cd build && sha256sum --check SHA256SUMS.txt)
+          test "$(cat build/SOURCE_SHA.txt)" = "$GITHUB_SHA"
+          python3 scripts/verify_ipa.py build/ParcelKeeper-unsigned.ipa
       - name: Publish verified unsigned IPA
-        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && !inputs.widget_diagnostics && !inputs.build_only
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Payload/ParcelKeeper.app/Info.plist)
+          VERSION=$(cat build/VERSION.txt)
+          [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]
           TAG="v${VERSION}-build.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          (cd build && shasum -a 256 ParcelKeeper-unsigned.ipa > SHA256SUMS.txt)
+          (cd build && sha256sum ParcelKeeper-unsigned.ipa > SHA256SUMS.txt)
           NOTES="自动构建预发布版；来源提交 ${GITHUB_SHA}。测试、Release 编译及 IPA 图标/组件配置校验均成功。无签名 IPA，最低 iOS 17，需自行签名；主 App 和组件必须获得相同 App Group 授权。编译通过不等于真机/重签/CPA 验收通过。安装前请备份数据。构建：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           gh release create "$TAG" build/ParcelKeeper-unsigned.ipa build/SHA256SUMS.txt --target "$GITHUB_SHA" --title "快递管家 ${VERSION} · Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}（无签名）" --prerelease --notes "$NOTES"
           gh release view "$TAG" --json url,targetCommitish,assets

@@ -278,6 +278,13 @@ struct KDYZMJob: Decodable {
     }
 }
 
+/// Fixed user-facing diagnostic, never contains server content or credentials.
+struct KDYZMTerminalResultError: LocalizedError {
+    var errorDescription: String? {
+        "后台终态任务已清除，但结果过旧、冲突或不可用，未覆盖本地轨迹；本次未重复提交，可检查后再次手动刷新。"
+    }
+}
+
 struct KDYZMRefreshService {
     let store: SharedPickupStore
     var connection: KDYZMConnection = .shared
@@ -361,6 +368,9 @@ struct KDYZMRefreshService {
                 throw KDYZMError.jobGone
             }
         }
+        // Completion is terminal even when its snapshot is rejected. Cleanup must
+        // be a separate transaction: a throw inside the merge rolls its writes back.
+        do {
         let snapshot = try await client.snapshot(credential, timeout: remainingTimeout())
         _ = try remainingTimeout()
         try Task.checkCancellation()
@@ -373,7 +383,6 @@ struct KDYZMRefreshService {
               let createdAt = job.createdAt, createdAt > 0,
               (remote.logisticsCheckedAt ?? 0) >= createdAt,
               (remote.logisticsUpdatedAt ?? 0) >= createdAt else {
-            try await clearJob(expectedID, before: before, credential: credential)
             throw KDYZMError.empty
         }
         try await connection.commit(credential) {
@@ -382,6 +391,7 @@ struct KDYZMRefreshService {
                 guard let index = data.shipments.firstIndex(where: { $0.id == before.id }),
                       KDYZMMerger.sameIdentity(data.shipments[index], before),
                       data.shipments[index].backendRefreshJobID == expectedID,
+                      data.shipments[index].backendRefreshGeneration == credential.generation,
                       data.records.contains(where: { $0.shipmentID == before.id }),
                       data.shipments[index].status != .archived else { throw KDYZMError.stale }
                 guard try KDYZMMerger.update(remote, local: &data.shipments[index], refresh: true) else { throw KDYZMError.empty }
@@ -389,6 +399,14 @@ struct KDYZMRefreshService {
                 data.shipments[index].backendRefreshGeneration = nil
                 // Record completion, code, group, location, source and reminder remain local.
             }
+        }
+        } catch {
+            // Matching ID + identity + generation protects a newly accepted job.
+            // A cleanup/authorization/lease failure remains an explicit error.
+            try await clearJob(expectedID, before: before, credential: credential)
+            reloadWidgets()
+            if error is CancellationError { throw error }
+            throw KDYZMTerminalResultError()
         }
         reloadWidgets()
         return false // Backend signed is not an automatic manual pickup completion.
@@ -398,7 +416,8 @@ struct KDYZMRefreshService {
             let lease = try store.acquireTrackingQuery(id: before.id); defer { lease.release() }
             try store.transaction { data in
                 guard let i = data.shipments.firstIndex(where: { $0.id == before.id }),
-                      KDYZMMerger.sameIdentity(data.shipments[i], before), data.shipments[i].backendRefreshJobID == id else { throw KDYZMError.stale }
+                      KDYZMMerger.sameIdentity(data.shipments[i], before), data.shipments[i].backendRefreshJobID == id,
+                      data.shipments[i].backendRefreshGeneration == (before.backendRefreshJobID == id ? before.backendRefreshGeneration : credential.generation) else { throw KDYZMError.stale }
                 data.shipments[i].backendRefreshJobID = nil
                 data.shipments[i].backendRefreshGeneration = nil
             }

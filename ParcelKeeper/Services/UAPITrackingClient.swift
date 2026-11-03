@@ -188,7 +188,8 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             guard (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw UAPIError.invalidTrackingNumber }
             if let phone, phone.utf8.count != 4 || !phone.utf8.allSatisfy({ (48...57).contains($0) }) { throw UAPIError.invalidPhone }
             let identity = try cache.identity(channel: "uapi", number: trackingNumber, carrier: carrierCode ?? "", generation: credential.generation, phone: phone)
-            if !ignoreCache, let cached = try cache.lookup(identity) {
+            let cachedResult = try cache.lookup(identity)
+            if !ignoreCache, let cached = cachedResult {
                 try settings.validateCredential(credential)
                 return cached
             }

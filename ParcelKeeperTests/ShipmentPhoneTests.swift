@@ -2,10 +2,14 @@ import XCTest
 @testable import ParcelKeeper
 
 extension TrackingRefreshTests {
+    func isolatedPhoneCache() -> PaidTrackingCache {
+        let keys = AuditMediumCoreTests.Keys()
+        return PaidTrackingCache(directory: root.appendingPathComponent("phone-cache"), phoneKeys: { _ in keys })
+    }
     func testBlankRefreshPhoneReusesSavedSuffixAcrossEntrypoints() async throws {
         let keys = PhoneKeys(); let client = Client(); client.failure = UAPIError.noData
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try service.setPhone(id: shipment.id, phone: "0123")
         let inputs: [String?] = [nil, "", " ", "\t\n", "　"]
         for input in inputs {
@@ -25,7 +29,7 @@ extension TrackingRefreshTests {
     func testBlankRefreshWithoutSavedPhoneDispatchesNil() async throws {
         let keys = PhoneKeys(); let client = Client(); client.failure = UAPIError.noData
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         for input in ["", " \n"] {
             do { _ = try await service.refresh(id: shipment.id, phone: input); XCTFail() }
             catch UAPIError.noData {}
@@ -36,7 +40,7 @@ extension TrackingRefreshTests {
     func testInvalidNonblankPhoneDoesNotOverwriteSavedSuffix() async throws {
         let keys = PhoneKeys(); let client = Client()
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try service.setPhone(id: shipment.id, phone: "0123")
         for input in ["123", "12345", "１２３４", "12a4", " 1234", "1234\n"] {
             do { _ = try await service.refresh(id: shipment.id, phone: input); XCTFail(input) }
@@ -56,7 +60,7 @@ extension TrackingRefreshTests {
         func delete(endpoint: String) throws { if fail { throw UAPIError.keychain }; values.removeValue(forKey: endpoint) }
     }
     func testPhoneStoreIsPerRecordAndNumberWithStrictValidation() throws {
-        let keys = PhoneKeys(); let phones = ShipmentPhoneStore(keys: keys)
+        let keys = PhoneKeys(); let phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try phones.save("0123", for: shipment)
         XCTAssertEqual(try phones.read(for: shipment), "0123")
         var other = shipment!; other.id = UUID()
@@ -73,7 +77,7 @@ extension TrackingRefreshTests {
     func testPhoneReusedAfterFailureAndChangedOrClearedWithoutQuery() async throws {
         let keys = PhoneKeys(); let client = Client(); client.failure = UAPIError.noData
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         do { _ = try await service.refresh(id: shipment.id, phone: "0123"); XCTFail() } catch UAPIError.noData {}
         XCTAssertEqual(try service.savedPhone(id: shipment.id), "0123")
         do { _ = try await service.refresh(trackingNumber: shipment.trackingNumber); XCTFail() } catch UAPIError.noData {}
@@ -89,7 +93,7 @@ extension TrackingRefreshTests {
         try addPhoneTestShipment()
         let keys = PhoneKeys(); let client = Client(); client.failure = UAPIError.noData
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         let backup = try storage.exportBackup()
         try service.setPhone(id: shipment.id, phone: "0123")
         XCTAssertEqual(try storage.exportBackup(), backup)
@@ -109,7 +113,7 @@ extension TrackingRefreshTests {
     func testInvalidPhoneAndKeychainFailureNeverDispatch() async throws {
         let keys = PhoneKeys(); let client = Client()
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         do { _ = try await service.refresh(id: shipment.id, phone: "123"); XCTFail() } catch UAPIError.invalidPhone {}
         keys.fail = true
         do { _ = try await service.refresh(id: shipment.id); XCTFail() } catch UAPIError.keychain {}
@@ -118,7 +122,7 @@ extension TrackingRefreshTests {
     func testPhoneChangeDuringQueryCannotRaceWithClearing() async throws {
         let keys = PhoneKeys(); let client = Client()
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         let captured = service
         client.onQuery = {
             XCTAssertThrowsError(try captured.setPhone(id: self.shipment.id, phone: nil))

@@ -54,10 +54,20 @@ struct ResetPendingShipmentIntent: AppIntent {
     static var title: LocalizedStringResource = "未签收快递回到自动"
     static var openAppWhenRun = false
     static var isDiscoverable = false
+    @Parameter(title: "当前快递") var expectedID: String?
+    @Parameter(title: "手动浏览") var expectedBrowsing: Bool?
     init() {}
+    init(id: UUID?, browsing: Bool) {
+        self.expectedID = id?.uuidString
+        self.expectedBrowsing = browsing
+    }
     func perform() async throws -> some IntentResult {
+        guard let expectedID, let browsing = expectedBrowsing,
+              expectedID.range(of: #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#, options: .regularExpression) != nil,
+              let id = UUID(uuidString: expectedID) else { throw PickupStorageError.staleCompletion }
         let group = try AppGroupResolver.groupID()
-        try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData).resetPendingShipmentBrowsing()
+        try SharedPickupStore(appGroupID: group, accessMode: .existingSharedData)
+            .resetPendingShipmentBrowsing(expected: .init(selectedID: id, browsing: browsing))
         WidgetCenter.shared.reloadTimelines(ofKind: PendingShipmentSelection.kind)
         return .result()
     }
@@ -110,7 +120,7 @@ struct PendingShipmentWidgetView: View {
                     Label("下一票", systemImage: "chevron.right")
                 }.disabled(entry.error || entry.ids.count < 2)
                 Spacer(minLength: 0)
-                Button(intent: ResetPendingShipmentIntent()) { Text("回到自动") }
+                Button(intent: ResetPendingShipmentIntent(id: entry.shipment?.id, browsing: entry.browsing)) { Text("回到自动") }
                     .disabled(entry.error || !entry.browsing)
             }.font(.caption2).buttonStyle(.plain).lineLimit(1).minimumScaleFactor(0.75)
         }

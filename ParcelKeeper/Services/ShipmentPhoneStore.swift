@@ -3,6 +3,7 @@ import Foundation
 /// Device-only, per-record credentials. Never encoded into the shared dataset or backups.
 struct ShipmentPhoneStore {
     var keys: any AIKeyStore = AIKeychainStore(service: "ParcelKeeper.UAPI.ShipmentPhone")
+    var cache = PaidTrackingCache()
 
     private func account(_ shipment: Shipment) throws -> String {
         shipment.id.uuidString + ":" + (try ShipmentShortcutParser.number(shipment.trackingNumber))
@@ -20,16 +21,25 @@ struct ShipmentPhoneStore {
     func save(_ phone: String, for shipment: Shipment) throws {
         try Self.validate(phone)
         let identity = try account(shipment)
+        // Identical saves keep normal cache reuse. Every real edit rotates even
+        // without a query between A -> B -> A. Callers own the tracking lease.
+        guard try read(for: shipment) != phone else { return }
         do {
-            try keys.save(phone, endpoint: identity)
-            guard try keys.read(endpoint: identity) == phone else { throw UAPIError.keychain }
+            try cache.mutatePhone(number: try ShipmentShortcutParser.number(shipment.trackingNumber)) {
+                try keys.save(phone, endpoint: identity)
+                guard try keys.read(endpoint: identity) == phone else { throw UAPIError.keychain }
+            }
         } catch { throw UAPIError.keychain }
     }
     func clear(for shipment: Shipment) throws {
         let identity = try account(shipment)
         do {
-            try keys.delete(endpoint: identity)
-            guard try keys.read(endpoint: identity) == nil else { throw UAPIError.keychain }
+            // Also removes the separate cache Keychain suffix, including legacy
+            // entries. Delete/import retirement uses this same verified path.
+            try cache.mutatePhone(number: try ShipmentShortcutParser.number(shipment.trackingNumber)) {
+                try keys.delete(endpoint: identity)
+                guard try keys.read(endpoint: identity) == nil else { throw UAPIError.keychain }
+            }
         } catch { throw UAPIError.keychain }
     }
 }

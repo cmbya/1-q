@@ -98,6 +98,7 @@ struct TrackingRefreshService {
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
         if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
         if let failure = error as? TminiError { return failure.localizedDescription }
+        if let terminal = error as? KDYZMTerminalResultError { return terminal.localizedDescription }
         if let backend = error as? KDYZMError { return backend.localizedDescription }
         if let failure = error as? RemovedJDTrackingError { return failure.localizedDescription }
         if let direct = error as? MallDirectError { return direct.localizedDescription }
@@ -204,7 +205,11 @@ struct TrackingRefreshService {
                               data.shipments[index].lastQueriedAt == before.lastQueriedAt,
                               data.shipments[index].logisticsTime == before.logisticsTime,
                               data.shipments[index].logisticsSource == before.logisticsSource else { return }
-                        data.shipments[index].lastRefreshError = KDYZMError.safe(error)
+                        if let terminal = error as? KDYZMTerminalResultError {
+                            data.shipments[index].lastRefreshError = terminal.localizedDescription
+                        } else {
+                            data.shipments[index].lastRefreshError = KDYZMError.safe(error)
+                        }
                     }
                     }
                     reloadWidgets()
@@ -291,17 +296,10 @@ struct TrackingRefreshService {
             current.lastRefreshError = nil
             if let state = result.status { current.status = state }
             current.updatedAt = Date()
-            if current.status != oldStatus {
-                let completed = current.status == .delivered
-                let previous = data.records[linked]
-                let code = previous.code.trimmingCharacters(in: .whitespacesAndNewlines)
-                if previous.isCompleted && !completed && !code.isEmpty {
-                    guard !data.records.contains(where: {
-                        $0.id != previous.id && $0.groupID == previous.groupID && !$0.isCompleted &&
-                        $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code
-                    }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码。") }
-                }
-                data.records[linked].isCompleted = completed
+            // Logistics may complete a pending record, never undo manual collection.
+            // Reopening remains an explicit user action through setPickupCompleted.
+            if current.status != oldStatus, current.status == .delivered {
+                data.records[linked].isCompleted = true
             }
             data.records[linked].updatedAt = current.updatedAt
             data.shipments[index] = current

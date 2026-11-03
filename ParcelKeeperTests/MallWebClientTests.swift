@@ -46,14 +46,15 @@ final class MallWebClientTests: XCTestCase {
         let session = MallSession(platform: .pdd, keys: keys)
         XCTAssertThrowsError(try session.load())
         let cookie = TaobaoTrialCookie(name: "PDDAccessToken", value: "test", domain: ".yangkeduo.com", path: "/", secure: true, expires: nil)
-        try session.save([cookie])
+        let user = TaobaoTrialCookie(name: "pdd_user_id", value: "fixture", domain: ".yangkeduo.com", path: "/", secure: true, expires: nil)
+        try session.save([cookie, user])
         XCTAssertEqual(try session.load().first?.name, "PDDAccessToken")
         XCTAssertThrowsError(try session.save([TaobaoTrialCookie(name: "foreign", value: "test", domain: ".jd.com", path: "/", secure: true, expires: nil)]))
         try session.clear()
         XCTAssertNil(keys.value)
         XCTAssertThrowsError(try session.save([]))
         keys.fail = true
-        XCTAssertThrowsError(try session.save([cookie]))
+        XCTAssertThrowsError(try session.save([cookie, user]))
         XCTAssertThrowsError(try session.clear())
     }
 

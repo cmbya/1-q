@@ -69,6 +69,19 @@ final class PaidTrackingCache {
             return Identity(channel: channel, number: number, carrier: carrier, generation: generation, phoneToken: token)
         }
     }
+    /// Lock order: tracking lease -> dataset (delete/retirement) -> paid cache.
+    /// Invalidate BEFORE changing the authoritative phone, even if that write fails.
+    /// The retirement journal retries this deletion after a crash or Keychain failure.
+    /// No dataset lock or lease is acquired here (avoids inverse lock ordering).
+    func mutatePhone(number: String, mutation: () throws -> Void) throws {
+        try locked { _ in
+            let name = SHA256.hash(data: Data(number.utf8)).map { String(format: "%02x", $0) }.joined()
+            let keys = phoneKeys("ParcelKeeper.PaidTrackingPhone." + name)
+            try keys.delete()
+            guard try keys.read() == nil else { throw PaidTrackingCacheError.unavailable }
+            try mutation()
+        }
+    }
     private func validateIdentity(_ identity: Identity) throws {
         guard identity.channel == "uapi" else { return }
         let context = Data(identity.number.utf8)

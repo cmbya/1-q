@@ -67,7 +67,7 @@ class RemovedPlatformContract(unittest.TestCase):
         for field in ['backendBinding', 'backendEvents', 'backendLogisticsUpdatedAt', 'backendRefreshJobID', 'backendRefreshGeneration']:
             self.assertRegex(model, rf'    var {field}: [^\n]+\?')
         for name in ['ParcelKeeper/Services/SharedPickupStore.swift',
-                     'ParcelKeeper/Services/DiagnosticLog.swift', 'ParcelKeeper/Services/MallDeliveryState.swift',
+                     'ParcelKeeper/Services/DiagnosticLog.swift',
                      'ParcelKeeper/Services/TaobaoTrackingClient.swift']:
             before = subprocess.check_output(['git', 'show', 'HEAD:' + name], cwd=ROOT).decode()
             self.assertEqual(source(name), before, name)

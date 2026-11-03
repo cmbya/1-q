@@ -11,6 +11,10 @@ final class StorageNotificationReviewTests: XCTestCase {
         storage = try SharedPickupStore(appGroupID: nil, containerURL: root)
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }
+    private func isolatedPhoneCache() -> PaidTrackingCache {
+        let keys = AuditMediumCoreTests.Keys()
+        return PaidTrackingCache(directory: root.appendingPathComponent("phone-cache"), phoneKeys: { _ in keys })
+    }
     private func seed() throws -> Shipment {
         let item = Shipment(trackingNumber: "SF1234567890123", carrierName: "顺丰", carrierCode: "sf")
         try storage.transaction { data in
@@ -28,7 +32,7 @@ final class StorageNotificationReviewTests: XCTestCase {
     }
     func testReplacementCleansOnlyRetiredPhoneAfterCommitAndPreservesNewCredential() throws {
         let old = try seed(), keys = TrackingRefreshTests.PhoneKeys()
-        let phones = ShipmentPhoneStore(keys: keys)
+        let phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try phones.save("0123", for: old)
         let preview = try replacement(old)
         let incoming = preview.incoming.shipments[0]
@@ -60,7 +64,7 @@ final class StorageNotificationReviewTests: XCTestCase {
     }
     func testSameIdentityReplacementPreservesCredential() throws {
         let old = try seed(), keys = TrackingRefreshTests.PhoneKeys()
-        let phones = ShipmentPhoneStore(keys: keys)
+        let phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try phones.save("0123", for: old)
         var incoming = try storage.snapshot()
         incoming.shipments[0].carrierName = "更新名称"
@@ -71,7 +75,7 @@ final class StorageNotificationReviewTests: XCTestCase {
     }
     func testKeepExistingDoesNotClearValidPhone() throws {
         let old = try seed(), keys = TrackingRefreshTests.PhoneKeys()
-        let phones = ShipmentPhoneStore(keys: keys)
+        let phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try phones.save("0123", for: old)
         _ = try storage.importBackup(replacement(old), policy: .keepExisting)
         try storage.cleanupRetiredShipmentPhones(clear: phones.clear)
@@ -79,7 +83,7 @@ final class StorageNotificationReviewTests: XCTestCase {
     }
     func testKeychainCleanupFailureIsRetriedAfterRestart() throws {
         let old = try seed(), keys = TrackingRefreshTests.PhoneKeys()
-        let phones = ShipmentPhoneStore(keys: keys)
+        let phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         try phones.save("0123", for: old)
         _ = try storage.importBackup(replacement(old), policy: .replaceExisting)
         keys.fail = true

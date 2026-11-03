@@ -4,6 +4,8 @@ import WebKit
 @MainActor
 final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate {
     let web: WKWebView
+    private var initializationTask: Task<Void, Never>?
+    private var stopped = false
     @Published var message = "仅在淘宝HTTPS网页内登录；验证码请手动完成。"
     init(cookies: [TaobaoTrialCookie]) {
         let config = WKWebViewConfiguration()
@@ -12,21 +14,26 @@ final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate
         super.init()
         web.navigationDelegate = self
         // No JS credential bridge and no shared/system cookie storage.
-        Task { @MainActor [weak self] in
+        initializationTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { self.initializationTask = nil }
+            guard !self.stopped, !Task.isCancelled else { return }
             for cookie in cookies where cookie.expires.map({ $0 > Date() }) ?? true {
+                guard !self.stopped, !Task.isCancelled else { return }
                 guard let origin = URL(string: "https://" + cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
                       TaobaoTrialPolicy.allowed(origin) else { continue }
                 var properties: [HTTPCookiePropertyKey: Any] = [.name: cookie.name, .value: cookie.value,
                     .domain: cookie.domain, .path: cookie.path, .secure: cookie.secure ? "TRUE" : "FALSE"]
                 if let expires = cookie.expires { properties[.expires] = expires }
-                if let item = HTTPCookie(properties: properties) { await web.configuration.websiteDataStore.httpCookieStore.setCookie(item) }
+                if let item = HTTPCookie(properties: properties) { await self.web.configuration.websiteDataStore.httpCookieStore.setCookie(item) }
             }
-            web.load(URLRequest(url: URL(string: "https://login.m.taobao.com/login.htm?redirectURL=https%3A%2F%2Fmain.m.taobao.com%2F")!))
+            guard !self.stopped, !Task.isCancelled else { return }
+            self.web.load(URLRequest(url: URL(string: "https://login.m.taobao.com/login.htm?redirectURL=https%3A%2F%2Fmain.m.taobao.com%2F")!))
         }
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard !stopped else { decisionHandler(.cancel); return }
         guard let url = navigationAction.request.url, TaobaoTrialPolicy.allowed(url) else {
             message = "已阻止跳转：\(navigationAction.request.url.map(TaobaoTrialPolicy.blockedDestination) ?? "未知地址")。若验证依赖其他域名，本试验暂不支持；不绕过验证。"
             decisionHandler(.cancel); return
@@ -37,6 +44,7 @@ final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate
     }
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard !stopped else { decisionHandler(.cancel); return }
         guard let url = navigationResponse.response.url, TaobaoTrialPolicy.allowed(url) else {
             message = "已阻止登录页面：\(navigationResponse.response.url.map(TaobaoTrialPolicy.blockedDestination) ?? "未知地址")。"
             decisionHandler(.cancel); return
@@ -44,8 +52,9 @@ final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate
         decisionHandler(.allow)
     }
     func capture() async throws -> [TaobaoTrialCookie] {
-        guard let url = web.url, TaobaoTrialPolicy.allowed(url) else { throw TaobaoTrialError.login }
+        guard !stopped, let url = web.url, TaobaoTrialPolicy.allowed(url) else { throw TaobaoTrialError.login }
         let cookies = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
+        guard !stopped, !Task.isCancelled else { throw CancellationError() }
         let result = cookies.compactMap { cookie -> TaobaoTrialCookie? in
             let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
             guard let origin = URL(string: "https://" + domain), TaobaoTrialPolicy.allowed(origin),
@@ -57,13 +66,19 @@ final class TaobaoTrialBrowser: NSObject, ObservableObject, WKNavigationDelegate
         guard result.contains(where: { ["cookie2", "_tb_token_", "unb"].contains($0.name) }) else { throw TaobaoTrialError.login }
         return result
     }
-    func stop() { web.stopLoading() }
+    func stop() {
+        stopped = true
+        initializationTask?.cancel()
+        initializationTask = nil
+        web.stopLoading()
+    }
 }
 private struct TaobaoTrialWeb: UIViewRepresentable {
     let browser: TaobaoTrialBrowser
+    func makeCoordinator() -> TaobaoTrialBrowser { browser }
     func makeUIView(context: Context) -> WKWebView { browser.web }
     func updateUIView(_ uiView: WKWebView, context: Context) {}
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: ()) { uiView.stopLoading() }
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: TaobaoTrialBrowser) { coordinator.stop() }
 }
 private struct TaobaoTrialLoginView: View {
     @Environment(\.dismiss) private var dismiss
@@ -103,6 +118,7 @@ private struct TaobaoTrialLoginView: View {
             }
         }
         .interactiveDismissDisabled(saving)
+        .onDisappear { browser.stop() }
     }
 }
 

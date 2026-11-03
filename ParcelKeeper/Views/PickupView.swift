@@ -34,7 +34,7 @@ struct PickupView: View {
                         ForEach(records) { record in
                             HStack {
                                 Button {
-                                    run { try store.setPickupCompleted(id: record.id, completed: !record.isCompleted) }
+                                    run { try store.setPickupCompleted(id: record.id, completed: !record.isCompleted, expected: record) }
                                 } label: {
                                     Image(systemName: record.isCompleted ? "checkmark.circle.fill" : "circle")
                                 }

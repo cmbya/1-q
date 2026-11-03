@@ -2,6 +2,13 @@ import Foundation
 
 /// Presentation preference only; no network calls or shipment mutations.
 enum PendingShipmentSelection {
+    struct Identity: Equatable {
+        let selectedID: UUID?
+        let browsing: Bool
+    }
+    static func identity(in data: PickupDataset) -> Identity {
+        Identity(selectedID: selected(in: data)?.id, browsing: isBrowsing(in: data))
+    }
     static let kind = "PendingShipmentWidget"
     static func isBrowsing(in data: PickupDataset) -> Bool {
         guard let id = data.pendingShipmentBrowsingID else { return false }
@@ -34,7 +41,13 @@ extension SharedPickupStore {
             data.pendingShipmentBrowsingID = candidates[next].id
         }
     }
-    func resetPendingShipmentBrowsing() throws {
-        try transaction { $0.pendingShipmentBrowsingID = nil }
+    func resetPendingShipmentBrowsing(expected: PendingShipmentSelection.Identity? = nil) throws {
+        try transaction { data in
+            // Missing parameters from an older widget must not clear newer preferences.
+            guard let expected, PendingShipmentSelection.identity(in: data) == expected else {
+                throw PickupStorageError.staleCompletion
+            }
+            data.pendingShipmentBrowsingID = nil
+        }
     }
 }

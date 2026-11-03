@@ -159,7 +159,8 @@ final class TminiTrackingClient: TminiTrackingQuerying {
             guard (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw TminiError.invalidNumber }
             let token = try configurationToken()
             let identity = try cache.identity(channel: "tmini", number: trackingNumber, generation: token.generation)
-            if !ignoreCache, let cached = try cache.lookup(identity) {
+            let cachedResult = try cache.lookup(identity)
+            if !ignoreCache, let cached = cachedResult {
                 try validateConfiguration(token)
                 return cached
             }

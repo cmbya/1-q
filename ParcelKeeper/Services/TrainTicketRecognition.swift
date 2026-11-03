@@ -76,7 +76,7 @@ enum TrainTicketRecognition {
         let day = #"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?"#
         let time = #"\d{1,2}[:：]\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"#
         let splitTimestamp = "(?m)^[ \t]*" + nonTravelTimeNames
-            + #"[ \t]*[:：][ \t]*(?:\r?\n[ \t]*)+"# + day
+            + #"[ \t]*[:：][ \t]*(?:\r?\n[ \t]*)*"# + day
             + #"(?:(?:[ T]+|(?:\r?\n[ \t]*)+)"# + time + #")?[ \t]*(?=\r?$|\n)"#
         return fieldLines(text).replacingOccurrences(of: splitTimestamp, with: "", options: .regularExpression)
             .components(separatedBy: .newlines).filter {

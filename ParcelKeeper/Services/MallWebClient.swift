@@ -108,12 +108,23 @@ struct MallSession {
             (path.hasSuffix("/") || request.dropFirst(path.count).hasPrefix("/")))) && (!cookie.secure || url.scheme == "https")
     }
     static func valid(_ cookie: TaobaoTrialCookie, platform: MallPlatform) -> Bool {
+        structurallyValid(cookie, platform: platform) && (cookie.expires.map { $0 > Date() } ?? true)
+    }
+    // Validate all entries before dropping expired cookies, including untrusted
+    // expired entries. Expiration itself is not structural corruption.
+    static func structurallyValid(_ cookie: TaobaoTrialCookie, platform: MallPlatform) -> Bool {
         let bare = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
         guard !cookie.name.isEmpty, cookie.name.utf8.count <= 256, cookie.value.utf8.count <= 16384,
+              !bare.isEmpty, bare.range(of: #"^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*$"#, options: .regularExpression) != nil,
+              ![cookie.name, cookie.value, cookie.path].contains(where: { value in
+                  value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+              }),
+              cookie.path.isEmpty || cookie.path.hasPrefix("/"),
+              !cookie.path.contains(where: { $0.isWhitespace || $0.isNewline }),
               !cookie.name.contains(where: { $0.isWhitespace || $0 == ";" || $0 == "=" }),
               !cookie.value.contains(where: { $0.isNewline || $0 == ";" }),
-              let url = URL(string: "https://" + bare + (cookie.path.isEmpty ? "/" : cookie.path)) else { return false }
-        return applies(cookie, to: url, platform: platform)
+              let url = URL(string: "https://" + bare), platform.allowed(url) else { return false }
+        return true
     }
     static func hasLoginCredentials(_ cookies: [TaobaoTrialCookie], platform: MallPlatform) -> Bool {
         let relevant = cookies.filter { applies($0, to: platform.ordersURL, platform: platform) && !$0.value.isEmpty }
@@ -124,8 +135,11 @@ struct MallSession {
         do {
             guard let text = try keys.read(), text.utf8.count < 100_000 else { throw MallWebError.authentication }
             let cookies = try JSONDecoder().decode([TaobaoTrialCookie].self, from: Data(text.utf8))
-            guard !cookies.isEmpty, cookies.allSatisfy({ Self.valid($0, platform: platform) }) else { throw MallWebError.authentication }
-            return cookies
+            guard !cookies.isEmpty, cookies.allSatisfy({ Self.structurallyValid($0, platform: platform) }) else { throw MallWebError.authentication }
+            let now = Date()
+            let active = cookies.filter { $0.expires.map { $0 > now } ?? true }
+            guard Self.hasLoginCredentials(active, platform: platform) else { throw MallWebError.authentication }
+            return active
         } catch { throw MallWebError.authentication }
     }
     func save(_ cookies: [TaobaoTrialCookie]) throws {

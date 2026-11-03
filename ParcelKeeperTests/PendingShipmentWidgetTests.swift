@@ -40,7 +40,7 @@ final class PendingShipmentWidgetTests: XCTestCase {
         XCTAssertEqual(PendingShipmentSelection.selected(in: try store.snapshot())?.id, first.id)
         try store.browsePendingShipment(direction: -1, expectedID: first.id)
         XCTAssertEqual(PendingShipmentSelection.selected(in: try store.snapshot())?.id, second.id)
-        try store.resetPendingShipmentBrowsing()
+        try store.resetPendingShipmentBrowsing(expected: .init(selectedID: second.id, browsing: true))
         XCTAssertNil(try store.snapshot().pendingShipmentBrowsingID)
         XCTAssertEqual(try store.snapshot().shipments, [first, second])
         XCTAssertThrowsError(try store.browsePendingShipment(direction: 0, expectedID: first.id))

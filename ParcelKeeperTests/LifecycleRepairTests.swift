@@ -13,7 +13,9 @@ final class LifecycleRepairTests: XCTestCase {
         storage = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
         keys = TrackingRefreshTests.PhoneKeys()
         store = ShipmentStore(storageProvider: { self.storage })
-        store.shipmentPhones = ShipmentPhoneStore(keys: keys)
+        let cacheKeys = AuditMediumCoreTests.Keys()
+        let cache = PaidTrackingCache(directory: root.appendingPathComponent("phone-cache"), phoneKeys: { _ in cacheKeys })
+        store.shipmentPhones = ShipmentPhoneStore(keys: keys, cache: cache)
         store.reloadWidget = { self.reloads.append($0) }
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: root) }

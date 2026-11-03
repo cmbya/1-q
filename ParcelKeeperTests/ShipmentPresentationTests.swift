@@ -24,7 +24,7 @@ extension TrackingRefreshTests {
         let client = Client()
         let keys = PhoneKeys()
         var service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
-        service.phones = ShipmentPhoneStore(keys: keys)
+        service.phones = ShipmentPhoneStore(keys: keys, cache: isolatedPhoneCache())
         let selectedNumber = shipment.trackingNumber
         for status in [ShipmentStatus.delivered, .archived] {
             try storage.transaction { data in

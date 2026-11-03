@@ -11,7 +11,8 @@ class PaidCacheContract(unittest.TestCase):
             source = text(f'ParcelKeeper/Services/{name}TrackingClient.swift')
             query = source.split('    func query(trackingNumber:', 1)[1]
             self.assertLess(query.index('cache.lookup(identity)'), query.index('network.data(for: request)'))
-            self.assertIn('if !ignoreCache, let cached = try cache.lookup(identity)', source)
+            self.assertIn('let cachedResult = try cache.lookup(identity)', source)
+            self.assertIn('if !ignoreCache, let cached = cachedResult', source)
             self.assertIn('ignoreCache: Bool = false', source)
             self.assertIn('self.ignoreCache = ignoreCache', source)
             self.assertIn('cache.store(', query)

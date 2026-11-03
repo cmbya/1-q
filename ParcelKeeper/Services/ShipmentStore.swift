@@ -63,13 +63,20 @@ final class ShipmentStore: ObservableObject {
             }
         }
     }
-    func reconnectSharedStorage() throws {
-        let next = try SharedPickupStore(appGroupID: nil)
+    func reconnectSharedStorage(storageProvider: (() throws -> SharedPickupStore)? = nil) async throws -> [String] {
+        // Do not replace the dataset while an existing reminder operation awaits.
+        guard !reminderOperationInProgress else {
+            throw NSError(domain: "ShipmentStore", code: 1, userInfo: [NSLocalizedDescriptionKey: "提醒操作正在进行，请稍后重试连接。"])
+        }
+        let next = try storageProvider?() ?? SharedPickupStore(appGroupID: nil)
+        guard !next.isReadOnly else { throw PickupStorageError.appGroupUnavailable }
         let data = try next.snapshot()
         storage = next
         apply(data)
         lastErrorMessage = nil
         WidgetCenter.shared.reloadAllTimelines()
+        // Finish durable reconciliation even if the settings view disappears.
+        return await reconcileReminders()
     }
     // Call when the application returns to the foreground.
     func refreshOnForeground() {
@@ -463,9 +470,10 @@ final class ShipmentStore: ObservableObject {
         d.records[i].groupID = groupID; d.records[i].updatedAt = Date()
         try checkPendingDuplicate(d.records[i], previous: previous, in: d)
     } }
-    func setPickupCompleted(id: UUID, completed: Bool) throws { try change { d in
+    func setPickupCompleted(id: UUID, completed: Bool, expected: PickupRecord? = nil) throws { try change { d in
         guard let i = d.records.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
         let previous = d.records[i]
+        if let expected, !(previous == expected) { throw PickupStorageError.staleCompletion }
         d.records[i].isCompleted = completed; d.records[i].updatedAt = Date()
         try checkPendingDuplicate(d.records[i], previous: previous, in: d)
     } }

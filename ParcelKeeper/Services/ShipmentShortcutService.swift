@@ -307,19 +307,10 @@ struct ShipmentShortcutService {
             shipment.updatedAt = now
             data.shipments[index] = shipment
             if let linked = data.records.firstIndex(where: { $0.shipmentID == shipment.id }) {
-                if shipment.status != previousStatus {
-                    let becomesCompleted = shipment.status == .delivered || shipment.status == .archived
-                    let record = data.records[linked]
-                    let code = record.code.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // Only a newly reopened pending code can introduce a duplicate.
-                    // Preserve pre-existing pending duplicates from history/backups.
-                    if record.isCompleted && !becomesCompleted && !code.isEmpty {
-                        guard !data.records.contains(where: {
-                            $0.id != record.id && $0.groupID == record.groupID && !$0.isCompleted &&
-                            $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code
-                        }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码。") }
-                    }
-                    data.records[linked].isCompleted = becomesCompleted
+                if shipment.status != previousStatus,
+                   shipment.status == .delivered || shipment.status == .archived {
+                    // A logistics change cannot reopen a manually completed pickup.
+                    data.records[linked].isCompleted = true
                 }
                 data.records[linked].updatedAt = now
             } else {

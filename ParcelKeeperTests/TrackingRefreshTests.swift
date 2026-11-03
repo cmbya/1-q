@@ -91,9 +91,11 @@ final class TrackingRefreshTests: XCTestCase {
             data.records[0].isCompleted = true
             data.records.append(PickupRecord(groupID: data.records[0].groupID, code: "42"))
         }
+        _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id)
+        XCTAssertTrue(try storage.snapshot().records[0].isCompleted)
+        XCTAssertFalse(try storage.snapshot().records[1].isCompleted)
+        XCTAssertEqual(try storage.snapshot().shipments[0].status, .readyForPickup)
         let before = try storage.exportBackup()
-        do { _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id); XCTFail() } catch {}
-        XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(before))
         client.result = UAPITrackingResult(trackingNumber: "SF1234567890123", carrierName: "错误", carrierCode: "shunfeng", status: .delivered, logisticsInfo: "已签收", logisticsTime: nil, queryInfo: "错误全文", queriedAt: Date())
         do { _ = try await TrackingRefreshService(store: storage, client: client, reloadWidgets: {}).refresh(id: shipment.id); XCTFail() } catch {}
         XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(before))
