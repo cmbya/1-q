@@ -1,6 +1,6 @@
 import Foundation
 
-struct UAPITrackingResult {
+struct UAPITrackingResult: Codable {
     let trackingNumber: String
     let carrierName: String
     let carrierCode: String
@@ -9,6 +9,7 @@ struct UAPITrackingResult {
     let logisticsTime: Date?
     let queryInfo: String
     let queriedAt: Date
+    var isCached: Bool = false
 }
 
 enum UAPIError: LocalizedError, Equatable {
@@ -121,6 +122,7 @@ final class UAPISettingsService {
         Self.lock.lock(); defer { Self.lock.unlock() }
         if enabled && !isEnabled() && !privacyConfirmed { throw UAPIError.privacyConsentRequired }
         defaults.set(enabled, forKey: enabledKey)
+        defaults.set(UUID().uuidString, forKey: generationKey)
     }
     func hasKey() throws -> Bool {
         Self.lock.lock(); defer { Self.lock.unlock() }
@@ -130,14 +132,17 @@ final class UAPISettingsService {
         Self.lock.lock(); defer { Self.lock.unlock() }
         let value = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Self.validKey(value) else { throw UAPIError.invalidKey }
-        do { try keys.save(value) } catch { throw UAPIError.keychain }
         resetUsage()
+        do {
+            try keys.save(value)
+            guard try keys.read() == value else { throw UAPIError.keychain }
+        } catch { defaults.set(false, forKey: enabledKey); throw UAPIError.keychain }
     }
     func removeKey() throws {
         Self.lock.lock(); defer { Self.lock.unlock() }
-        do { try keys.delete() } catch { throw UAPIError.keychain }
         resetUsage()
         defaults.set(false, forKey: enabledKey)
+        do { try keys.delete() } catch { throw UAPIError.keychain }
     }
     private static func validKey(_ key: String) -> Bool {
         !key.isEmpty && key.utf8.count <= 4096 && key.unicodeScalars.allSatisfy { $0.value >= 33 && $0.value <= 126 }
@@ -154,6 +159,10 @@ final class UAPISettingsService {
         guard isEnabled(), let key = try storedKey() else { throw UAPIError.notConfigured }
         return (key, usageGeneration())
     }
+    fileprivate func validateCredential(_ credential: (key: String, generation: String)) throws {
+        let current = try requestCredential()
+        guard current.key == credential.key, current.generation == credential.generation else { throw UAPIError.notConfigured }
+    }
 }
 
 protocol UAPITrackingQuerying {
@@ -163,9 +172,13 @@ protocol UAPITrackingQuerying {
 final class UAPITrackingClient: UAPITrackingQuerying {
     private let settings: UAPISettingsService
     private let network: any AINetworking
-    init(settings: UAPISettingsService = UAPISettingsService(), network: any AINetworking = AISecureNetwork()) {
+    private let cache: PaidTrackingCache
+    private let ignoreCache: Bool
+    init(settings: UAPISettingsService = UAPISettingsService(), network: any AINetworking = AISecureNetwork(), cache: PaidTrackingCache = PaidTrackingCache(), ignoreCache: Bool = false) {
         self.settings = settings
         self.network = network
+        self.cache = cache
+        self.ignoreCache = ignoreCache
     }
     func query(trackingNumber: String, carrierCode: String?, phone: String?, refresh: Bool) async throws -> UAPITrackingResult {
         do {
@@ -174,6 +187,11 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             // Validate, never repair a supplied identifier before dispatch.
             guard (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw UAPIError.invalidTrackingNumber }
             if let phone, phone.utf8.count != 4 || !phone.utf8.allSatisfy({ (48...57).contains($0) }) { throw UAPIError.invalidPhone }
+            let identity = try cache.identity(channel: "uapi", number: trackingNumber, carrier: carrierCode ?? "", generation: credential.generation, phone: phone)
+            if !ignoreCache, let cached = try cache.lookup(identity) {
+                try settings.validateCredential(credential)
+                return cached
+            }
             var components = URLComponents(string: "https://uapis.cn/api/v1/misc/tracking/query")!
             var items = [URLQueryItem(name: "tracking_number", value: trackingNumber)]
             if let carrierCode, !carrierCode.isEmpty { items.append(URLQueryItem(name: "carrier_code", value: carrierCode)) }
@@ -187,7 +205,9 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             request.setValue("application/json", forHTTPHeaderField: "Accept")
             // Exactly one charged request. AISecureNetwork refuses all redirects.
             let startedAt = Date()
+            try settings.validateCredential(credential)
             let (data, response) = try await network.data(for: request)
+            try settings.validateCredential(credential)
             guard let http = response as? HTTPURLResponse else { throw UAPIError.invalidResponse }
             // Billing headers remain useful even on quota errors or invalid logistics bodies.
             settings.recordUsage(http, generation: credential.generation, requestStartedAt: startedAt)
@@ -205,9 +225,28 @@ final class UAPITrackingClient: UAPITrackingQuerying {
             let payload: Response
             do { payload = try JSONDecoder().decode(Response.self, from: data) }
             catch { throw UAPIError.invalidResponse }
-            return try payload.result(expectedNumber: trackingNumber, queriedAt: Date())
+            let result = try payload.result(expectedNumber: trackingNumber, queriedAt: Date())
+            // Do not persist a server echo of credentials or the phone tail.
+            func safe(_ text: String) -> String {
+                var value = text.replacingOccurrences(of: credential.key, with: "[已隐藏]")
+                if let phone { value = value.replacingOccurrences(of: phone, with: "[已隐藏]") }
+                return value
+            }
+            let sanitized = UAPITrackingResult(trackingNumber: result.trackingNumber, carrierName: safe(result.carrierName), carrierCode: safe(result.carrierCode), status: result.status, logisticsInfo: safe(result.logisticsInfo), logisticsTime: result.logisticsTime, queryInfo: safe(result.queryInfo), queriedAt: result.queriedAt)
+            try settings.validateCredential(credential)
+            try cache.store(sanitized, identity: identity, startedAt: startedAt)
+            // The refresh merger remembers the server-resolved carrier after an auto-detect query.
+            // Seed that exact resolved identity too, so the next App/Shortcut refresh can hit.
+            if (carrierCode ?? "").isEmpty, !sanitized.carrierCode.isEmpty {
+                let resolvedIdentity = try cache.identity(channel: "uapi", number: trackingNumber, carrier: sanitized.carrierCode, generation: credential.generation, phone: phone)
+                try settings.validateCredential(credential)
+                try cache.store(sanitized, identity: resolvedIdentity, startedAt: startedAt)
+            }
+            try settings.validateCredential(credential)
+            return sanitized
         } catch is CancellationError { throw UAPIError.cancelled }
         catch let error as UAPIError { throw error }
+        catch let error as PaidTrackingCacheError { throw error }
         catch let error as URLError where error.code == .cancelled { throw UAPIError.cancelled }
         catch { throw UAPIError.unavailable }
     }

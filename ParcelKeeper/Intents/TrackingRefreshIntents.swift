@@ -6,18 +6,21 @@ enum QueryChannelChoice: String, AppEnum {
     case automatic
     case platformOnly
     case uapi
+    case tmini
 
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "查询渠道")
     static var caseDisplayRepresentations: [QueryChannelChoice: DisplayRepresentation] = [
         .automatic: "跟随来源（使用本票默认设置）",
-        .platformOnly: "仅商城（不使用收费UAPI）",
-        .uapi: "强制UAPI（可能消耗积分）"
+        .platformOnly: "仅商城（不使用付费接口）",
+        .uapi: "强制UAPI（可能消耗积分）",
+        .tmini: "强制Tmini（付费查询）"
     ]
     var mode: TrackingRefreshMode {
         switch self {
         case .automatic: return .automatic
         case .platformOnly: return .platformOnly
         case .uapi: return .uapi
+        case .tmini: return .tmini
         }
     }
 }
@@ -40,6 +43,8 @@ enum ShipmentRefreshPresentation {
     }
     static func source(_ shipment: Shipment) -> String {
         switch shipment.logisticsSource {
+        case "tmini": return "Tmini"
+        case "kdyzm": return "取件助手后台（京东）"
         case "taobao": return "淘宝"
         case "jd": return "京东"
         case "pdd": return "拼多多"
@@ -48,8 +53,8 @@ enum ShipmentRefreshPresentation {
         default: return "未知来源"
         }
     }
-    static func result(_ shipment: Shipment, newlyDelivered: Bool) -> String {
-        let oldText = newlyDelivered ? "物流已更新，本次新增签收。" : "物流已更新。"
+    static func result(_ shipment: Shipment, newlyDelivered: Bool, isCached: Bool = false) -> String {
+        let oldText = isCached ? "使用本地成功查询缓存；未联网、未新增收费，保留原查询时间。" : (newlyDelivered ? "物流已更新，本次新增签收。" : "物流已更新。")
         return oldText + "\n" + details(shipment)
     }
     static func details(_ shipment: Shipment) -> String {
@@ -74,7 +79,7 @@ enum ShipmentRefreshPresentation {
 
 struct RefreshPendingShipmentsIntent: AppIntent {
     static var title: LocalizedStringResource = "刷新未签收快递物流"
-    static var description = IntentDescription("按来源及本票默认设置刷新未签收快递。可选仅商城（不使用收费UAPI）或强制UAPI（可能消耗积分）；商城失败不会自动收费回退。")
+    static var description = IntentDescription("按来源及本票默认设置刷新未签收快递。可选仅商城（不使用付费接口）或强制UAPI／Tmini（付费查询）；失败不会自动切换渠道。")
     @Parameter(title: "查询渠道（可选，默认跟随来源）") var channel: QueryChannelChoice?
     func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let service = try TrackingRefreshService.live()
@@ -93,7 +98,7 @@ struct RefreshPendingShipmentsIntent: AppIntent {
 
 struct RefreshShipmentIntent: AppIntent {
     static var title: LocalizedStringResource = "刷新指定快递物流"
-    static var description = IntentDescription("按单号刷新App中已有记录，不新增记录。默认跟随来源及本票设置；仅商城不使用收费UAPI，强制UAPI可能消耗积分。手机尾号仅用于UAPI，留空复用本票已保存值。")
+    static var description = IntentDescription("按单号刷新App中已有记录，不新增记录。默认跟随来源及本票设置；仅商城不使用付费接口，强制UAPI／Tmini可能计费，失败不自动切换渠道。手机尾号仅用于UAPI，留空复用本票已保存值；Tmini不读取尾号。")
     @Parameter(title: "快递单号") var trackingNumber: String
     @Parameter(title: "收件人手机尾号（可选）") var phone: String?
     @Parameter(title: "查询渠道（可选，默认跟随来源）") var channel: QueryChannelChoice?
@@ -105,10 +110,11 @@ struct RefreshShipmentIntent: AppIntent {
             if matches.isEmpty { throw PickupStorageError.notFound }
             throw ShipmentShortcutError.ambiguous
         }
+        var isCached = false
         let completed = try await service.refresh(id: previous.id, phone: phone,
-            expectedTrackingNumber: number, mode: channel.resolvedMode)
+            expectedTrackingNumber: number, mode: channel.resolvedMode, cacheFeedback: { isCached = $0 })
         let latest = try ShipmentRefreshPresentation.snapshot(service, id: previous.id, number: number)
-        let message = ShipmentRefreshPresentation.result(latest, newlyDelivered: completed)
+        let message = ShipmentRefreshPresentation.result(latest, newlyDelivered: completed, isCached: isCached)
         return .result(value: message, dialog: "\(message)")
     }
 }

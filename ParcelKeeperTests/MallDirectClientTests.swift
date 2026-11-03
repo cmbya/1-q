@@ -4,12 +4,8 @@ import XCTest
 // Offline protocol fixtures follow DSH 585111e14563a35ea62fb062aad9b0675739c79b.
 final class MallDirectClientTests: XCTestCase {
     private func cookies(_ platform: MallPlatform) -> [TaobaoTrialCookie] {
-        let names = platform == .jd ? ["pt_key", "pt_pin"] : ["PDDAccessToken", "pdd_user_id"]
-        return names.map { .init(name: $0, value: "fixture", domain: platform == .jd ? ".jd.com" : ".yangkeduo.com", path: "/", secure: true, expires: nil) }
-    }
-    private var jdList: [String: Any] { ["code": "0", "data": ["orderList": [["orderId": "123456789", "orderType": 7, "statusInfo": ["orderState": 15, "orderStateName": "等待收货"], "wareList": [["name": "商品"]], "showOrderTrack": true]]]] }
-    private func group(_ number: String, text: String = "预计明天派送，未签收") -> [String: Any] {
-        ["shipId": number, "thirdName": "京东快递", "orderTrackInfoList": [["creationTime": "2026-10-22 20:02:46", "title": text]]]
+        let names = ["PDDAccessToken", "pdd_user_id"]
+        return names.map { .init(name: $0, value: "fixture", domain: ".yangkeduo.com", path: "/", secure: true, expires: nil) }
     }
     private func json(_ value: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) }
     private func html(_ value: [String: Any]) -> Data { Data(("<script>window.rawData = " + String(data: json(value), encoding: .utf8)! + ";</script>").utf8) }
@@ -31,43 +27,6 @@ final class MallDirectClientTests: XCTestCase {
             let result = try await MallDirectClient(platform: .pdd, cookies: cookies(.pdd), network: network).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378")
             XCTAssertEqual(result.status, expected)
         }
-    }
-    func testJDPostFormMetadataAndAllPackages() async throws {
-        let network = MallDirectFixtureNetwork([json(jdList), json(["success": true, "data": ["orderTrackGroupInfoList": [group("JD123456789"), group("JD987654321")]]])])
-        let result = try await MallDirectClient(platform: .jd, cookies: cookies(.jd), network: network).fetchOrders()
-        XCTAssertEqual(result.map(\.trackingNumber), ["JD123456789", "JD987654321"])
-        XCTAssertEqual(network.requests.count, 2)
-        for request in network.requests {
-            XCTAssertEqual(request.httpMethod, "POST")
-            XCTAssertEqual(request.url?.host, "api.m.jd.com")
-            XCTAssertEqual(request.url?.path, "/api")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded")
-            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
-            for (name, value) in [("appid", "order-jd-com"), ("client", "pc"), ("clientVersion", "1.0.0"), ("loginType", "3")] {
-                XCTAssertEqual(query.first { $0.name == name }?.value, value)
-            }
-        }
-        let body = String(data: network.requests[1].httpBody!, encoding: .utf8)!
-        let decoded = try JSONSerialization.jsonObject(with: Data(String(body.dropFirst(5)).removingPercentEncoding!.utf8)) as! [String: Any]
-        XCTAssertEqual(decoded["orderId"] as? String, "123456789")
-        XCTAssertEqual(decoded["orderType"] as? Int, 7)
-        XCTAssertEqual(decoded["orderStatus"] as? Int, 15)
-        XCTAssertEqual(URLComponents(url: network.requests[0].url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "functionId" }?.value, "pcorder_center_list")
-        let firstBody = String(data: network.requests[0].httpBody!, encoding: .utf8)!
-        let listPayload = try JSONSerialization.jsonObject(with: Data(String(firstBody.dropFirst(5)).removingPercentEncoding!.utf8)) as! [String: Int]
-        XCTAssertEqual(listPayload, ["page": 1, "s": 4096, "d": 1])
-    }
-    func testJDMatchesRequestedPackageNotFirstAndKeepsUnknownStatus() async throws {
-        let network = MallDirectFixtureNetwork([json(jdList), json(["data": ["orderTrackGroupInfoList": [group("JD123456789", text: "已签收"), group("JD987654321")]]])])
-        let result = try await MallDirectClient(platform: .jd, cookies: cookies(.jd), network: network).query(orderID: "123456789", trackingNumber: "JD987654321")
-        XCTAssertEqual(result.trackingNumber, "JD987654321")
-        XCTAssertNil(result.status)
-        XCTAssertTrue(result.logisticsInfo.contains("未签收"))
-    }
-    func testMissingFirstPageOrderDoesNotGuessMetadata() async {
-        let network = MallDirectFixtureNetwork([json(["data": ["orderList": []]])])
-        await failure(.noTrace) { _ = try await MallDirectClient(platform: .jd, cookies: self.cookies(.jd), network: network).query(orderID: "123456789", trackingNumber: "JD123456789") }
-        XCTAssertEqual(network.requests.count, 1)
     }
     func testPDDPublicQueryAndSignedOrderCanRefresh() async throws {
         let network = MallDirectFixtureNetwork([html(pddList(signed: true)), html(pddShip(status: "SIGNED"))])
@@ -97,33 +56,32 @@ final class MallDirectClientTests: XCTestCase {
         for data in [Data("window.rawData.foo = {};".utf8), Data("window.rawData == {};".utf8), Data("window.rawData = {\"a\":1".utf8), html(["other": []])] {
             await failure(.unsupported) { try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: MallDirectFixtureNetwork([data])).verifySession() }
         }
-        await failure(.unsupported) { try await MallDirectClient(platform: .jd, cookies: self.cookies(.jd), network: MallDirectFixtureNetwork([self.json(["data": [:]])])).verifySession() }
         await failure(.noTrace) { _ = try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: MallDirectFixtureNetwork([self.html(self.pddList()), self.html(self.pddShip(traces: []))])).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378") }
     }
     func testCookieIsolationAndHeaderInjection() async throws {
-        let foreign = TaobaoTrialCookie(name: "foreign", value: "secret", domain: ".yangkeduo.com", path: "/", secure: true, expires: nil)
-        let hostOnly = TaobaoTrialCookie(name: "hostOnly", value: "secret", domain: "jd.com", path: "/", secure: true, expires: nil)
-        let scoped = TaobaoTrialCookie(name: "scoped", value: "secret", domain: ".jd.com", path: "/other", secure: true, expires: nil)
-        let expired = TaobaoTrialCookie(name: "expired", value: "secret", domain: ".jd.com", path: "/", secure: true, expires: .distantPast)
-        let network = MallDirectFixtureNetwork([json(["data": ["orderList": []]])])
-        try await MallDirectClient(platform: .jd, cookies: cookies(.jd) + [foreign, hostOnly, scoped, expired], network: network).verifySession()
-        XCTAssertEqual(network.requests.first?.value(forHTTPHeaderField: "Cookie"), "pt_key=fixture; pt_pin=fixture")
-        let bad = TaobaoTrialCookie(name: "pt_key", value: "secret\r\nX-Evil: yes", domain: ".jd.com", path: "/", secure: true, expires: nil)
+        let foreign = TaobaoTrialCookie(name: "foreign", value: "secret", domain: ".jd.com", path: "/", secure: true, expires: nil)
+        let hostOnly = TaobaoTrialCookie(name: "hostOnly", value: "secret", domain: "yangkeduo.com", path: "/", secure: true, expires: nil)
+        let scoped = TaobaoTrialCookie(name: "scoped", value: "secret", domain: ".yangkeduo.com", path: "/other", secure: true, expires: nil)
+        let expired = TaobaoTrialCookie(name: "expired", value: "secret", domain: ".yangkeduo.com", path: "/", secure: true, expires: .distantPast)
+        let network = MallDirectFixtureNetwork([html(["ordersStore": ["orders": []]])])
+        try await MallDirectClient(platform: .pdd, cookies: cookies(.pdd) + [foreign, hostOnly, scoped, expired], network: network).verifySession()
+        XCTAssertEqual(network.requests.first?.value(forHTTPHeaderField: "Cookie"), "PDDAccessToken=fixture; pdd_user_id=fixture")
+        let bad = TaobaoTrialCookie(name: "PDDAccessToken", value: "secret\r\nX-Evil: yes", domain: ".yangkeduo.com", path: "/", secure: true, expires: nil)
         let blocked = MallDirectFixtureNetwork([])
-        await failure(.authentication) { try await MallDirectClient(platform: .jd, cookies: [bad] + self.cookies(.jd), network: blocked).verifySession() }
+        await failure(.authentication) { try await MallDirectClient(platform: .pdd, cookies: [bad] + self.cookies(.pdd), network: blocked).verifySession() }
         XCTAssertTrue(blocked.requests.isEmpty)
     }
     func testMissingCredentialsAuthVerificationRedirectAndSizeAreSafe() async {
         let noCredentials = MallDirectFixtureNetwork([])
-        await failure(.authentication) { try await MallDirectClient(platform: .jd, cookies: [], network: noCredentials).verifySession() }
+        await failure(.authentication) { try await MallDirectClient(platform: .pdd, cookies: [], network: noCredentials).verifySession() }
         XCTAssertTrue(noCredentials.requests.isEmpty)
         for (status, reason) in [(401, MallWebError.authentication), (403, .verification), (302, .authentication), (429, .verification)] {
             let network = MallDirectFixtureNetwork([Data("secret raw server body".utf8)], status: status)
-            await failure(reason) { try await MallDirectClient(platform: .jd, cookies: self.cookies(.jd), network: network).verifySession() }
+            await failure(reason) { try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: network).verifySession() }
             XCTAssertEqual(network.requests.count, 1)
         }
-        await failure(.unsupported) { try await MallDirectClient(platform: .jd, cookies: self.cookies(.jd), network: MallDirectFixtureNetwork([Data(repeating: 65, count: 2_000_001)])).verifySession() }
-        await failure(.authentication) { try await MallDirectClient(platform: .jd, cookies: self.cookies(.jd), network: MallDirectFixtureNetwork([self.json(["code": "1001", "echo": "private-secret"])] )).verifySession() }
+        await failure(.unsupported) { try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: MallDirectFixtureNetwork([Data(repeating: 65, count: 2_000_001)])).verifySession() }
+        await failure(.authentication) { try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: MallDirectFixtureNetwork([self.html(["code": "1001", "echo": "private-secret"])] )).verifySession() }
     }
     func testEpochTimeAndNoTraceCandidateRemainDistinctFromSuccessfulSync() async throws {
         let traces: [[String: Any]] = [["info": "运输中", "displayTime": "10-22 22:29", "time": 1792679363000]]
@@ -131,11 +89,21 @@ final class MallDirectClientTests: XCTestCase {
         let result = try await MallDirectClient(platform: .pdd, cookies: cookies(.pdd), network: network).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378")
         XCTAssertEqual(result.logisticsTime?.timeIntervalSince1970, 1792679363)
         XCTAssertEqual(result.status, .inTransit)
-        let noTrace = MallDirectFixtureNetwork([json(jdList), json(["data": ["orderTrackGroupInfoList": [["shipId": "JD123456789", "thirdName": "京东快递", "orderTrackInfoList": []]]]])])
-        let candidate = try await MallDirectClient(platform: .jd, cookies: cookies(.jd), network: noTrace).fetchOrders()
-        XCTAssertEqual(candidate.first?.trackingNumber, "JD123456789")
         let tooMany = Array(repeating: ["info": "运输中", "time": 1792679363] as [String: Any], count: 501)
         await failure(.unsupported) { _ = try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: MallDirectFixtureNetwork([self.html(self.pddList()), self.html(self.pddShip(traces: tooMany))])).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378") }
+    }
+    func testPDDNoTraceCandidateIsNotSuccessfulTrackingAndCancellationNeverDispatches() async throws {
+        let network = MallDirectFixtureNetwork([html(pddList()), html(pddShip(traces: []))])
+        let candidates = try await MallDirectClient(platform: .pdd, cookies: cookies(.pdd), network: network).fetchOrders()
+        XCTAssertEqual(candidates.first?.trackingNumber, "77127094235378")
+        let blocked = MallDirectFixtureNetwork([])
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: blocked).verifySession()
+        }
+        do { try await task.value; XCTFail("Cancelled operation succeeded") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(blocked.requests.isEmpty)
     }
     func testMissingShippingIDDoesNotIssueDetailRequest() async {
         var fixture = pddList()

@@ -1,5 +1,19 @@
 import Foundation
 
+// Value-only identity shared with the widget and backups, never credentials.
+struct KDYZMBinding: Codable, Equatable, Hashable {
+    var origin: String
+    var accountID: String
+    var orderID: String
+    var shipmentID: String
+}
+struct KDYZMLogisticsEvent: Codable, Equatable, Hashable {
+    var time: Double
+    var timeText: String
+    var description: String
+    var location: String
+}
+
 /// Chinese presentation only; preserve device timezone and stored instants.
 enum ShipmentDateDisplay {
     static func string(_ date: Date, timeZone: TimeZone = .current) -> String {
@@ -34,7 +48,7 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var lastQueryAttemptAt: Date?
     // Optional source metadata remains compatible with old JSON and the widget target.
     var originPlatform: String?
-    // nil follows originPlatform; "uapi" explicitly overrides the source channel.
+    // nil follows originPlatform; "uapi" or "tmini" explicitly overrides the source channel.
     var refreshChannel: String?
     var taobaoOrderID: String?
     var logisticsSource: String?
@@ -43,6 +57,12 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var platformOrderID: String?
     // Validated platform logistics entry; never contains credentials.
     var platformLogisticsURL: String?
+    var backendBinding: KDYZMBinding?
+    var backendEvents: [KDYZMLogisticsEvent]?
+    var backendLogisticsUpdatedAt: Date?
+    var backendRefreshJobID: String?
+    var backendRefreshGeneration: UUID?
+    var backendPreviousHistory: String?
 
     /// Store only public logistics parameters, never arbitrary platform tokens.
     static func logisticsEntry(_ raw: String, orderID: String) -> String? {

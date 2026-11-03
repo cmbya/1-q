@@ -2,7 +2,7 @@ import Foundation
 import WidgetKit
 
 enum TrackingRefreshMode: String, Codable, CaseIterable {
-    case automatic, platformOnly, uapi
+    case automatic, platformOnly, uapi, tmini
 }
 
 struct TrackingRefreshReport {
@@ -11,6 +11,8 @@ struct TrackingRefreshReport {
     /// Number of tickets dispatched to each source (successes and failures).
     var taobaoCount = 0
     var uapiCount = 0
+    var tminiCount = 0
+    var cachedCount = 0
     var jdCount = 0
     var pddCount = 0
     struct Failure {
@@ -25,6 +27,8 @@ struct TrackingRefreshReport {
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
         value += " 淘宝派发\(taobaoCount)票，京东派发\(jdCount)票，拼多多派发\(pddCount)票，UAPI派发\(uapiCount)票（实际收费以接口为准）。"
+        value += " Tmini派发\(tminiCount)票（付费渠道）。"
+        if cachedCount > 0 { value += " 本地缓存命中 \(cachedCount) 票（未联网、未新增收费）。" }
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
         if let stoppedReason { value += " \(stoppedReason)" }
         for failure in failures { value += "\n\(failure.trackingNumber)：\(failure.reason)" }
@@ -36,6 +40,7 @@ struct TrackingRefreshReport {
 struct TrackingRefreshService {
     let store: SharedPickupStore
     let client: any UAPITrackingQuerying
+    var tminiClient: any TminiTrackingQuerying = TminiTrackingClient()
     var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     var phones = ShipmentPhoneStore()
@@ -44,18 +49,19 @@ struct TrackingRefreshService {
     var mallClient: any MallTrackingQuerying = MallTrackingClient()
 
     private enum Route: Equatable {
-        case taobao, uapi, mall(String)
+        case taobao, uapi, tmini, mall(String)
         var platform: String? {
             switch self {
             case .taobao: return "taobao"
             case .mall(let platform): return platform
-            case .uapi: return nil
+            case .uapi, .tmini: return nil
             }
         }
-        var source: String { platform ?? "uapi" }
+        var source: String { self == .tmini ? "tmini" : (platform ?? "uapi") }
     }
     private static func platformRoute(_ shipment: Shipment) throws -> Route {
-        if let platform = shipment.originPlatform, platform == "jd" || platform == "pdd" { return .mall(platform) }
+        if shipment.originPlatform == "jd" { throw RemovedJDTrackingError.removed }
+        if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         throw TaobaoTrackingError.unsupported
     }
@@ -64,10 +70,13 @@ struct TrackingRefreshService {
     }
     private static func route(_ shipment: Shipment, mode: TrackingRefreshMode) throws -> Route {
         if mode == .uapi { return .uapi }
+        if mode == .tmini { return .tmini }
         if mode == .platformOnly { return try platformRoute(shipment) }
         if shipment.refreshChannel == "uapi" { return .uapi }
+        if shipment.refreshChannel == "tmini" { return .tmini }
         guard shipment.refreshChannel == nil else { throw TaobaoTrackingError.unsupported }
-        if let platform = shipment.originPlatform, platform == "jd" || platform == "pdd" { return .mall(platform) }
+        if shipment.originPlatform == "jd" { throw RemovedJDTrackingError.removed }
+        if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         // Missing origin is the legacy/manual UAPI path, not a platform fallback.
         guard shipment.originPlatform == nil || shipment.originPlatform == "manual" || shipment.originPlatform == "uapi" else {
@@ -76,7 +85,7 @@ struct TrackingRefreshService {
         return .uapi
     }
     func setRefreshChannel(id: UUID, channel: String?) throws {
-        guard channel == nil || channel == "uapi" else { throw TaobaoTrackingError.unsupported }
+        guard channel == nil || channel == "uapi" || channel == "tmini" else { throw TaobaoTrackingError.unsupported }
         let lease = try store.acquireTrackingQuery(id: id)
         defer { lease.release() }
         try store.transaction { data in
@@ -87,6 +96,10 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
+        if let failure = error as? TminiError { return failure.localizedDescription }
+        if let backend = error as? KDYZMError { return backend.localizedDescription }
+        if let failure = error as? RemovedJDTrackingError { return failure.localizedDescription }
         if let direct = error as? MallDirectError { return direct.localizedDescription }
         if let platform, platform == "jd" || platform == "pdd" {
             let name = platform == "jd" ? "京东" : "拼多多"
@@ -148,8 +161,8 @@ struct TrackingRefreshService {
         if let phone { try phones.save(phone, for: shipment) }
         else { try phones.clear(for: shipment) }
     }
-    static func live() throws -> TrackingRefreshService {
-        TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient())
+    static func live(ignoreCache: Bool = false) throws -> TrackingRefreshService {
+        TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient(ignoreCache: ignoreCache), tminiClient: TminiTrackingClient(ignoreCache: ignoreCache))
     }
     static func isPending(_ shipment: Shipment) -> Bool {
         shipment.status != .delivered && shipment.status != .archived
@@ -164,7 +177,41 @@ struct TrackingRefreshService {
         return try await refresh(id: shipment.id, phone: phone, mode: mode)
     }
     /// Returns whether this update newly completed a shipment.
-    func refresh(id: UUID, phone: String? = nil, expectedTrackingNumber: String? = nil, pendingOnly: Bool = false, mode: TrackingRefreshMode = .automatic) async throws -> Bool {
+    func refresh(id: UUID, phone: String? = nil, expectedTrackingNumber: String? = nil, pendingOnly: Bool = false, mode: TrackingRefreshMode = .automatic, cacheFeedback: (Bool) -> Void = { _ in }) async throws -> Bool {
+        // Resolve backend before the legacy lease: no lease spans backend networking.
+        // Explicit UAPI override is honored, but backend failures never fall back to it.
+        if let before = try store.snapshot().shipments.first(where: { $0.id == id }),
+           before.backendBinding != nil, mode != .uapi, mode != .tmini,
+           mode == .platformOnly || before.refreshChannel == nil {
+            guard before.status != .archived, !pendingOnly || Self.isPending(before) else { throw ShipmentShortcutError.statusConflict }
+            if let expectedTrackingNumber, CarrierDetector.sanitize(before.trackingNumber) != expectedTrackingNumber { throw KDYZMError.stale }
+            let operation = UUID()
+            DiagnosticLog.shared.record(.trackingStarted, operation: operation)
+            do {
+                let result = try await KDYZMRefreshService(store: store, reloadWidgets: reloadWidgets).refresh(before: before)
+                DiagnosticLog.shared.record(.trackingFinished, operation: operation)
+                return result
+            } catch {
+                // Store only fixed, safe messages, never transport/server strings or secrets.
+                DiagnosticLog.shared.record(.trackingFailed, operation: operation, reason: .unknown)
+                if !(error is CancellationError) {
+                    if let lease = try? store.acquireTrackingQuery(id: id) {
+                    defer { lease.release() }
+                    try? store.transaction { data in
+                        guard let index = data.shipments.firstIndex(where: { $0.id == id }),
+                              KDYZMMerger.sameIdentity(data.shipments[index], before),
+                              data.shipments[index].status == before.status,
+                              data.shipments[index].lastQueriedAt == before.lastQueriedAt,
+                              data.shipments[index].logisticsTime == before.logisticsTime,
+                              data.shipments[index].logisticsSource == before.logisticsSource else { return }
+                        data.shipments[index].lastRefreshError = KDYZMError.safe(error)
+                    }
+                    }
+                    reloadWidgets()
+                }
+                throw error
+            }
+        }
         let logID = UUID()
         DiagnosticLog.shared.record(.trackingStarted, operation: logID)
         var logSucceeded = false
@@ -182,6 +229,7 @@ struct TrackingRefreshService {
         do {
         let route = try Self.route(before, mode: mode)
         let result: UAPITrackingResult
+        var tminiConfiguration: TminiConfiguration?
         switch route {
         case .taobao:
             guard let orderID = before.taobaoOrderID, !orderID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -192,6 +240,9 @@ struct TrackingRefreshService {
             guard let orderID = before.platformOrderID,
                   Shipment.validPlatformOrderID(orderID, platform: platform) else { throw MallWebError.unsupported }
             result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number, sourceURL: before.platformLogisticsURL.flatMap { Shipment.logisticsEntry($0, orderID: orderID) })
+        case .tmini:
+            tminiConfiguration = try tminiClient.configurationToken()
+            result = try await tminiClient.query(trackingNumber: number)
         case .uapi:
         // Shortcut optional text can arrive as "" instead of nil. Only an
         // entirely blank input means omitted; never repair nonblank credentials.
@@ -207,13 +258,16 @@ struct TrackingRefreshService {
         if let suppliedPhone { queryPhone = suppliedPhone } else { queryPhone = try phones.read(for: before) }
         result = try await client.query(trackingNumber: number, carrierCode: before.uapiCarrierCode, phone: queryPhone, refresh: true)
         }
+        cacheFeedback(result.isCached)
         try Task.checkCancellation()
         guard result.trackingNumber == number else {
             if route == .taobao { throw TaobaoTrackingError.identityMismatch }
             if case .mall = route { throw MallWebError.identityMismatch }
+            if route == .tmini { throw TminiError.invalidResponse }
             throw UAPIError.invalidResponse
         }
         let delivered = try store.transaction { data -> Bool in
+            if let tminiConfiguration { try tminiClient.validateConfiguration(tminiConfiguration) }
             guard let index = data.shipments.firstIndex(where: { $0.id == id }),
                   CarrierDetector.sanitize(data.shipments[index].trackingNumber) == number else { throw PickupStorageError.notFound }
             var current = data.shipments[index]
@@ -259,7 +313,7 @@ struct TrackingRefreshService {
         } catch {
             // Never replace the original exception if recording the safe diagnostic fails.
             // No data transaction/lock spans the network await.
-            if !(error is CancellationError), (error as? UAPIError) != .cancelled {
+            if !(error is CancellationError), (error as? UAPIError) != .cancelled, (error as? TminiError) != .cancelled {
                 try? store.transaction { data in
                     guard let index = data.shipments.firstIndex(where: { $0.id == id }),
                           Self.sameIdentity(data.shipments[index], before),
@@ -295,8 +349,9 @@ struct TrackingRefreshService {
             }
             // Recheck before each request; another process may have completed/deleted it.
             guard let latest = try store.snapshot().shipments.first(where: { $0.id == id }), Self.isPending(latest) else { continue }
-            if mode == .platformOnly, (try? Self.platformRoute(latest)) == nil { report.skipped += 1; continue }
+            if mode == .platformOnly, latest.originPlatform != "jd", (try? Self.platformRoute(latest)) == nil { report.skipped += 1; continue }
             let route = try? Self.route(latest, mode: mode)
+            if route == .tmini, blockedPlatforms.contains("tmini") { report.skipped += 1; continue }
             if let platform = route?.platform, blockedPlatforms.contains(platform) { report.skipped += 1; continue }
             do {
                 // Persist only scheduling metadata before awaiting; shared across invocations.
@@ -310,14 +365,26 @@ struct TrackingRefreshService {
                 guard shouldQuery else { continue }
                 if route == .taobao { report.taobaoCount += 1 }
                 if route == .uapi { report.uapiCount += 1 }
-                if route == .mall("jd") { report.jdCount += 1 }
+                if route == .tmini { report.tminiCount += 1 }
+                if route == .mall("jd") || (latest.backendBinding != nil && mode != .uapi && mode != .tmini && (mode == .platformOnly || latest.refreshChannel == nil)) { report.jdCount += 1 }
                 if route == .mall("pdd") { report.pddCount += 1 }
-                if try await refresh(id: id, expectedTrackingNumber: CarrierDetector.sanitize(latest.trackingNumber), pendingOnly: true, mode: mode) { report.newlyDelivered += 1 }
+                if try await refresh(id: id, expectedTrackingNumber: CarrierDetector.sanitize(latest.trackingNumber), pendingOnly: true, mode: mode, cacheFeedback: { cached in
+                    if cached {
+                        report.cachedCount += 1
+                        if route == .uapi { report.uapiCount -= 1 }
+                        if route == .tmini { report.tminiCount -= 1 }
+                    }
+                }) { report.newlyDelivered += 1 }
                 report.succeeded += 1
             } catch is CancellationError { throw CancellationError() }
             catch UAPIError.cancelled { throw UAPIError.cancelled }
+            catch TminiError.cancelled { throw TminiError.cancelled }
             catch {
                 let reason = Self.safeReason(error, platform: route?.platform ?? latest.originPlatform)
+                if let failure = error as? TminiError, failure.stopsBatch {
+                    blockedPlatforms.insert("tmini")
+                    report.stoppedReason = reason
+                }
                 if let failure = error as? TaobaoTrackingError, failure.stopsBatch {
                     blockedPlatforms.insert("taobao")
                     report.stoppedReason = reason
@@ -332,6 +399,11 @@ struct TrackingRefreshService {
                 }
                 let number = (try? ShipmentShortcutParser.number(latest.trackingNumber)) ?? "无效运单号"
                 report.failures.append(.init(trackingNumber: number, reason: reason))
+                if error is PaidTrackingCacheError {
+                    report.remaining = ids.count - offset - 1
+                    report.stoppedReason = reason
+                    break
+                }
                 if let failure = error as? UAPIError, failure.stopsBatch {
                     report.remaining = ids.count - offset - 1
                     report.stoppedReason = failure.localizedDescription

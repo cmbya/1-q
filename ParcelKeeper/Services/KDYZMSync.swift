@@ -1,0 +1,407 @@
+import Foundation
+import WidgetKit
+
+enum KDYZMTime {
+    static func date(_ milliseconds: Double) throws -> Date? {
+        guard milliseconds.isFinite, milliseconds >= 0, milliseconds.rounded() == milliseconds,
+              milliseconds <= 253_402_300_799_000 else { throw KDYZMError.invalid }
+        return milliseconds == 0 ? nil : Date(timeIntervalSince1970: milliseconds / 1000)
+    }
+}
+struct KDYZMOrder: Decodable {
+    var id: String
+    var accountId: String
+    var platform: String
+    var platformOrderId: String
+    var familyId: String? = nil
+    var title: String? = nil
+}
+struct KDYZMRemoteShipment: Decodable {
+    var id: String
+    var orderId: String
+    var accountId: String
+    var familyId: String? = nil
+    var waybillNo: String
+    var carrier: String
+    var status: String
+    var pickupCode: String? = nil
+    var station: String? = nil
+    var arrivalAt: Double? = nil
+    var updatedAt: Double? = nil
+    var picked: Bool? = nil
+    var hidden: Bool? = nil
+    var deleted: Bool? = nil
+    var logisticsEvents: [KDYZMLogisticsEvent]? = nil
+    var logisticsState: String? = nil
+    var logisticsCheckedAt: Double? = nil
+    var logisticsUpdatedAt: Double? = nil
+    var logisticsTruncated: Bool? = nil
+}
+struct KDYZMSnapshot: Decodable {
+    var schemaVersion: Int
+    var serverRevision: Int
+    var accounts: [KDYZMAccount]
+    var orders: [KDYZMOrder]
+    var shipments: [KDYZMRemoteShipment]
+    var hiddenIds: [String]
+    var deletedIds: [String]
+    var familyIds: [String]?
+    var legacyAccountIds: [String]?
+    var families: [KDYZMFamily]?
+
+    func validated() throws -> Self {
+        func unique(_ ids: [String]) throws {
+            guard Set(ids).count == ids.count else { throw KDYZMError.invalid }
+            for id in ids { _ = try KDYZMClient.segment(id) }
+        }
+        guard schemaVersion == 1, serverRevision >= 0 else { throw KDYZMError.invalid }
+        try unique(accounts.map(\.id)); try unique(orders.map(\.id)); try unique(shipments.map(\.id))
+        try unique(hiddenIds); try unique(deletedIds); try unique(familyIds ?? []); try unique(legacyAccountIds ?? [])
+        try unique((families ?? []).map(\.id))
+        let accountMap = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
+        let orderMap = Dictionary(uniqueKeysWithValues: orders.map { ($0.id, $0) })
+        func authorized(account: String, family: String?) -> Bool {
+            if let familyIds {
+                // Presence, even [], switches off accounts-as-scope compatibility.
+                return familyIds.contains(family ?? "") || (legacyAccountIds ?? []).contains(account)
+            }
+            return accountMap[account] != nil
+        }
+        for account in accounts {
+            guard authorized(account: account.id, family: account.familyId) else { throw KDYZMError.forbidden }
+        }
+        for order in orders {
+            _ = try KDYZMClient.segment(order.accountId)
+            guard authorized(account: order.accountId, family: order.familyId),
+                  accountMap[order.accountId].map({ $0.platform == order.platform }) ?? true else { throw KDYZMError.forbidden }
+        }
+        var identities = Set<String>()
+        for shipment in shipments {
+            guard let order = orderMap[shipment.orderId], order.accountId == shipment.accountId,
+                  (order.familyId ?? "") == (shipment.familyId ?? ""),
+                  authorized(account: shipment.accountId, family: shipment.familyId),
+                  ["transit", "arrived", "signed", "unknown"].contains(shipment.status),
+                  shipment.logisticsState.map({ ["", "ok", "empty", "error", "unavailable"].contains($0) }) ?? true else { throw KDYZMError.invalid }
+            guard (shipment.pickupCode ?? "").count <= 80, (shipment.station ?? "").count <= 200,
+                  (order.title ?? "").count <= 500, shipment.carrier.count <= 120,
+                  [shipment.pickupCode ?? "", shipment.station ?? "", order.title ?? ""].allSatisfy({ text in
+                      !text.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
+                  }) else { throw KDYZMError.invalid }
+            let number = CarrierDetector.sanitize(shipment.waybillNo)
+            let key = shipment.accountId + ":" + carrierKey(shipment.carrier) + ":" + number
+            if !number.isEmpty { guard identities.insert(key).inserted else { throw KDYZMError.invalid } }
+            for time in [shipment.arrivalAt, shipment.updatedAt, shipment.logisticsCheckedAt, shipment.logisticsUpdatedAt].compactMap({ $0 }) { _ = try KDYZMTime.date(time) }
+            let events = shipment.logisticsEvents ?? []
+            guard events.count <= 100, Set(events).count == events.count else { throw KDYZMError.invalid }
+            for event in events {
+                _ = try KDYZMTime.date(event.time)
+                guard !event.description.isEmpty, event.description.count <= 600, event.location.count <= 120,
+                      event.timeText.count <= 100 else { throw KDYZMError.invalid }
+            }
+        }
+        return self
+    }
+    private func carrierKey(_ raw: String) -> String { KDYZMMerger.carrierKey(raw) }
+}
+
+struct KDYZMSyncReport {
+    var imported = 0
+    var updated = 0
+    var skipped = 0
+    var noWaybill = 0
+    var message: String {
+        "新增 \(imported) 票，更新 \(updated) 票，跳过 \(skipped) 票；\(noWaybill) 个京东订单尚无运单。同步只读取后台快照，不代表后台已完成平台采集；零订单也不保证购物账号没有订单。"
+    }
+}
+enum KDYZMMerger {
+    static func carrierKey(_ raw: String) -> String {
+        if let c = CarrierDetector.carrierMentioned(in: raw) { return c.code }
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if CarrierDetector.allCarriers.contains(where: { $0.code == key }) { return key }
+        return key
+    }
+    static func sameIdentity(_ current: Shipment, _ before: Shipment) -> Bool {
+        current.id == before.id && current.backendBinding == before.backendBinding &&
+        current.trackingNumber == before.trackingNumber && current.carrierCode == before.carrierCode &&
+        current.carrierName == before.carrierName && current.originPlatform == before.originPlatform &&
+        current.refreshChannel == before.refreshChannel && current.platformOrderID == before.platformOrderID &&
+        current.taobaoOrderID == before.taobaoOrderID && current.uapiCarrierCode == before.uapiCarrierCode
+    }
+    static func update(_ remote: KDYZMRemoteShipment, local: inout Shipment, refresh: Bool = false) throws -> Bool {
+        guard local.status != .archived else { return false }
+        // Failed/empty cache responses never clear history, and never count as a successful refresh.
+        guard remote.logisticsState == "ok", let incoming = remote.logisticsEvents, !incoming.isEmpty,
+              let successTime = try KDYZMTime.date(remote.logisticsUpdatedAt ?? 0) else { return false }
+        if let old = local.backendLogisticsUpdatedAt, successTime < old { return false }
+        let latest = incoming.compactMap { try? KDYZMTime.date($0.time) }.max()
+        if let old = local.logisticsTime, latest.map({ $0 >= old }) != true { return false }
+        if let old = local.logisticsTime, latest == old {
+            let newest = incoming.filter { (try? KDYZMTime.date($0.time)) == old }
+            if let prior = local.backendEvents {
+                guard Set(newest) == Set(prior.filter { (try? KDYZMTime.date($0.time)) == old }) else { return false }
+            } else {
+                guard newest.count == 1, newest.first?.description == local.logisticsInfo else { return false }
+            }
+        }
+        let combined = Array(Set((local.backendEvents ?? []) + incoming)).sorted {
+            $0.time == $1.time ? $0.description < $1.description : $0.time > $1.time
+        }
+        if local.backendEvents == nil { local.backendPreviousHistory = local.queryInfo }
+        let priorHistory = local.backendPreviousHistory
+        local.backendEvents = combined
+        local.backendLogisticsUpdatedAt = successTime
+        local.logisticsInfo = incoming.sorted { $0.time > $1.time }.first?.description
+        if let latest { local.logisticsTime = latest }
+
+        local.queryInfo = combined.map {
+            let time = (try? KDYZMTime.date($0.time)).map { ShipmentDateDisplay.string($0) } ?? $0.timeText
+            return [time, $0.description, $0.location].filter { !$0.isEmpty }.joined(separator: " · ")
+        }.joined(separator: "\n") + (remote.logisticsTruncated == true ? "\n【后台轨迹已截断，非完整历史；本地已有节点保留】" : "")
+        if let priorHistory, !priorHistory.isEmpty, priorHistory != local.queryInfo {
+            local.queryInfo = (local.queryInfo ?? "") + "\n【原有历史】\n" + priorHistory
+        }
+        // signed is a logistics fact, not proof the user collected the parcel.
+        // Never mutate PickupRecord.isCompleted from remote signed/picked.
+        if local.status != .archived && local.status != .delivered {
+            switch remote.status {
+            case "signed": local.status = .delivered
+            case "arrived": local.status = .readyForPickup
+            case "transit": if local.status != .readyForPickup { local.status = .inTransit }
+            default: break
+            }
+        }
+        local.logisticsSource = "kdyzm"; local.lastRefreshError = nil
+        if refresh { local.lastQueriedAt = Date() }
+        local.updatedAt = Date()
+        return true
+    }
+    @discardableResult
+    static func apply(_ snapshot: KDYZMSnapshot, origin: String, to data: inout PickupDataset) throws -> KDYZMSyncReport {
+        _ = try snapshot.validated()
+        _ = try KDYZMOrigin(origin)
+        var result = KDYZMSyncReport()
+        let orders = Dictionary(uniqueKeysWithValues: snapshot.orders.map { ($0.id, $0) })
+        let remoteNumbers = Dictionary(grouping: snapshot.shipments.filter { orders[$0.orderId]?.platform == "jd" && !$0.waybillNo.isEmpty }, by: { CarrierDetector.sanitize($0.waybillNo) })
+        let existingBindings = data.shipments.compactMap(\.backendBinding)
+        guard Set(existingBindings).count == existingBindings.count else { throw KDYZMError.invalid }
+        result.noWaybill = snapshot.orders.filter { order in
+            order.platform == "jd" && !snapshot.shipments.contains { $0.orderId == order.id && !CarrierDetector.sanitize($0.waybillNo).isEmpty }
+        }.count
+        for remote in snapshot.shipments {
+            guard let order = orders[remote.orderId], order.platform == "jd",
+                  !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id),
+                  remote.hidden != true, remote.deleted != true,
+                  !CarrierDetector.sanitize(remote.waybillNo).isEmpty else { result.skipped += 1; continue }
+            let number = try ShipmentShortcutParser.number(CarrierDetector.sanitize(remote.waybillNo))
+            let binding = KDYZMBinding(origin: origin, accountID: remote.accountId, orderID: remote.orderId, shipmentID: remote.id)
+            let exact = data.shipments.indices.filter { data.shipments[$0].backendBinding == binding }
+            guard exact.count <= 1 else { throw KDYZMError.invalid }
+            var index = exact.first
+            if index == nil {
+                let candidates = data.shipments.indices.filter { CarrierDetector.sanitize(data.shipments[$0].trackingNumber) == number && data.shipments[$0].backendBinding == nil }
+                // Never attach an unbound ticket if two authorized accounts share the number.
+                guard candidates.count <= 1, candidates.isEmpty || remoteNumbers[number]?.count == 1 else { throw KDYZMError.invalid }
+                if let candidate = candidates.first {
+                    let local = data.shipments[candidate]
+                    guard !remote.carrier.isEmpty, carrierKey(local.carrierName) == carrierKey(remote.carrier) || local.carrierCode == carrierKey(remote.carrier),
+                          local.taobaoOrderID == nil, local.originPlatform == nil || local.originPlatform == "manual" || local.originPlatform == "jd",
+                          local.platformOrderID == nil || local.platformOrderID == order.platformOrderId else { throw KDYZMError.invalid }
+                    index = candidate
+                }
+            }
+            if let index {
+                var local = data.shipments[index]
+                guard local.status != .archived else { result.skipped += 1; continue }
+                guard CarrierDetector.sanitize(local.trackingNumber) == number,
+                      !remote.carrier.isEmpty,
+                      carrierKey(local.carrierName) == carrierKey(remote.carrier) || local.carrierCode == carrierKey(remote.carrier) else { throw KDYZMError.stale }
+                local.backendBinding = binding; local.originPlatform = "jd"
+                local.platformOrderID = order.platformOrderId
+                // Preserve explicit UAPI routing and its logistics; binding alone does not opt in.
+                if local.refreshChannel == nil && (local.logisticsSource == nil || local.logisticsSource == "kdyzm") {
+                    _ = try update(remote, local: &local)
+                }
+                let code = remote.pickupCode ?? ""
+                if local.pickupCode.isEmpty, !code.isEmpty {
+                    let linked = data.records.indices.filter { data.records[$0].shipmentID == local.id }
+                    guard linked.count == 1, let record = linked.first, data.records[record].code.isEmpty else { throw KDYZMError.invalid }
+                    let target = data.records[record]
+                    guard target.isCompleted || !data.records.contains(where: {
+                        $0.id != target.id && !$0.isCompleted && $0.groupID == target.groupID &&
+                        $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }) else { throw KDYZMError.invalid }
+                    local.pickupCode = code
+                    data.records[record].code = code
+                }
+                data.shipments[index] = local
+                result.updated += 1
+            } else {
+                guard let group = data.expressGroupID, data.groups.contains(where: { $0.id == group }) else { throw KDYZMError.invalid }
+                let detection = CarrierDetector.detect(number, context: remote.carrier)
+                // Remote metadata seeds new tickets, never implies manual collection.
+                let pickupCode = remote.pickupCode ?? ""
+                guard pickupCode.isEmpty || !data.records.contains(where: { !$0.isCompleted && $0.groupID == group && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == pickupCode.trimmingCharacters(in: .whitespacesAndNewlines) }) else { throw KDYZMError.invalid }
+                var local = Shipment(trackingNumber: number, carrierName: remote.carrier.isEmpty ? detection.carrier.name : remote.carrier,
+                                     carrierCode: detection.carrier.code, note: order.title ?? "", pickupCode: pickupCode,
+                                     originPlatform: "jd", platformOrderID: order.platformOrderId)
+                local.backendBinding = binding
+                switch remote.status {
+                case "signed": local.status = .delivered
+                case "arrived": local.status = .readyForPickup
+                default: break
+                }
+                _ = try update(remote, local: &local)
+                data.shipments.append(local)
+                data.records.append(PickupRecord(groupID: group, code: local.pickupCode, location: remote.station ?? "", source: local.note, isCompleted: false, shipmentID: local.id))
+                result.imported += 1
+            }
+        }
+        return result
+    }
+}
+
+struct KDYZMJob: Decodable {
+    var id: String
+    var accountId: String
+    var orderId: String
+    var state: String
+    var retryAt: Double? = nil
+    var logisticsState: String? = nil
+    var createdAt: Double? = nil
+    func success(for binding: KDYZMBinding, expectedID: String? = nil) throws -> Bool {
+        _ = try KDYZMClient.segment(id)
+        guard expectedID.map({ id == $0 }) ?? true, accountId == binding.accountID, orderId == binding.orderID,
+              ["queued", "running", "cooldown", "disabled", "completed", "expired", "error"].contains(state) else { throw KDYZMError.invalid }
+        _ = try KDYZMTime.date(retryAt ?? 0)
+        _ = try KDYZMTime.date(createdAt ?? 0)
+        return state == "completed" && logisticsState == "ok"
+    }
+}
+
+struct KDYZMRefreshService {
+    let store: SharedPickupStore
+    var connection: KDYZMConnection = .shared
+    var client = KDYZMClient()
+    var budget: TimeInterval = 12
+    var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
+    func refresh(before: Shipment) async throws -> Bool {
+        try await connection.beginRefresh(before.id)
+        do {
+            let result = try await perform(before: before)
+            await connection.endRefresh(before.id)
+            return result
+        } catch {
+            await connection.endRefresh(before.id)
+            throw error
+        }
+    }
+    private func perform(before: Shipment) async throws -> Bool {
+        guard !store.isReadOnly, let binding = before.backendBinding else { throw KDYZMError.invalid }
+        let credential = try await connection.credential()
+        guard credential.baseURL == binding.origin else { throw KDYZMError.stale }
+        let start = ProcessInfo.processInfo.systemUptime
+        func remainingTimeout() throws -> TimeInterval {
+            let remaining = budget - (ProcessInfo.processInfo.systemUptime - start)
+            guard remaining > 0 else { throw KDYZMError.queued }
+            return min(12, remaining)
+        }
+        // Network never holds a tracking lease or dataset transaction. All commits
+        // validate the credential generation inside KDYZMConnection.commit.
+        struct Accepted: Decodable { var accepted: Bool; var jobs: [KDYZMJob] }
+        struct ReadJob: Decodable { var job: KDYZMJob }
+        var job: KDYZMJob
+        if let pending = before.backendRefreshJobID {
+            guard before.backendRefreshGeneration == credential.generation else {
+                try await clearJob(pending, before: before, credential: credential)
+                throw KDYZMError.stale
+            }
+            do {
+                job = try await client.request(ReadJob.self, origin: binding.origin, path: "/v1/sync-jobs/" + KDYZMClient.segment(pending), credential: credential, timeout: remainingTimeout()).job
+            } catch KDYZMError.jobGone {
+                try await clearJob(pending, before: before, credential: credential)
+                throw KDYZMError.jobGone
+            }
+            _ = try job.success(for: binding, expectedID: pending)
+        } else {
+            let response = try await client.request(Accepted.self, origin: binding.origin,
+                path: "/v1/orders/" + KDYZMClient.segment(binding.orderID) + "/refresh", method: "POST", body: [:], credential: credential, status: 202, timeout: remainingTimeout())
+            guard response.accepted, response.jobs.count == 1, let first = response.jobs.first else { throw KDYZMError.invalid }
+            job = first
+            _ = try job.success(for: binding)
+            try await connection.commit(credential) {
+                let lease = try store.acquireTrackingQuery(id: before.id); defer { lease.release() }
+                try store.transaction { data in
+                    guard let index = data.shipments.firstIndex(where: { $0.id == before.id }),
+                          KDYZMMerger.sameIdentity(data.shipments[index], before),
+                          data.shipments[index].backendRefreshJobID == nil else { throw KDYZMError.stale }
+                    data.shipments[index].backendRefreshJobID = first.id
+                    data.shipments[index].backendRefreshGeneration = credential.generation
+                }
+            }
+        }
+        let expectedID = job.id
+        while true {
+            try Task.checkCancellation()
+            try await connection.verify(credential)
+            if try job.success(for: binding, expectedID: expectedID) { break }
+            if ["disabled", "completed", "expired", "error", "cooldown"].contains(job.state) {
+                // Cooldown means queue full in the pinned server, not an accepted queued job.
+                try await clearJob(expectedID, before: before, credential: credential)
+                throw job.state == "cooldown" ? KDYZMError.queued : KDYZMError.failed
+            }
+            let remaining = budget - (ProcessInfo.processInfo.systemUptime - start)
+            let delay = max(0.5, (job.retryAt ?? 0) / 1000 - Date().timeIntervalSince1970)
+            guard remaining > delay + 1 else { throw KDYZMError.queued }
+            try await Task.sleep(nanoseconds: UInt64(min(delay, 10) * 1_000_000_000))
+            do {
+                job = try await client.request(ReadJob.self, origin: binding.origin,
+                    path: "/v1/sync-jobs/" + KDYZMClient.segment(expectedID), credential: credential, timeout: remainingTimeout()).job
+            } catch KDYZMError.jobGone {
+                try await clearJob(expectedID, before: before, credential: credential)
+                throw KDYZMError.jobGone
+            }
+        }
+        let snapshot = try await client.snapshot(credential, timeout: remainingTimeout())
+        _ = try remainingTimeout()
+        try Task.checkCancellation()
+        guard let remote = snapshot.shipments.first(where: { $0.id == binding.shipmentID && $0.accountId == binding.accountID && $0.orderId == binding.orderID }),
+              snapshot.orders.contains(where: { $0.id == binding.orderID && $0.accountId == binding.accountID && $0.platform == "jd" }),
+              !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id), remote.hidden != true, remote.deleted != true,
+              CarrierDetector.sanitize(remote.waybillNo) == CarrierDetector.sanitize(before.trackingNumber),
+              KDYZMMerger.carrierKey(remote.carrier) == KDYZMMerger.carrierKey(before.carrierName) || KDYZMMerger.carrierKey(remote.carrier) == before.carrierCode else { throw KDYZMError.stale }
+        guard remote.logisticsState == "ok", !(remote.logisticsEvents ?? []).isEmpty,
+              let createdAt = job.createdAt, createdAt > 0,
+              (remote.logisticsCheckedAt ?? 0) >= createdAt,
+              (remote.logisticsUpdatedAt ?? 0) >= createdAt else {
+            try await clearJob(expectedID, before: before, credential: credential)
+            throw KDYZMError.empty
+        }
+        try await connection.commit(credential) {
+            let lease = try store.acquireTrackingQuery(id: before.id); defer { lease.release() }
+            try store.transaction { data in
+                guard let index = data.shipments.firstIndex(where: { $0.id == before.id }),
+                      KDYZMMerger.sameIdentity(data.shipments[index], before),
+                      data.shipments[index].backendRefreshJobID == expectedID,
+                      data.records.contains(where: { $0.shipmentID == before.id }),
+                      data.shipments[index].status != .archived else { throw KDYZMError.stale }
+                guard try KDYZMMerger.update(remote, local: &data.shipments[index], refresh: true) else { throw KDYZMError.empty }
+                data.shipments[index].backendRefreshJobID = nil
+                data.shipments[index].backendRefreshGeneration = nil
+                // Record completion, code, group, location, source and reminder remain local.
+            }
+        }
+        reloadWidgets()
+        return false // Backend signed is not an automatic manual pickup completion.
+    }
+    private func clearJob(_ id: String, before: Shipment, credential: KDYZMCredential) async throws {
+        try await connection.commit(credential) {
+            let lease = try store.acquireTrackingQuery(id: before.id); defer { lease.release() }
+            try store.transaction { data in
+                guard let i = data.shipments.firstIndex(where: { $0.id == before.id }),
+                      KDYZMMerger.sameIdentity(data.shipments[i], before), data.shipments[i].backendRefreshJobID == id else { throw KDYZMError.stale }
+                data.shipments[i].backendRefreshJobID = nil
+                data.shipments[i].backendRefreshGeneration = nil
+            }
+        }
+    }
+}

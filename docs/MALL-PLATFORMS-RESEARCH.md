@@ -4,11 +4,7 @@
 保留已真机验证的淘宝流程、旧备份及记录身份、备注/取件码/提醒和UAPI规则。商城失败不自动转UAPI。不绕过验证码，不伪造签名，不导出Cookie或原始账号响应。不因新增平台放宽已有域名保护。
 
 ## 京东
-参考 Granter-z/parcly lib/platform/connectors/jd_connector.dart 和 Halo0sama/ExpressAssistant ui/JdTrackFetcher.kt、JdListFetcher.kt。
-- 订单页 https://trade.m.jd.com/order/orderlist_jdm.shtml
-- 轨迹页 https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=<订单关联>
-- 参考采用本地WebView页面运行+接口响应观察/DOM解析，不是简单套淘宝HTTP客户端。
-- 必须分别保存商城订单ID、真实运单号；不能混用dealId与运单号；多包裹明确匹配。
+旧直连实现已删除；保留历史数据与明确失败边界，新后台尚未接入。不使用旧网页接口作为回退。
 
 ## 拼多多
 参考 Granter-z/parcly pdd_connector.dart，以及 Halo0sama/ExpressAssistant docs/PDD_REAL.md、PddTraceFetcher.kt。
@@ -22,6 +18,5 @@
 已读 Lyybutterflies/dsh-parcel-tracker lib/platforms/douyin.js：作者明确记录默认端点无登录请求返回status_code=1、Url does not match；可自定义端点+通用解析不构成有效买家物流实现。不能照搬后标为已接入。
 GitHub多组定向搜索尚未找到足够证据的个人买家订单+轨迹完整链路。商家订单开放接口不适用于本用户。不得猜测接口或交付仅登录空入口充数。
 
-## 实施及验收边界
-先实现有源码依据的京东/拼多多；抖音保留待验证，不标可用。在修改前需测试执行方式决策：本机无Swift/Xcode；用户本轮仅授权开发，未授权新的提交/推送/Actions。可明确允许本地测试先写但暂不执行，或授权CI验证。任何未编译/真机范围如实标记。
-来源：GitHub gh API直接读取；未克隆、未使用购物账号、未执行真实付费查询。上游源码研究不等于iOS实际可用性证明。
+## 当前实施及验收边界
+淘宝、拼多多 Cookie 直连和显式 UAPI 保留；本轮不实现新后台，不提交推送、不触发 CI。源码/正则检查不代表 Swift 编译、登录或 iOS 真机验证。

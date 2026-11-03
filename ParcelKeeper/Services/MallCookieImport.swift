@@ -16,7 +16,7 @@ enum MallCookieImport {
             let value = String(segment[segment.index(after: equal)...])
             guard !name.isEmpty, name.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || [95,45].contains($0) }),
                   names.insert(name).inserted, !value.contains(" "), !value.contains("\""), !value.contains("\\"), !value.contains(",") else { throw MallWebError.authentication }
-            result.append(.init(name: name, value: value, domain: platform == .jd ? ".jd.com" : ".yangkeduo.com", path: "/", secure: true, expires: nil))
+            result.append(.init(name: name, value: value, domain: ".yangkeduo.com", path: "/", secure: true, expires: nil))
         }
         guard MallSession.hasLoginCredentials(result, platform: platform) else { throw MallWebError.authentication }
         return result

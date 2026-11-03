@@ -15,6 +15,7 @@ targets:
     type: application
     platform: iOS
     sources:
+      # Directory membership automatically follows removed legacy sources and retained PDD code.
       - path: ParcelKeeper
         excludes:
           - ParcelKeeper.entitlements

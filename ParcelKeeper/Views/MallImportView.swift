@@ -126,7 +126,7 @@ private struct MallLoginSheet: View {
                     Button("取消") { saveTask?.cancel(); browser.destroy(); dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(saving ? "正在保存" : (browser.platform == .jd ? "保存候选会话" : "验证并保存会话")) {
+                    Button(saving ? "正在保存" : "验证并保存会话") {
                         saving = true
                         saveTask = Task { @MainActor in
                             defer { saving = false }
@@ -137,10 +137,8 @@ private struct MallLoginSheet: View {
                                     browser.message = "尚未读取到平台会话，请在网页完成登录后重试。"; return
                                 }
                                 guard MallSession.hasLoginCredentials(cookies, platform: browser.platform) else { throw MallWebError.authentication }
-                                browser.message = browser.platform == .jd ? "正在保存本机候选会话；订单访问另行验证。" : "正在验证订单访问。"
-                                if browser.platform != .jd {
-                                    try await MallDirectClient(platform: browser.platform, cookies: cookies).verifySession()
-                                }
+                                browser.message = "正在验证订单访问。"
+                                try await MallDirectClient(platform: browser.platform, cookies: cookies).verifySession()
                                 let fresh = try await browser.capture()
                                 guard browser.active, !Task.isCancelled, !readOnly else { return }
                                 guard MallSession.hasLoginCredentials(fresh, platform: browser.platform) else { throw MallWebError.authentication }
@@ -181,7 +179,7 @@ struct MallImportView: View {
                     .font(.footnote)
                 Text("会话仅保存在本机独立钥匙串，不进入JSON备份；退出会销毁登录网页并清除该平台会话，不影响其他平台。不要分享密码或Cookie。")
                     .font(.footnote)
-                Text(platform == .jd ? "京东通过手机网页读取，需保持App前台；快捷指令后台不支持此网页链路，失败不自动切换UAPI。" : "拼多多使用已验证的Cookie直连读取，网页登录用于取得本机会话。")
+                Text("拼多多使用已验证的Cookie直连读取，网页登录用于取得本机会话。")
                     .font(.footnote)
                 Text(hasSession ? "已保存候选会话（不代表登录有效）" : "尚未保存会话")
                 Button("登录／重新登录" + platform.title) { consent = true }
@@ -194,7 +192,7 @@ struct MallImportView: View {
             Section("手动读取与确认") {
                 Button(busy ? "正在处理" : "读取网页订单（不调用UAPI）") { fetch() }
                     .disabled(busy || !hasSession || store.isHistoricalSnapshot)
-                Text(platform == .jd ? "测试范围：本页近一个月的普通快递，包含已签收；即时配送不作为快递。日期无法核实的订单跳过，不代表全月完整同步。跑通后再切换未签收。缺少真实运单不导入。" : "仅展示本次网页能够读取的订单，非全量同步；缺少运单号不会用订单号替代。请核对预览并勾选，确认后才保存。已有票仅补平台关联，不覆盖备注／取件码。")
+                Text("仅展示本次网页能够读取的订单，非全量同步；缺少运单号不会用订单号替代。请核对预览并勾选，确认后才保存。已有票仅补平台关联，不覆盖备注／取件码。")
                     .font(.footnote)
                 Text("确认后先导入／补关联，再按平台尝试刷新物流；整批物流请求预算20秒，登录／验证等错误会停止后续平台请求，但继续保存所选关联。未取得轨迹不代表已核实状态；不会自动调用UAPI。")
                     .font(.footnote)
@@ -240,7 +238,7 @@ struct MallImportView: View {
         .sheet(isPresented: $cookieImport, onDismiss: { cookieText = "" }) {
             NavigationStack {
                 Form {
-                    Text(platform == .jd ? "仅粘贴本平台Cookie值；保存为本机候选会话，不代表登录或订单读取已验证，不进入JSON备份。不要分享Cookie。" : "仅粘贴本平台Cookie值（name=value; name=value），不要粘贴curl或整组请求头。验证订单访问成功后才保存钥匙串，不进入JSON备份。")
+                    Text("仅粘贴本平台Cookie值（name=value; name=value），不要粘贴curl或整组请求头。验证订单访问成功后才保存钥匙串，不进入JSON备份。")
                     SecureField("Cookie", text: $cookieText).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button(busy ? "正在验证" : "验证并保存") { saveImportedCookie() }
                         .disabled(busy || cookieText.isEmpty || store.isHistoricalSnapshot)
@@ -254,7 +252,7 @@ struct MallImportView: View {
             if let browser {
                 MallLoginSheet(browser: browser, saved: {
                     candidates = []; selected = []; loadSession()
-                    message = platform == .jd ? "已保存候选会话；尚未验证订单访问，请单独读取。" : "已验证订单访问并保存本机会话；后续有效性仍以实际读取为准。"
+                    message = "已验证订单访问并保存本机会话；后续有效性仍以实际读取为准。"
                 }, readOnly: store.isHistoricalSnapshot)
             }
         }
@@ -270,16 +268,14 @@ struct MallImportView: View {
         task = Task { @MainActor in
             defer { if operationID == id { busy = false; task = nil; operationID = nil } }
             do {
-                if platform != .jd {
-                    try await MallDirectClient(platform: platform, cookies: parsed).verifySession()
-                }
+                try await MallDirectClient(platform: platform, cookies: parsed).verifySession()
                 try Task.checkCancellation()
                 guard operationID == id, !store.isHistoricalSnapshot else { return }
                 try session.save(parsed)
                 await MallBrowserContext.clear(platform)
                 guard operationID == id else { return }
                 hasSession = true; cookieImport = false; candidates = []; selected = []
-                message = platform == .jd ? "已保存本机候选会话；不代表登录有效或订单可读取。请单独读取订单验证，未调用UAPI。" : "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
+                message = "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
             } catch is CancellationError { }
             catch { if operationID == id { message = "验证失败，原会话未替换：" + safeFailure(error) } }
         }
@@ -330,21 +326,7 @@ struct MallImportView: View {
             do {
                 let cookies = try session.load()
                 let values: [MallCandidate]
-                if currentPlatform == .jd {
-                    let client = MallWebClient(platform: .jd, cookies: cookies)
-                    do {
-                        values = try await client.fetchOrders()
-                        guard operationID == id, platform == currentPlatform, !Task.isCancelled, !store.isHistoricalSnapshot else { return }
-                        message = client.diagnosticMessage
-                    } catch is CancellationError { return }
-                    catch {
-                        guard operationID == id, platform == currentPlatform, !Task.isCancelled else { return }
-                        message = client.diagnosticMessage + "\n" + safeFailure(error) + " 未导入，未调用UAPI。"
-                        return
-                    }
-                } else {
-                    values = try await MallDirectClient(platform: currentPlatform, cookies: cookies).fetchOrders()
-                }
+                values = try await MallDirectClient(platform: currentPlatform, cookies: cookies).fetchOrders()
                 try Task.checkCancellation()
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else { return }
                 candidates = values

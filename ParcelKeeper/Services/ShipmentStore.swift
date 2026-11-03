@@ -143,6 +143,40 @@ final class ShipmentStore: ObservableObject {
         do { try change(action) } catch { lastErrorMessage = error.localizedDescription }
     }
     var activeShipments: [Shipment] { shipments.filter { $0.status != .archived } }
+    func syncKDYZM(connection: KDYZMConnection = .shared, client: KDYZMClient = KDYZMClient()) async throws -> KDYZMSyncReport {
+        guard let storage, !storage.isReadOnly else { throw PickupStorageError.appGroupUnavailable }
+        let before = try storage.snapshot()
+        let credential = try await connection.credential()
+        let snapshot = try await client.snapshot(credential)
+        try Task.checkCancellation()
+        let orders = Dictionary(uniqueKeysWithValues: snapshot.orders.map { ($0.id, $0) })
+        let remote = snapshot.shipments.filter { orders[$0.orderId]?.platform == "jd" }
+        let numbers = Set(remote.map { CarrierDetector.sanitize($0.waybillNo) }.filter { !$0.isEmpty })
+        let bindings = Set(remote.map { KDYZMBinding(origin: credential.baseURL, accountID: $0.accountId, orderID: $0.orderId, shipmentID: $0.id) })
+        let affected = before.shipments.filter { shipment in
+            numbers.contains(CarrierDetector.sanitize(shipment.trackingNumber)) || shipment.backendBinding.map { bindings.contains($0) } == true
+        }
+        let report = try await connection.commit(credential) {
+            var leases: [SharedPickupStore.TrackingQueryLease] = []
+            defer { leases.forEach { $0.release() } }
+            for id in affected.map(\.id).sorted(by: { $0.uuidString < $1.uuidString }) {
+                leases.append(try storage.acquireTrackingQuery(id: id))
+            }
+            return try storage.transaction { data in
+                // Identity/deletion/channel/carrier changes while networking invalidate
+                // this sync; user-only note/code/group/completion edits are preserved.
+                guard !data.shipments.contains(where: { current in
+                    numbers.contains(CarrierDetector.sanitize(current.trackingNumber)) && !affected.contains(where: { $0.id == current.id })
+                }), affected.allSatisfy({ old in
+                          data.shipments.first(where: { $0.id == old.id }).map { KDYZMMerger.sameIdentity($0, old) } ?? false
+                      }) else { throw KDYZMError.stale }
+                return try KDYZMMerger.apply(snapshot, origin: credential.baseURL, to: &data)
+            }
+        }
+        WidgetCenter.shared.reloadAllTimelines()
+        try reload()
+        return report
+    }
     func shipment(id: UUID) -> Shipment? { shipments.first { $0.id == id } }
     func contains(trackingNumber: String) -> Bool {
         let number = CarrierDetector.sanitize(trackingNumber)
@@ -206,11 +240,11 @@ final class ShipmentStore: ObservableObject {
     /// Confirmed mall import only; binding uses the refresh lease before the dataset lock.
     /// Existing user fields and explicit UAPI overrides are never replaced by mall metadata.
     @discardableResult func importMall(_ candidate: MallCandidate, platform: String) throws -> UUID {
-        guard platform == "jd" || platform == "pdd",
+        guard platform == "pdd",
               Shipment.validPlatformOrderID(candidate.orderID, platform: platform) else {
             throw PickupStorageError.stalePreview
         }
-        let sourceURL = platform == "jd" ? candidate.sourceURL.flatMap { Shipment.logisticsEntry($0, orderID: candidate.orderID) } : nil
+        let sourceURL: String? = nil
         let number = try ShipmentShortcutParser.number(candidate.trackingNumber)
         guard let storage else { throw PickupStorageError.appGroupUnavailable }
         let matches = try storage.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }

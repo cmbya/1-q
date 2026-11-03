@@ -180,7 +180,9 @@ struct AddShipmentSheet: View {
             var queryWarning: String?
             if shouldQuery {
                 do {
-                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: phone)
+                    var isCached = false
+                    _ = try await TrackingRefreshService.live().refresh(id: shipment.id, phone: phone, cacheFeedback: { isCached = $0 })
+                    if isCached { queryWarning = "已使用本地成功查询缓存；未联网、未新增收费，保留原查询时间。" }
                     try store.reload()
                     queryPhone = ""
                 } catch { queryWarning = "物流查询未完成：\(error.localizedDescription)"; try? store.reload() }

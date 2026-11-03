@@ -45,8 +45,8 @@ final class MallRoutingTests: XCTestCase {
             XCTAssertEqual(try JSONDecoder().decode(Shipment.self, from: JSONEncoder().encode(bound)), bound)
         }
     }
-    func testBothPlatformsDispatchWithoutPhoneOrUAPIFallbackInAutomaticAndPlatformOnly() async throws {
-        for (index, pair) in [("jd", TrackingRefreshMode.automatic), ("pdd", .automatic), ("jd", .platformOnly), ("pdd", .platformOnly)].enumerated() {
+    func testPDDDispatchWithoutPhoneOrUAPIFallbackInAutomaticAndPlatformOnly() async throws {
+        for (index, pair) in [("pdd", TrackingRefreshMode.automatic), ("pdd", .platformOnly)].enumerated() {
             let (platform, mode) = pair
             let item = try add(platform, order: order(platform), index: index)
             let mall = Mall(); let uapi = TrackingRefreshTests.Client()
@@ -61,6 +61,29 @@ final class MallRoutingTests: XCTestCase {
             XCTAssertEqual(saved.note, item.note); XCTAssertEqual(saved.pickupCode, item.pickupCode)
             XCTAssertEqual(saved.reminderDate, item.reminderDate)
         }
+    }
+    func testRemovedJDNeverDispatchesAndPreservesHistory() async throws {
+        for (index, mode) in [TrackingRefreshMode.automatic, .platformOnly].enumerated() {
+            let item = try add("jd", order: order("jd"), index: index)
+            let mall = Mall(); let uapi = TrackingRefreshTests.Client()
+            let records = try storage.snapshot().records
+            do {
+                _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
+                XCTFail("Removed provider succeeded")
+            } catch { XCTAssertEqual(error as? RemovedJDTrackingError, .removed) }
+            XCTAssertEqual(uapi.calls, 0); XCTAssertTrue(mall.calls.isEmpty)
+            var saved = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == item.id })
+            XCTAssertEqual(saved.lastRefreshError, "旧京东直连已移除，请接入后台或明确选择UAPI")
+            saved.lastRefreshError = nil
+            XCTAssertEqual(saved, item)
+            XCTAssertEqual(try storage.snapshot().records, records)
+        }
+    }
+    func testRemovedJDClientBoundaryFailsBeforeCredentials() async {
+        do {
+            _ = try await MallTrackingClient().query(platform: "jd", orderID: "123456789012", trackingNumber: "JD123456789")
+            XCTFail("Removed provider succeeded")
+        } catch { XCTAssertEqual(error as? RemovedJDTrackingError, .removed) }
     }
     func testExplicitUAPIOverrideAndModeRemainAvailable() async throws {
         for (index, mode) in [TrackingRefreshMode.automatic, .uapi].enumerated() {
@@ -101,13 +124,13 @@ final class MallRoutingTests: XCTestCase {
         }
     }
     func testIdentityMismatchAndConcurrentRebindCannotOverwrite() async throws {
-        let item = try add("jd", order: order("jd"))
+        let item = try add("pdd", order: order("pdd"))
         let mall = Mall(); let uapi = TrackingRefreshTests.Client()
         mall.wrongNumber = true
         let service = TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall)
         do { _ = try await service.refresh(id: item.id); XCTFail() } catch { XCTAssertEqual(error as? MallWebError, .identityMismatch) }
         mall.wrongNumber = false
-        mall.onQuery = { try self.storage.transaction { $0.shipments[0].platformOrderID = "999999999999" } }
+        mall.onQuery = { try self.storage.transaction { $0.shipments[0].platformOrderID = "261103-999999999999" } }
         do { _ = try await service.refresh(id: item.id); XCTFail() } catch { guard case PickupStorageError.stalePreview = error else { return XCTFail("Expected stalePreview") } }
         XCTAssertEqual(try storage.snapshot().shipments[0].logisticsInfo, "旧轨迹")
         XCTAssertEqual(uapi.calls, 0)
@@ -123,20 +146,20 @@ final class MallRoutingTests: XCTestCase {
         let mall = Mall(); mall.failure = MallWebError.authentication
         let uapi = TrackingRefreshTests.Client()
         let report = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refreshPending()
-        XCTAssertEqual(mall.calls.map { $0.0 }, ["jd", "pdd"])
-        XCTAssertEqual(report.jdCount, 1); XCTAssertEqual(report.pddCount, 1)
+        XCTAssertEqual(mall.calls.map { $0.0 }, ["pdd"])
+        XCTAssertEqual(report.jdCount, 0); XCTAssertEqual(report.pddCount, 1)
         XCTAssertEqual(report.taobaoCount, 0); XCTAssertEqual(report.uapiCount, 0)
-        XCTAssertEqual(report.failed, 2); XCTAssertEqual(report.skipped, 1)
+        XCTAssertEqual(report.failed, 3); XCTAssertEqual(report.skipped, 0)
     }
     func testPlatformAndChannelChangesRejectStaleResponseAndPreserveCompletion() async throws {
         for (index, changeChannel) in [false, true].enumerated() {
-            let item = try add("jd", order: order("jd"), index: index)
+            let item = try add("pdd", order: order("pdd"), index: index)
             let mall = Mall()
             mall.onQuery = {
                 try self.storage.transaction { data in
                     let i = data.shipments.firstIndex { $0.id == item.id }!
                     if changeChannel { data.shipments[i].refreshChannel = "uapi" }
-                    else { data.shipments[i].originPlatform = "pdd" }
+                    else { data.shipments[i].originPlatform = "jd" }
                 }
             }
             do { _ = try await TrackingRefreshService(store: storage, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refresh(id: item.id); XCTFail() }
@@ -148,7 +171,7 @@ final class MallRoutingTests: XCTestCase {
         }
     }
     func testMallQueryLeaseNoDatasetLockAndCancellationReleasesLease() async throws {
-        let item = try add("jd", order: order("jd"))
+        let item = try add("pdd", order: order("pdd"))
         let mall = Mall()
         mall.onQuery = {
             _ = try self.storage.snapshot()
@@ -163,7 +186,7 @@ final class MallRoutingTests: XCTestCase {
         XCTAssertEqual(mall.calls.count, 2)
     }
     func testOlderMallTraceCannotReplacePreviousResult() async throws {
-        let item = try add("jd", order: order("jd"))
+        let item = try add("pdd", order: order("pdd"))
         try storage.transaction { $0.shipments[0].logisticsTime = Date(timeIntervalSince1970: 1000) }
         let mall = Mall()
         do { _ = try await TrackingRefreshService(store: storage, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refresh(id: item.id); XCTFail() }
@@ -180,13 +203,13 @@ final class MallRoutingTests: XCTestCase {
         }
         let before = try storage.exportBackup()
         let store = ShipmentStore(storageProvider: { self.storage })
-        XCTAssertThrowsError(try store.importMall(MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: order("jd")), platform: "jd")) {
+        XCTAssertThrowsError(try store.importMall(MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: order("pdd")), platform: "pdd")) {
             XCTAssertEqual($0 as? ShipmentShortcutError, .ambiguous)
         }
         XCTAssertEqual(try storage.exportBackup(), before)
     }
     @MainActor func testImportBindsUniqueRecordWithoutChangingUserFieldsOrOverride() throws {
-        for (index, platform) in ["jd", "pdd"].enumerated() {
+        for (index, platform) in ["pdd"].enumerated() {
             let item = try add(nil, channel: "uapi", index: index)
             let records = try storage.snapshot().records
             let store = ShipmentStore(storageProvider: { self.storage })
@@ -203,15 +226,15 @@ final class MallRoutingTests: XCTestCase {
         let item = try add("taobao")
         let store = ShipmentStore(storageProvider: { self.storage })
         let before = try storage.exportBackup()
-        let candidate = MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: order("jd"))
-        XCTAssertThrowsError(try store.importMall(candidate, platform: "jd"))
+        let candidate = MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: order("pdd"))
+        XCTAssertThrowsError(try store.importMall(candidate, platform: "pdd"))
         XCTAssertThrowsError(try store.importMall(candidate, platform: "douyin"))
         for (platform, invalid) in [("jd", "123-456"), ("jd", "123456\n"), ("pdd", "123456"), ("pdd", " 261102-123456")] {
             XCTAssertThrowsError(try store.importMall(MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: invalid), platform: platform))
         }
         let lease = try storage.acquireTrackingQuery(id: item.id)
         defer { lease.release() }
-        XCTAssertThrowsError(try store.importMall(candidate, platform: "jd")) { guard case PickupStorageError.queryInProgress = $0 else { return XCTFail("Expected queryInProgress") } }
+        XCTAssertThrowsError(try store.importMall(candidate, platform: "pdd")) { guard case PickupStorageError.queryInProgress = $0 else { return XCTFail("Expected queryInProgress") } }
         XCTAssertEqual(try storage.exportBackup(), before)
     }
     @MainActor func testImportNewMallShipmentAndConflictingOrder() throws {

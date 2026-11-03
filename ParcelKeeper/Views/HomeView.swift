@@ -56,7 +56,7 @@ struct HomeView: View {
                             Text("仅商城（不调用UAPI）").tag(TrackingRefreshMode.platformOnly)
                             Text("强制UAPI（消耗额度）").tag(TrackingRefreshMode.uapi)
                         }.disabled(refreshingLogistics)
-                        Text("默认跟随每票设置：淘宝／京东／拼多多关联票走对应平台，原UAPI／未关联票走UAPI（可能消耗积分）。仅商城不调用UAPI；强制UAPI对本批明确使用收费渠道。平台失败不自动转UAPI。")
+                        Text("默认跟随每票设置：淘宝／拼多多关联票走对应平台；旧京东直连已移除，请接入后台或明确选择UAPI，原UAPI／未关联票走UAPI（可能消耗积分）。仅商城不调用UAPI；强制UAPI对本批明确使用收费渠道。平台失败不自动转UAPI。")
                             .font(.caption).foregroundStyle(.secondary)
                         pasteCard
                         summaryGrid

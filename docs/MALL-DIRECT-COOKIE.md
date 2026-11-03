@@ -1,11 +1,15 @@
-# 京东/拼多多 Cookie 直连修复
+# 拼多多 Cookie 直连与旧京东兼容
 
-参考固定版本：Lyybutterflies/dsh-parcel-tracker 585111e14563a35ea62fb062aad9b0675739c79b，MIT。不是根据猜测拼接接口。
+参考 Lyybutterflies/dsh-parcel-tracker 585111e14563a35ea62fb062aad9b0675739c79b，MIT；保留源码许可。
 
-- 京东：PC网关 POST 表单 body=JSON，列表取orderType/status，逐订单查多包裹，刷新必须精确匹配运单；不可只取第一包裹。
-- 拼多多：正常HTML window.rawData，订单提取shippingId等，goods_express读取shipping.traces；不用伪造anti_content。
-- 刷新从WebView迁移到固定HTTPS网络请求；无重定向、无自动重试、无UAPI回退；旧平台来源/订单ID兼容。
-- 现阶段为了获取网关必要参数，每次刷新先重取第一页列表；订单不在本页时明确失败，不宣称全量。
-- 网页登录可保留作为Cookie获取手段；新增App内SecureField粘贴Cookie值，严格拒绝请求头/curl/控制符/重复键；订单访问验证后才写device-only Keychain，不落JSON/日志。
-- Cookie仍会过期；用户须更新。绝不向聊天发送Cookie。
-- 本轮用户已授权提交推送和完整CI测试编译交付IPA。无真实登录或付费API查询授权。Swift本机不可执行，测试先写、最终CI实跑，源码辅助检查不能充数。
+- 拼多多读取正常 HTML 的 `window.rawData`，订单身份与真实运单精确匹配，利用 shippingId 读取 shipping.traces；不伪造 anti_content。
+- 固定第一页、最多八个候选订单，不承诺全量。订单不在本页、未知格式或无轨迹明确失败。
+- HTTPS、固定主机/路径、拒绝重定向、Cookie 域/路径/过期校验、控制符防注入、2MB 响应限制；不自动重试或切换 UAPI。
+- 网页登录及 SecureField Cookie 导入都先验证订单访问，再保存 device-only Keychain。Cookie 不进入 JSON、日志或聊天；登录页继续只允许拼多多域。
+- 保留淘宝、UAPI、通用 MallDeliveryState 和历史来源展示。旧京东入口、PC/网页直连及观察器已经删除；新后台尚未接入。
+- 历史 `originPlatform=jd`、platformOrderID、platformLogisticsURL、轨迹、备注、取码、UUID 及备份结构不变。自动/仅商城刷新明确失败，不触发付费 fallback；显式 UAPI 选择仍可用。
+- 旧京东钥匙串既不读取也不删除或迁移；历史诊断事件保留兼容，不清日志。
+
+## 验证边界
+
+本轮只授权本地清理和离线检查，不提交、推送或运行 CI。Swift/Xcode 不可用，XCTest 已更新但未执行；Python 源码契约不是 Swift 编译或设备测试。登录、Keychain、真实订单及 iOS UI 仍待验收。

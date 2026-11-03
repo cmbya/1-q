@@ -59,10 +59,11 @@ struct RefreshSelectedShipmentIntent: AppIntent {
     }
     func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
         let service = try TrackingRefreshService.live()
+        var isCached = false
         let completed = try await service.refresh(id: shipment.id, phone: phone,
-            expectedTrackingNumber: shipment.trackingNumber, pendingOnly: true, mode: channel.resolvedMode)
+            expectedTrackingNumber: shipment.trackingNumber, pendingOnly: true, mode: channel.resolvedMode, cacheFeedback: { isCached = $0 })
         let latest = try ShipmentRefreshPresentation.snapshot(service, id: shipment.id, number: shipment.trackingNumber)
-        let message = ShipmentRefreshPresentation.result(latest, newlyDelivered: completed)
+        let message = ShipmentRefreshPresentation.result(latest, newlyDelivered: completed, isCached: isCached)
         return .result(value: message, dialog: "\(message)")
     }
 }

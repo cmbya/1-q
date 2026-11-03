@@ -30,6 +30,7 @@ final class UAPITrackingClientTests: XCTestCase {
     var settings: UAPISettingsService!
     var network: Network!
     var client: UAPITrackingClient!
+    let phoneCacheKeys = Keys()
     let number = "YT1234567890123"
     override func setUp() {
         super.setUp()
@@ -37,9 +38,10 @@ final class UAPITrackingClientTests: XCTestCase {
         defaults = UserDefaults(suiteName: suite)!
         keys = Keys(); network = Network()
         settings = UAPISettingsService(defaults: defaults, keys: keys)
-        client = UAPITrackingClient(settings: settings, network: network)
+        client = UAPITrackingClient(settings: settings, network: network, cache: PaidTrackingCache(directory: FileManager.default.temporaryDirectory.appendingPathComponent(suite), phoneKeys: { _ in self.phoneCacheKeys }))
     }
     override func tearDown() {
+        try? FileManager.default.removeItem(at: FileManager.default.temporaryDirectory.appendingPathComponent(suite))
         defaults.removePersistentDomain(forName: suite)
         super.tearDown()
     }
@@ -48,6 +50,8 @@ final class UAPITrackingClientTests: XCTestCase {
         try settings.setEnabled(true, privacyConfirmed: true)
     }
     func payload(_ changes: [String: Any] = [:]) throws {
+        // Parser fixtures represent different upstream responses, not repeat-cache tests.
+        if settings.isEnabled() { try settings.setEnabled(true, privacyConfirmed: true) }
         var object: [String: Any] = ["tracking_number": number, "carrier_code": "yuantong", "carrier_name": "圆通速递", "status_code": "in_transit", "is_completed": false, "track_count": 2, "tracks": [["time": "2026-10-30 10:00:00", "context": "正在发往上海"], ["time": "2026-10-29 09:00:00", "context": "已揽收"]]]
         object.merge(changes) { _, new in new }
         network.body = try JSONSerialization.data(withJSONObject: object)
@@ -56,6 +60,7 @@ final class UAPITrackingClientTests: XCTestCase {
         try await client.query(trackingNumber: number, carrierCode: nil, phone: phone, refresh: false)
     }
     func assertError(_ expected: UAPIError, phone: String? = nil, file: StaticString = #filePath, line: UInt = #line) async {
+        if settings.isEnabled() { try? settings.setEnabled(true, privacyConfirmed: true) }
         do { _ = try await query(phone: phone); XCTFail("Expected rejection", file: file, line: line) }
         catch { XCTAssertEqual(error as? UAPIError, expected, file: file, line: line) }
     }
@@ -232,7 +237,7 @@ final class UAPITrackingClientTests: XCTestCase {
         XCTAssertEqual(settings.usageSnapshot()?.chargedCredits, 0)
         keys.failure = true
         XCTAssertThrowsError(try settings.saveKey("replacement"))
-        XCTAssertEqual(settings.usageSnapshot()?.chargedCredits, 0)
+        XCTAssertNil(settings.usageSnapshot())
     }
 
     func testMalformedAndCancellationDoNotLeakProviderErrors() async throws {
