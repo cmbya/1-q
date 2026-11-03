@@ -29,6 +29,23 @@ class KDYZMContract(unittest.TestCase):
         self.assertIn('lastRefreshError = KDYZMError.safe(error)', refresh)
     def test_ui(self):
         s = (ROOT/'ParcelKeeper/Views/KDYZMSettingsView.swift').read_text()
-        for token in ['SecureField', '预检', '确认授权', '解绑', 'isHistoricalSnapshot', '同步京东']:
+        for token in ['SecureField', '预检', '确认授权', '解绑', 'isHistoricalSnapshot', '同步']:
             self.assertIn(token, s)
+    def test_all_platform_source_contract(self):
+        merge = (ROOT/'ParcelKeeper/Services/KDYZMSync.swift').read_text()
+        store = (ROOT/'ParcelKeeper/Services/ShipmentStore.swift').read_text()
+        refresh = (ROOT/'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
+        for source in [merge, store]:
+            self.assertNotIn('platform == "jd"', source)
+        self.assertIn('originPlatform: order.platform', merge)
+        self.assertIn('local.originPlatform = order.platform', merge)
+        self.assertIn('case backend', refresh)
+        self.assertIn('backendCount', refresh)
+        route = refresh.split('private static func route(')[1].split('func setRefreshChannel')[0]
+        self.assertLess(route.index('return .backend'), route.index('return try platformRoute(shipment)'))
+        self.assertIn('if route == .backend { report.backendCount += 1 }', refresh)
+        self.assertIn('$0.platform == before.originPlatform && $0.platformOrderId == before.platformOrderID', merge)
+        self.assertIn('remoteNumbers[number]?.count == 1', merge)
+        self.assertIn('local.taobaoOrderID == nil', merge)
+        self.assertNotIn('后台（京东）', (ROOT/'ParcelKeeper/Intents/TrackingRefreshIntents.swift').read_text())
 if __name__ == '__main__': unittest.main()

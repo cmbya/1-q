@@ -13,7 +13,8 @@ struct ShipmentChoiceEntity: AppEntity {
         id = shipment.id
         trackingNumber = CarrierDetector.sanitize(shipment.trackingNumber)
         carrierName = shipment.carrierName
-        summary = shipment.note.isEmpty ? shipment.status.rawValue : shipment.status.rawValue + " · " + shipment.note
+        let details = shipment.note.isEmpty ? shipment.status.rawValue : shipment.status.rawValue + " · " + shipment.note
+        summary = shipment.backendBinding == nil ? details : details + " · 后台关联：" + ShipmentRefreshPresentation.origin(shipment)
     }
     var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(title: "\(carrierName) · \(trackingNumber)", subtitle: "\(summary)")

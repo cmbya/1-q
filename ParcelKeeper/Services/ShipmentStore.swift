@@ -156,8 +156,7 @@ final class ShipmentStore: ObservableObject {
         let credential = try await connection.credential()
         let snapshot = try await client.snapshot(credential)
         try Task.checkCancellation()
-        let orders = Dictionary(uniqueKeysWithValues: snapshot.orders.map { ($0.id, $0) })
-        let remote = snapshot.shipments.filter { orders[$0.orderId]?.platform == "jd" }
+        let remote = snapshot.shipments
         let numbers = Set(remote.map { CarrierDetector.sanitize($0.waybillNo) }.filter { !$0.isEmpty })
         let bindings = Set(remote.map { KDYZMBinding(origin: credential.baseURL, accountID: $0.accountId, orderID: $0.orderId, shipmentID: $0.id) })
         let affected = before.shipments.filter { shipment in

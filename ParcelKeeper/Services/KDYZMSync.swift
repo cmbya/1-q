@@ -72,6 +72,8 @@ struct KDYZMSnapshot: Decodable {
         }
         for order in orders {
             _ = try KDYZMClient.segment(order.accountId)
+            guard !order.platform.isEmpty,
+                  !order.platform.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw KDYZMError.invalid }
             guard authorized(account: order.accountId, family: order.familyId),
                   accountMap[order.accountId].map({ $0.platform == order.platform }) ?? true else { throw KDYZMError.forbidden }
         }
@@ -110,7 +112,7 @@ struct KDYZMSyncReport {
     var skipped = 0
     var noWaybill = 0
     var message: String {
-        "新增 \(imported) 票，更新 \(updated) 票，跳过 \(skipped) 票；\(noWaybill) 个京东订单尚无运单。同步只读取后台快照，不代表后台已完成平台采集；零订单也不保证购物账号没有订单。"
+        "新增 \(imported) 票，更新 \(updated) 票，跳过 \(skipped) 票；\(noWaybill) 个订单尚无运单。同步只读取后台快照，不代表后台已完成平台采集；零订单也不保证购物账号没有订单。"
     }
 }
 enum KDYZMMerger {
@@ -181,14 +183,14 @@ enum KDYZMMerger {
         _ = try KDYZMOrigin(origin)
         var result = KDYZMSyncReport()
         let orders = Dictionary(uniqueKeysWithValues: snapshot.orders.map { ($0.id, $0) })
-        let remoteNumbers = Dictionary(grouping: snapshot.shipments.filter { orders[$0.orderId]?.platform == "jd" && !$0.waybillNo.isEmpty }, by: { CarrierDetector.sanitize($0.waybillNo) })
+        let remoteNumbers = Dictionary(grouping: snapshot.shipments.filter { !CarrierDetector.sanitize($0.waybillNo).isEmpty }, by: { CarrierDetector.sanitize($0.waybillNo) })
         let existingBindings = data.shipments.compactMap(\.backendBinding)
         guard Set(existingBindings).count == existingBindings.count else { throw KDYZMError.invalid }
         result.noWaybill = snapshot.orders.filter { order in
-            order.platform == "jd" && !snapshot.shipments.contains { $0.orderId == order.id && !CarrierDetector.sanitize($0.waybillNo).isEmpty }
+            !snapshot.shipments.contains { $0.orderId == order.id && !CarrierDetector.sanitize($0.waybillNo).isEmpty }
         }.count
         for remote in snapshot.shipments {
-            guard let order = orders[remote.orderId], order.platform == "jd",
+            guard let order = orders[remote.orderId],
                   !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id),
                   remote.hidden != true, remote.deleted != true,
                   !CarrierDetector.sanitize(remote.waybillNo).isEmpty else { result.skipped += 1; continue }
@@ -204,7 +206,9 @@ enum KDYZMMerger {
                 if let candidate = candidates.first {
                     let local = data.shipments[candidate]
                     guard !remote.carrier.isEmpty, carrierKey(local.carrierName) == carrierKey(remote.carrier) || local.carrierCode == carrierKey(remote.carrier),
-                          local.taobaoOrderID == nil, local.originPlatform == nil || local.originPlatform == "manual" || local.originPlatform == "jd",
+                          local.taobaoOrderID == nil,
+                          local.originPlatform == nil || local.originPlatform == "manual" ||
+                            (local.originPlatform == order.platform && local.platformOrderID == order.platformOrderId),
                           local.platformOrderID == nil || local.platformOrderID == order.platformOrderId else { throw KDYZMError.invalid }
                     index = candidate
                 }
@@ -212,10 +216,13 @@ enum KDYZMMerger {
             if let index {
                 var local = data.shipments[index]
                 guard local.status != .archived else { result.skipped += 1; continue }
+                if local.backendBinding != nil {
+                    guard local.originPlatform == order.platform, local.platformOrderID == order.platformOrderId else { throw KDYZMError.stale }
+                }
                 guard CarrierDetector.sanitize(local.trackingNumber) == number,
                       !remote.carrier.isEmpty,
                       carrierKey(local.carrierName) == carrierKey(remote.carrier) || local.carrierCode == carrierKey(remote.carrier) else { throw KDYZMError.stale }
-                local.backendBinding = binding; local.originPlatform = "jd"
+                local.backendBinding = binding; local.originPlatform = order.platform
                 local.platformOrderID = order.platformOrderId
                 // Preserve explicit UAPI routing and its logistics; binding alone does not opt in.
                 if local.refreshChannel == nil && (local.logisticsSource == nil || local.logisticsSource == "kdyzm") {
@@ -243,7 +250,7 @@ enum KDYZMMerger {
                 guard pickupCode.isEmpty || !data.records.contains(where: { !$0.isCompleted && $0.groupID == group && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == pickupCode.trimmingCharacters(in: .whitespacesAndNewlines) }) else { throw KDYZMError.invalid }
                 var local = Shipment(trackingNumber: number, carrierName: remote.carrier.isEmpty ? detection.carrier.name : remote.carrier,
                                      carrierCode: detection.carrier.code, note: order.title ?? "", pickupCode: pickupCode,
-                                     originPlatform: "jd", platformOrderID: order.platformOrderId)
+                                     originPlatform: order.platform, platformOrderID: order.platformOrderId)
                 local.backendBinding = binding
                 switch remote.status {
                 case "signed": local.status = .delivered
@@ -375,7 +382,7 @@ struct KDYZMRefreshService {
         _ = try remainingTimeout()
         try Task.checkCancellation()
         guard let remote = snapshot.shipments.first(where: { $0.id == binding.shipmentID && $0.accountId == binding.accountID && $0.orderId == binding.orderID }),
-              snapshot.orders.contains(where: { $0.id == binding.orderID && $0.accountId == binding.accountID && $0.platform == "jd" }),
+              snapshot.orders.contains(where: { $0.id == binding.orderID && $0.accountId == binding.accountID && $0.platform == before.originPlatform && $0.platformOrderId == before.platformOrderID }),
               !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id), remote.hidden != true, remote.deleted != true,
               CarrierDetector.sanitize(remote.waybillNo) == CarrierDetector.sanitize(before.trackingNumber),
               KDYZMMerger.carrierKey(remote.carrier) == KDYZMMerger.carrierKey(before.carrierName) || KDYZMMerger.carrierKey(remote.carrier) == before.carrierCode else { throw KDYZMError.stale }

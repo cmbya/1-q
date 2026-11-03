@@ -13,6 +13,7 @@ struct TrackingRefreshReport {
     var uapiCount = 0
     var tminiCount = 0
     var cachedCount = 0
+    var backendCount = 0
     var jdCount = 0
     var pddCount = 0
     struct Failure {
@@ -26,7 +27,7 @@ struct TrackingRefreshReport {
     var stoppedReason: String?
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
-        value += " 淘宝派发\(taobaoCount)票，京东派发\(jdCount)票，拼多多派发\(pddCount)票，UAPI派发\(uapiCount)票（实际收费以接口为准）。"
+        value += " 取件助手后台派发\(backendCount)票。淘宝派发\(taobaoCount)票，京东派发\(jdCount)票，拼多多派发\(pddCount)票，UAPI派发\(uapiCount)票（实际收费以接口为准）。"
         value += " Tmini派发\(tminiCount)票（付费渠道）。"
         if cachedCount > 0 { value += " 本地缓存命中 \(cachedCount) 票（未联网、未新增收费）。" }
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
@@ -47,17 +48,20 @@ struct TrackingRefreshService {
     var taobaoClient: any TaobaoTrackingQuerying = TaobaoTrackingClient()
 
     var mallClient: any MallTrackingQuerying = MallTrackingClient()
+    var backendConnection: KDYZMConnection = .shared
+    var backendClient = KDYZMClient()
 
     private enum Route: Equatable {
+        case backend
         case taobao, uapi, tmini, mall(String)
         var platform: String? {
             switch self {
             case .taobao: return "taobao"
             case .mall(let platform): return platform
-            case .uapi, .tmini: return nil
+            case .backend, .uapi, .tmini: return nil
             }
         }
-        var source: String { self == .tmini ? "tmini" : (platform ?? "uapi") }
+        var source: String { self == .backend ? "kdyzm" : (self == .tmini ? "tmini" : (platform ?? "uapi")) }
     }
     private static func platformRoute(_ shipment: Shipment) throws -> Route {
         if shipment.originPlatform == "jd" { throw RemovedJDTrackingError.removed }
@@ -71,6 +75,7 @@ struct TrackingRefreshService {
     private static func route(_ shipment: Shipment, mode: TrackingRefreshMode) throws -> Route {
         if mode == .uapi { return .uapi }
         if mode == .tmini { return .tmini }
+        if shipment.backendBinding != nil, mode == .platformOnly || shipment.refreshChannel == nil { return .backend }
         if mode == .platformOnly { return try platformRoute(shipment) }
         if shipment.refreshChannel == "uapi" { return .uapi }
         if shipment.refreshChannel == "tmini" { return .tmini }
@@ -182,14 +187,13 @@ struct TrackingRefreshService {
         // Resolve backend before the legacy lease: no lease spans backend networking.
         // Explicit UAPI override is honored, but backend failures never fall back to it.
         if let before = try store.snapshot().shipments.first(where: { $0.id == id }),
-           before.backendBinding != nil, mode != .uapi, mode != .tmini,
-           mode == .platformOnly || before.refreshChannel == nil {
+           (try? Self.route(before, mode: mode)) == .backend {
             guard before.status != .archived, !pendingOnly || Self.isPending(before) else { throw ShipmentShortcutError.statusConflict }
             if let expectedTrackingNumber, CarrierDetector.sanitize(before.trackingNumber) != expectedTrackingNumber { throw KDYZMError.stale }
             let operation = UUID()
             DiagnosticLog.shared.record(.trackingStarted, operation: operation)
             do {
-                let result = try await KDYZMRefreshService(store: store, reloadWidgets: reloadWidgets).refresh(before: before)
+                let result = try await KDYZMRefreshService(store: store, connection: backendConnection, client: backendClient, reloadWidgets: reloadWidgets).refresh(before: before)
                 DiagnosticLog.shared.record(.trackingFinished, operation: operation)
                 return result
             } catch {
@@ -236,6 +240,9 @@ struct TrackingRefreshService {
         let result: UAPITrackingResult
         var tminiConfiguration: TminiConfiguration?
         switch route {
+        case .backend:
+            // Backend dispatch must happen before acquiring the legacy lease.
+            throw KDYZMError.stale
         case .taobao:
             guard let orderID = before.taobaoOrderID, !orderID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw TaobaoTrackingError.missingBinding
@@ -347,8 +354,8 @@ struct TrackingRefreshService {
             }
             // Recheck before each request; another process may have completed/deleted it.
             guard let latest = try store.snapshot().shipments.first(where: { $0.id == id }), Self.isPending(latest) else { continue }
-            if mode == .platformOnly, latest.originPlatform != "jd", (try? Self.platformRoute(latest)) == nil { report.skipped += 1; continue }
             let route = try? Self.route(latest, mode: mode)
+            if mode == .platformOnly, latest.originPlatform != "jd", route == nil { report.skipped += 1; continue }
             if route == .tmini, blockedPlatforms.contains("tmini") { report.skipped += 1; continue }
             if let platform = route?.platform, blockedPlatforms.contains(platform) { report.skipped += 1; continue }
             do {
@@ -364,7 +371,8 @@ struct TrackingRefreshService {
                 if route == .taobao { report.taobaoCount += 1 }
                 if route == .uapi { report.uapiCount += 1 }
                 if route == .tmini { report.tminiCount += 1 }
-                if route == .mall("jd") || (latest.backendBinding != nil && mode != .uapi && mode != .tmini && (mode == .platformOnly || latest.refreshChannel == nil)) { report.jdCount += 1 }
+                if route == .backend { report.backendCount += 1 }
+                if route == .mall("jd") { report.jdCount += 1 }
                 if route == .mall("pdd") { report.pddCount += 1 }
                 if try await refresh(id: id, expectedTrackingNumber: CarrierDetector.sanitize(latest.trackingNumber), pendingOnly: true, mode: mode, cacheFeedback: { cached in
                     if cached {

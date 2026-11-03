@@ -23,6 +23,7 @@ targets:
       path: ParcelKeeper/Info.plist
       properties:
         CFBundleDisplayName: 快递管家
+        NSCameraUsageDescription: 用于扫描取件助手后台绑定二维码，自动填写服务地址和一次性绑定码；识别后仍需确认授权。
         ParcelKeeperAppGroup: group.com.dinghao.ParcelKeeper
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"

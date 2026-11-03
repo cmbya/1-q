@@ -2,7 +2,7 @@ import Foundation
 import Security
 
 // Independently implemented against zsdd2/kdyzm PROTOCOL.md at
-// ae915447090705cdf01b69a6dd15a4ddf587f5d9. No backend implementation is embedded.
+// b13c0527cb38f3aad79cacf8ca85efacaa0004ed. No backend implementation is embedded.
 enum KDYZMError: LocalizedError, Equatable {
     case origin, invalid, unauthorized, forbidden, pairing, rateLimited, network, keychain, alreadyBound, stale, queued, failed, empty, jobGone
     var errorDescription: String? {

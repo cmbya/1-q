@@ -190,6 +190,8 @@ final class AuditMediumCoreTests: XCTestCase {
             let transport = Transport()
             try store.transaction { data in
                 data.shipments[0] = self.shipment
+                data.shipments[0].originPlatform = "jd"
+                data.shipments[0].platformOrderID = "123456"
                 data.shipments[0].backendBinding = .init(origin: credential.baseURL, accountID: "a", orderID: "o", shipmentID: "s")
                 data.shipments[0].backendRefreshJobID = "old-job"
                 data.shipments[0].backendRefreshGeneration = credential.generation

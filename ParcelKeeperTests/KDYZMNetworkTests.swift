@@ -95,6 +95,85 @@ final class KDYZMNetworkTests: XCTestCase {
         XCTAssertFalse(try KDYZMMerger.update(remote, local: &local, refresh: true))
         XCTAssertEqual(local, original)
     }
+    func testEveryBackendPlatformRefreshUsesGenericJobAndPreservesManualRecord() async throws {
+        for platform in ["taobao", "pdd", "jd", "douyin", "future_market"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+            var local = Shipment(trackingNumber: "YT1234567890123", carrierName: "圆通", carrierCode: "yto", note: "本地备注", pickupCode: "42", reminderDate: Date(timeIntervalSince1970: 900), queryInfo: "原有历史", originPlatform: platform, platformOrderID: "platform-order")
+            local.backendBinding = .init(origin: credential.baseURL, accountID: "a", orderID: "o", shipmentID: "s")
+            try store.transaction { data in
+                data.shipments.append(local)
+                data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42", location: "个人位置", source: "本地备注", isCompleted: false, shipmentID: local.id))
+            }
+            let oldRecord = try XCTUnwrap(store.snapshot().records.first)
+            let snapshot: [String: Any] = ["schemaVersion": 1, "serverRevision": 2, "accounts": [], "familyIds": ["f"], "hiddenIds": [], "deletedIds": [],
+                "orders": [["id": "o", "accountId": "a", "platform": platform, "platformOrderId": "platform-order", "familyId": "f"]],
+                "shipments": [["id": "s", "orderId": "o", "accountId": "a", "familyId": "f", "waybillNo": local.trackingNumber, "carrier": "圆通", "status": "signed", "logisticsState": "ok", "logisticsCheckedAt": 300_000, "logisticsUpdatedAt": 300_000, "logisticsEvents": [["time": 300_000, "timeText": "", "description": "最新节点", "location": ""]]]]]
+            let transport = Transport()
+            transport.responses = [(Data(#"{"accepted":true,"jobs":[{"id":"j","accountId":"a","orderId":"o","state":"completed","logisticsState":"ok","createdAt":200000}]}"#.utf8), 202), (try JSONSerialization.data(withJSONObject: snapshot), 200)]
+            let keys = Keys(); keys.value = credential
+            let client = KDYZMClient(transport: transport)
+            let connection = KDYZMConnection(keys: keys, client: client)
+            let paid = TrackingRefreshTests.Client()
+            var service = TrackingRefreshService(store: store, client: paid, reloadWidgets: {})
+            service.backendConnection = connection; service.backendClient = client
+            let report = try await service.refreshPending(mode: .platformOnly)
+            XCTAssertEqual(report.succeeded, 1); XCTAssertEqual(report.failed, 0)
+            XCTAssertEqual(report.backendCount, 1); XCTAssertEqual(report.taobaoCount + report.pddCount + report.jdCount + report.uapiCount + report.tminiCount, 0)
+            XCTAssertEqual(paid.calls, 0)
+            XCTAssertEqual(transport.requests.map { $0.url?.path }, ["/v1/orders/o/refresh", "/v1/snapshot"])
+            let after = try XCTUnwrap(store.snapshot().shipments.first)
+            XCTAssertEqual(after.originPlatform, platform); XCTAssertEqual(after.id, local.id)
+            XCTAssertEqual(after.note, local.note); XCTAssertEqual(after.pickupCode, local.pickupCode)
+            XCTAssertEqual(after.reminderDate, local.reminderDate); XCTAssertEqual(after.status, .delivered)
+            XCTAssertNotNil(after.lastQueriedAt); XCTAssertNil(after.backendRefreshJobID)
+            XCTAssertTrue(after.queryInfo?.contains("原有历史") == true)
+            XCTAssertEqual(try store.snapshot().records.first, oldRecord)
+        }
+    }
+    func testBackendAuthorizationFailureNeverFallsBackToPaid() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        var local = Shipment(trackingNumber: "YT1234567890123", carrierName: "圆通", carrierCode: "yto", queryInfo: "保留历史", originPlatform: "douyin", platformOrderID: "platform-order")
+        local.backendBinding = .init(origin: credential.baseURL, accountID: "a", orderID: "o", shipmentID: "s")
+        try store.transaction { data in
+            data.shipments.append(local)
+            data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "", source: "", shipmentID: local.id))
+        }
+        let transport = Transport(); transport.responses = [(Data(#"{"error":{"code":"DEVICE_UNAUTHORIZED"}}"#.utf8), 401)]
+        let keys = Keys(); keys.value = credential
+        let client = KDYZMClient(transport: transport), paid = TrackingRefreshTests.Client()
+        var service = TrackingRefreshService(store: store, client: paid, reloadWidgets: {})
+        service.backendConnection = KDYZMConnection(keys: keys, client: client); service.backendClient = client
+        do { _ = try await service.refresh(id: local.id); XCTFail("authorization must fail") }
+        catch { XCTAssertEqual(error as? KDYZMError, .unauthorized) }
+        XCTAssertEqual(paid.calls, 0); XCTAssertEqual(transport.requests.count, 1)
+        XCTAssertEqual(try store.snapshot().shipments.first?.queryInfo, "保留历史")
+        XCTAssertNil(try store.snapshot().shipments.first?.lastQueriedAt)
+    }
+    func testExplicitUAPIOverrideRemainsAvailableForEveryBackendPlatform() async throws {
+        for platform in ["taobao", "pdd", "jd", "douyin", "future_market"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+            var local = Shipment(trackingNumber: "YT1234567890123", carrierName: "圆通", carrierCode: "yto", originPlatform: platform, refreshChannel: "uapi", platformOrderID: "platform-order")
+            local.backendBinding = .init(origin: credential.baseURL, accountID: "a", orderID: "o", shipmentID: "s")
+            try store.transaction { data in
+                data.shipments.append(local)
+                data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "", source: "", shipmentID: local.id))
+            }
+            let paid = TrackingRefreshTests.Client(), transport = Transport()
+            var service = TrackingRefreshService(store: store, client: paid, reloadWidgets: {})
+            service.backendClient = KDYZMClient(transport: transport)
+            _ = try await service.refresh(id: local.id)
+            XCTAssertEqual(paid.calls, 1); XCTAssertTrue(transport.requests.isEmpty)
+            let after = try XCTUnwrap(store.snapshot().shipments.first)
+            XCTAssertEqual(after.backendBinding, local.backendBinding)
+            XCTAssertEqual(after.originPlatform, platform); XCTAssertEqual(after.logisticsSource, "uapi")
+        }
+    }
     func testOptionalBindingOldJSONAndBackupRoundTrip() throws {
         let old = Shipment(trackingNumber: "JD123456789012", carrierName: "京东物流", carrierCode: "jd")
         let decoded = try JSONDecoder().decode(Shipment.self, from: JSONEncoder().encode(old))

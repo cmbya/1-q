@@ -36,20 +36,23 @@ enum ShipmentRefreshPresentation {
         case "taobao": return "淘宝"
         case "jd": return "京东"
         case "pdd": return "拼多多"
+        case "douyin": return "抖音"
         case "uapi": return "UAPI"
         case nil, "", "manual": return "原UAPI／未关联"
-        default: return "未关联（未知来源）"
+        default: return shipment.backendBinding == nil ? "未关联（未知来源）" : "其他平台"
         }
     }
     static func source(_ shipment: Shipment) -> String {
         switch shipment.logisticsSource {
         case "tmini": return "Tmini"
-        case "kdyzm": return "取件助手后台（京东）"
+        case "kdyzm": return "取件助手后台（\(origin(shipment))）"
         case "taobao": return "淘宝"
         case "jd": return "京东"
         case "pdd": return "拼多多"
         case "uapi": return "UAPI"
-        case nil, "": return shipment.lastQueriedAt == nil ? "未关联" : "原UAPI（旧记录）"
+        case nil, "":
+            if shipment.backendBinding != nil { return "后台关联（\(origin(shipment))；尚无成功轨迹来源）" }
+            return shipment.lastQueriedAt == nil ? "未关联" : "原UAPI（旧记录）"
         default: return "未知来源"
         }
     }
