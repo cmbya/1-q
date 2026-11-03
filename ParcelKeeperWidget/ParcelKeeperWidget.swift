@@ -67,7 +67,7 @@ struct OpenPickupAppIntent: AppIntent {
         URL(string: "parcelkeeper://pickup" + (groupID.map { "/" + $0.uuidString } ?? ""))!
     }
 
-    func perform() async throws -> some IntentResult & OpensIntent {
+    func perform() async throws -> some IntentResult {
         let selected: UUID?
         if let raw = groupID {
             guard let parsed = UUID(uuidString: raw),
@@ -78,7 +78,8 @@ struct OpenPickupAppIntent: AppIntent {
         } else { selected = nil }
         // App validates existence against its reloaded dataset. A deleted group
         // safely opens all groups, and this intent never completes a pickup.
-        return .result(opensIntent: OpenURLIntent(Self.destination(groupID: selected)))
+        _ = selected // Legacy actions open the app; visible content uses an iOS 17 Link.
+        return .result()
     }
 }
 
@@ -196,7 +197,7 @@ struct PickupWidgetView: View {
                             .accessibilityLabel("标记取件码 \(record.code) 完成")
                             .privacySensitive()
                         }
-                        Button(intent: OpenPickupAppIntent(groupID: entry.groupID)) {
+                        Link(destination: OpenPickupAppIntent.destination(groupID: entry.groupID)) {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(record.code).font(.subheadline.weight(.semibold)).lineLimit(1)
                                 if !record.location.isEmpty { Text(record.location).font(.caption).lineLimit(1) }

@@ -65,9 +65,9 @@ class UIRepairContracts(unittest.TestCase):
 
     def test_widget_open_is_group_aware_and_completion_remains_separate(self):
         widget = read('ParcelKeeperWidget/ParcelKeeperWidget.swift')
-        self.assertIn('OpenPickupAppIntent(groupID: entry.groupID)', widget)
-        self.assertIn('some IntentResult & OpensIntent', widget)
-        self.assertIn('OpenURLIntent(', widget)
+        self.assertIn('Link(destination: OpenPickupAppIntent.destination(groupID: entry.groupID))', widget)
+        self.assertNotIn('OpenURLIntent(', widget)
+        self.assertIn('some IntentResult', widget)
         self.assertIn('parcelkeeper://pickup', widget)
         self.assertIn('caseInsensitiveCompare', widget)
         self.assertIn('.widgetURL(', widget)
