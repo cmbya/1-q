@@ -19,9 +19,11 @@ class DiagnosticChainContract(unittest.TestCase):
         for token in ['operation: UUID = UUID()', '.jobCreate', '.jobResume', '.jobPoll', '.snapshot', '.merge', '.save', '.cleanup', 'originalReason', 'originalStage', 'cleanupReason']:
             self.assertIn(token, s)
         self.assertNotIn('throw KDYZMTerminalResultError()', s)
-    def test_refresh_preconditions_and_distinct_time(self):
+    def test_refresh_preconditions_and_diagnostic_compatibility(self):
+        self.assertIn('olderQuery', source('DiagnosticLog.swift'))
         s = source('TrackingRefreshService.swift')
-        for token in ['.olderQuery', '.accounting', '.quota', '.rateLimited', '.configuration', 'operation: logID', 'func performRefresh(']:
+        self.assertIn('if let failure = error as? TrackingTimeRejection { return failure.reason }', s)
+        for token in ['.accounting', '.quota', '.rateLimited', '.configuration', 'operation: logID', 'func performRefresh(']:
             self.assertIn(token, s)
         s = s.split('func refresh(id:')[1].split('func performRefresh(')[0]
         self.assertLess(s.index('.trackingStarted'), s.index('performRefresh('))

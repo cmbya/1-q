@@ -73,7 +73,7 @@ struct ShipmentDetailView: View {
                             Text("Tmini（付费查询）").tag("tmini")
                         }
                         .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("跟随来源：淘宝／拼多多关联票使用对应平台；旧京东直连已移除，请接入后台或明确选择UAPI，原UAPI／未关联票沿用UAPI。商城失败不会自动转收费查询；修改渠道不会改变添加来源。当前物流来源仅表示上次成功查询渠道，不因导入或切换默认渠道而改变。")
+                        Text("跟随来源：淘宝／拼多多关联票使用对应平台；京东关联票使用App内京东会话，后台关联票优先使用后台；原UAPI／未关联票沿用UAPI。商城失败不会自动转收费查询；修改渠道不会改变添加来源。当前物流来源仅表示上次成功查询渠道，不因导入或切换默认渠道而改变。")
                             .font(.footnote)
                         Button(querying ? "正在查询" : "刷新物流（按默认渠道）") {
                             refreshLogistics(mode: .automatic)

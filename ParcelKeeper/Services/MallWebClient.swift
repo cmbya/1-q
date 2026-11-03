@@ -1,25 +1,29 @@
 import Foundation
 import WebKit
 
-/// Buyer web pages, not merchant Open Platform APIs. No cross-platform credential sharing.
+/// Credential-aware JD entry: PC thor uses direct protocol; mobile login uses foreground WebKit.
+/// Neither type implies authentication until its own order verification succeeds.
 enum MallPlatform: String, CaseIterable, Identifiable, Codable {
     case pdd
+    case jd
     var id: String { rawValue }
-    var title: String { "拼多多" }
+    var title: String { self == .jd ? "京东" : "拼多多" }
     var loginURL: URL {
+        if self == .jd { return URL(string: "https://plogin.m.jd.com/login/login")! }
         var url = URLComponents(string: "https://mobile.yangkeduo.com/login.html")!
         url.queryItems = [.init(name: "_x_no_login_launch", value: "1"), .init(name: "from", value: ordersURL.absoluteString)]
         return url.url!
     }
     var userAgent: String {
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15"
+        if self == .jd { return "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1" }
+        return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15"
     }
-    var ordersURL: URL { URL(string: "https://mobile.yangkeduo.com/orders.html")! }
+    var ordersURL: URL { URL(string: self == .jd ? "https://trade.m.jd.com/order/orderlist_jdm.shtml" : "https://mobile.yangkeduo.com/orders.html")! }
     var sessionService: String { "ParcelKeeper.Mall.Web.\(rawValue)" }
     func allowed(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
               url.port == nil || url.port == 443, let host = url.host?.lowercased() else { return false }
-        let domains = ["yangkeduo.com", "pinduoduo.com"]
+        let domains = self == .jd ? ["jd.com"] : ["yangkeduo.com", "pinduoduo.com"]
         return domains.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 }
@@ -31,6 +35,10 @@ enum MallPlatform: String, CaseIterable, Identifiable, Codable {
         let next = WKWebsiteDataStore.nonPersistent()
         stores[platform] = next
         return next
+    }
+    static func commitJD(_ store: WKWebsiteDataStore) {
+        // Only publish a fresh login context after order verification and Keychain save.
+        stores[.jd] = store
     }
     static func detach(_ platform: MallPlatform) -> WKWebsiteDataStore {
         stores.removeValue(forKey: platform) ?? WKWebsiteDataStore.nonPersistent()
@@ -67,10 +75,10 @@ struct MallTrackingClient: MallTrackingQuerying {
         try await query(platform: platform, orderID: orderID, trackingNumber: trackingNumber, sourceURL: nil)
     }
     func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
-        if platform == "jd" { throw RemovedJDTrackingError.removed }
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
         try Task.checkCancellation()
         let cookies = try MallSession(platform: platform).load()
+        if platform == .jd { return try await JDInAppClient(cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
         return try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
     }
 }
@@ -126,9 +134,15 @@ struct MallSession {
               let url = URL(string: "https://" + bare), platform.allowed(url) else { return false }
         return true
     }
+    static func hasJDPCSession(_ cookies: [TaobaoTrialCookie]) -> Bool {
+        let api = URL(string: "https://api.m.jd.com/api")!
+        return cookies.contains { $0.name == "thor" && !$0.value.isEmpty && valid($0, platform: .jd) && applies($0, to: api, platform: .jd) }
+    }
     static func hasLoginCredentials(_ cookies: [TaobaoTrialCookie], platform: MallPlatform) -> Bool {
         let relevant = cookies.filter { applies($0, to: platform.ordersURL, platform: platform) && !$0.value.isEmpty }
         let names = Set(relevant.map(\.name))
+        // Presence is only a preflight; each connector verifies its own actual order response.
+        if platform == .jd { return (names.contains("pt_key") && names.contains("pt_pin")) || hasJDPCSession(cookies) }
         return names.contains("PDDAccessToken") && (names.contains("pdd_user_id") || names.contains("pdduid"))
     }
     func load() throws -> [TaobaoTrialCookie] {
@@ -175,6 +189,7 @@ struct MallWebDetail {
 
 enum MallWebParser {
     static func identifier(_ value: String, platform: MallPlatform) -> Bool {
+        if platform == .jd { return Shipment.validPlatformOrderID(value, platform: "jd") }
         let pattern = #"^[0-9]{6}-[0-9]{6,32}$"#
         return value.range(of: pattern, options: .regularExpression).map { $0 == (value.startIndex..<value.endIndex) } ?? false
     }
@@ -182,6 +197,7 @@ enum MallWebParser {
         value.range(of: #"^[A-Za-z0-9]{6,40}$"#, options: .regularExpression).map { $0 == (value.startIndex..<value.endIndex) } ?? false
     }
     static func detailURL(platform: MallPlatform, orderID: String) throws -> URL {
+        if platform == .jd { throw MallWebError.unsupported }
         guard identifier(orderID, platform: platform) else { throw MallWebError.identityMismatch }
         var components = URLComponents(string: "https://mobile.yangkeduo.com/order.html")!
         components.queryItems = [URLQueryItem(name: "order_sn", value: orderID)]
@@ -189,6 +205,7 @@ enum MallWebParser {
         return url
     }
     static func orders(_ root: [String: Any], platform: MallPlatform) throws -> [MallWebOrder] {
+        if platform == .jd { throw MallWebError.unsupported }
         let array = root["orders"] as? [[String: Any]] ?? (root["result"] as? [String: Any])?["orders"] as? [[String: Any]]
         guard let array, array.count <= 200 else { throw MallWebError.unsupported }
         var result: [MallWebOrder] = []
@@ -257,10 +274,4 @@ enum MallWebParser {
         if path.contains("login") || url.host?.hasPrefix("passport.") == true { return .authentication }
         return nil
     }
-}
-
-/// Compatibility boundary only: no session access, network request or paid fallback.
-enum RemovedJDTrackingError: LocalizedError, Equatable {
-    case removed
-    var errorDescription: String? { "旧京东直连已移除，请接入后台或明确选择UAPI" }
 }

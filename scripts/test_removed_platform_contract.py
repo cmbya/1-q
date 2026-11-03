@@ -14,29 +14,26 @@ class RemovedPlatformContract(unittest.TestCase):
         files = list((ROOT / 'ParcelKeeper').rglob('*.swift'))
         text = '\n'.join(p.read_text() for p in files)
         for token in ['BaiduShortcut', 'baiduShortcut', 'JDWebScripts', 'JDOrderSelection',
-                      'pcorder_center_', 'api.m.jd.com', 'plogin.m.jd.com',
                       'collectJDOrders', 'jdPackages', 'jdDOM', 'jdDetail']:
             self.assertNotIn(token, text, token)
-        self.assertNotIn('name: "mallResponse"', text)  # diagnostic event names remain compatible
-        self.assertFalse(list(ROOT.glob('scripts/test_jd_*')))
-        self.assertFalse(list(ROOT.glob('ParcelKeeperTests/JD*Tests.swift')))
-        self.assertNotIn('platform: .jd', source('ParcelKeeper/Views/SettingsView.swift'))
+        self.assertNotIn('name: "mallResponse"', text)  # old broad bridge remains removed
+        self.assertTrue((ROOT / 'ParcelKeeper/Services/JDInAppClient.swift').exists())
+        self.assertIn('platform: .jd', source('ParcelKeeper/Views/SettingsView.swift'))
 
     def test_removed_route_cannot_charge_without_explicit_choice(self):
         service = source('ParcelKeeper/Services/TrackingRefreshService.swift')
         route = service.split('private static func route(', 1)[1].split('func setRefreshChannel', 1)[0]
         self.assertLess(route.index('mode == .uapi'), route.index('originPlatform == "jd"'))
         self.assertLess(route.index('refreshChannel == "uapi"'), route.index('originPlatform == "jd"'))
-        self.assertIn('originPlatform == "jd" { throw RemovedJDTrackingError.removed }', route)
-        self.assertNotIn('.mall("jd")', route)
-        self.assertIn('latest.originPlatform != "jd"', service)  # batch reports removal, not silent skip
+        self.assertIn('originPlatform == "jd" { return .mall("jd") }', route)
+        self.assertNotIn('throw RemovedJDTrackingError.removed', route)
         web = source('ParcelKeeper/Services/MallWebClient.swift')
         client = web.split('struct MallTrackingClient', 1)[1].split('enum MallWebError', 1)[0]
-        self.assertLess(client.index('throw RemovedJDTrackingError.removed'), client.index('MallSession('))
-        self.assertIn('旧京东直连已移除，请接入后台或明确选择UAPI', web)
+        self.assertIn('JDInAppClient(cookies: cookies)', client)
+        self.assertNotIn('UAPITrackingClient', client)
         tests = source('ParcelKeeperTests/MallRoutingTests.swift')
-        for case in ['testRemovedJDNeverDispatchesAndPreservesHistory',
-                     'testRemovedJDClientBoundaryFailsBeforeCredentials',
+        for case in ['testJDDispatchesInAppConnectorWithoutPaidFallback',
+                     'testJDInAppFailurePreservesHistoryAndNeverCharges',
                      'testExplicitUAPIOverrideAndModeRemainAvailable',
                      'testPDDDispatchWithoutPhoneOrUAPIFallback']:
             self.assertIn(case, tests)
@@ -46,7 +43,9 @@ class RemovedPlatformContract(unittest.TestCase):
         login = view.split('let cookies = try await browser.capture()', 1)[1].split('browser.destroy(); saved()', 1)[0]
         imported = view.split('private func saveImportedCookie()', 1)[1].split('private func safeFailure', 1)[0]
         for body, save in [(login, 'MallSession(platform: browser.platform).save'), (imported, 'session.save(parsed)')]:
-            self.assertLess(body.index('.verifySession()'), body.index(save))
+            self.assertLess(body.index('browser.verify(cookies)' if body is login else '.verifySession()'), body.index(save))
+        self.assertIn('try await MallImportClient(platform: platform, cookies: cookies).verifySession()', view)
+        self.assertIn('case .pddDirect: try await MallDirectClient(platform: platform, cookies: cookies).verifySession()', view)
         direct = source('ParcelKeeper/Services/MallDirectClient.swift')
         for token in ['PDDAccessToken', 'pdd_user_id', 'MallSession.applies', 'MallSession.valid',
                       'response.url == url', 'data.count <= 2_000_000', 'httpShouldHandleCookies = false',
@@ -88,7 +87,7 @@ class RemovedPlatformContract(unittest.TestCase):
         web = source('ParcelKeeper/Services/MallWebClient.swift')
         platform = web.split('enum MallPlatform', 1)[1].split('/// Preserve platform', 1)[0]
         self.assertIn('case pdd', platform)
-        self.assertNotIn('jd', platform)
+        self.assertIn('case jd', platform)  # newly authorized independent App-internal connector
         self.assertIn('ParcelKeeper.Mall.Web.\\(rawValue)', platform)
         for path in ['ParcelKeeper', 'ParcelKeeperTests']:
             self.assertIn('- path: ' + path, source('project.yml'))

@@ -62,28 +62,32 @@ final class MallRoutingTests: XCTestCase {
             XCTAssertEqual(saved.reminderDate, item.reminderDate)
         }
     }
-    func testRemovedJDNeverDispatchesAndPreservesHistory() async throws {
+    func testJDDispatchesInAppConnectorWithoutPaidFallback() async throws {
         for (index, mode) in [TrackingRefreshMode.automatic, .platformOnly].enumerated() {
             let item = try add("jd", order: order("jd"), index: index)
             let mall = Mall(); let uapi = TrackingRefreshTests.Client()
-            let records = try storage.snapshot().records
-            do {
-                _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
-                XCTFail("Removed provider succeeded")
-            } catch { XCTAssertEqual(error as? RemovedJDTrackingError, .removed) }
-            XCTAssertEqual(uapi.calls, 0); XCTAssertTrue(mall.calls.isEmpty)
-            var saved = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == item.id })
-            XCTAssertEqual(saved.lastRefreshError, "旧京东直连已移除，请接入后台或明确选择UAPI")
-            saved.lastRefreshError = nil
-            XCTAssertEqual(saved, item)
-            XCTAssertEqual(try storage.snapshot().records, records)
+            _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
+            XCTAssertEqual(mall.calls.count, 1)
+            XCTAssertEqual(mall.calls.first?.0, "jd")
+            XCTAssertEqual(uapi.calls, 0)
+            let saved = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == item.id })
+            XCTAssertEqual(saved.logisticsSource, "jd")
+            XCTAssertEqual(saved.note, item.note)
         }
     }
-    func testRemovedJDClientBoundaryFailsBeforeCredentials() async {
+    func testJDInAppFailurePreservesHistoryAndNeverCharges() async throws {
+        let item = try add("jd", order: order("jd"))
+        let mall = Mall(); mall.failure = MallWebError.authentication
+        let uapi = TrackingRefreshTests.Client()
         do {
-            _ = try await MallTrackingClient().query(platform: "jd", orderID: "123456789012", trackingNumber: "JD123456789")
-            XCTFail("Removed provider succeeded")
-        } catch { XCTAssertEqual(error as? RemovedJDTrackingError, .removed) }
+            _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id)
+            XCTFail("Expected authentication")
+        } catch { XCTAssertEqual(error as? MallWebError, .authentication) }
+        var saved = try XCTUnwrap(storage.snapshot().shipments.first)
+        XCTAssertTrue(try XCTUnwrap(saved.lastRefreshError).contains("京东"))
+        saved.lastRefreshError = nil
+        XCTAssertEqual(saved, item)
+        XCTAssertEqual(uapi.calls, 0)
     }
     func testExplicitUAPIOverrideAndModeRemainAvailable() async throws {
         for (index, mode) in [TrackingRefreshMode.automatic, .uapi].enumerated() {
@@ -146,10 +150,10 @@ final class MallRoutingTests: XCTestCase {
         let mall = Mall(); mall.failure = MallWebError.authentication
         let uapi = TrackingRefreshTests.Client()
         let report = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refreshPending()
-        XCTAssertEqual(mall.calls.map { $0.0 }, ["pdd"])
-        XCTAssertEqual(report.jdCount, 0); XCTAssertEqual(report.pddCount, 1)
+        XCTAssertEqual(mall.calls.map { $0.0 }, ["jd", "pdd"])
+        XCTAssertEqual(report.jdCount, 1); XCTAssertEqual(report.pddCount, 1)
         XCTAssertEqual(report.taobaoCount, 0); XCTAssertEqual(report.uapiCount, 0)
-        XCTAssertEqual(report.failed, 3); XCTAssertEqual(report.skipped, 0)
+        XCTAssertEqual(report.failed, 2); XCTAssertEqual(report.skipped, 1)
     }
     func testPlatformAndChannelChangesRejectStaleResponseAndPreserveCompletion() async throws {
         for (index, changeChannel) in [false, true].enumerated() {
@@ -185,13 +189,20 @@ final class MallRoutingTests: XCTestCase {
         _ = try await service.refresh(id: item.id)
         XCTAssertEqual(mall.calls.count, 2)
     }
-    func testOlderMallTraceCannotReplacePreviousResult() async throws {
+    func testOlderMallTraceReplacesPreviousResult() async throws {
         let item = try add("pdd", order: order("pdd"))
-        try storage.transaction { $0.shipments[0].logisticsTime = Date(timeIntervalSince1970: 1000) }
+        try storage.transaction {
+            $0.shipments[0].logisticsTime = Date(timeIntervalSince1970: 1000)
+            $0.shipments[0].lastQueriedAt = .distantFuture
+        }
         let mall = Mall()
-        do { _ = try await TrackingRefreshService(store: storage, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refresh(id: item.id); XCTFail() }
-        catch { XCTAssertEqual(error as? ShipmentShortcutError, .olderUpdate) }
-        XCTAssertEqual(try storage.snapshot().shipments[0].logisticsInfo, "旧轨迹")
+        _ = try await TrackingRefreshService(store: storage, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refresh(id: item.id)
+        let saved = try XCTUnwrap(storage.snapshot().shipments.first)
+        XCTAssertNotEqual(saved.logisticsInfo, "旧轨迹")
+        // A valid response without an event timestamp also replaces the saved time.
+        XCTAssertNil(saved.logisticsTime)
+        XCTAssertLessThan(try XCTUnwrap(saved.lastQueriedAt), Date.distantFuture)
+        XCTAssertEqual(saved.logisticsSource, "pdd")
     }
     @MainActor func testImportAmbiguousHistoryRejectsWithoutMutation() throws {
         let item = try add(nil)
@@ -209,7 +220,7 @@ final class MallRoutingTests: XCTestCase {
         XCTAssertEqual(try storage.exportBackup(), before)
     }
     @MainActor func testImportBindsUniqueRecordWithoutChangingUserFieldsOrOverride() throws {
-        for (index, platform) in ["pdd"].enumerated() {
+        for (index, platform) in ["pdd", "jd"].enumerated() {
             let item = try add(nil, channel: "uapi", index: index)
             let records = try storage.snapshot().records
             let store = ShipmentStore(storageProvider: { self.storage })

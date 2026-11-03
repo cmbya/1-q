@@ -11,6 +11,11 @@ enum DiagnosticEvent: String, Codable, CaseIterable {
     case syncStarted, syncFinished, syncFailed
     case stageStarted, stageFinished, stageFailed
     case trackingStarted, trackingFinished, trackingFailed
+    case trackingRouteJD
+    case jdOperationStarted, jdOperationFinished, jdOperationFailed
+    case jdNavigation, jdNavigationRejected, jdNavigationFailed, jdProcessTerminated
+    case jdBridgeAccepted, jdBridgeRejected, jdPageDOMResult, jdScriptFailed
+    case jdNetworkResponse, jdResponseRejected, jdResponseAccepted
     case trackingRouteBackend, trackingRouteTaobao, trackingRoutePDD, trackingRouteUAPI, trackingRouteTmini
 }
 
@@ -27,6 +32,8 @@ enum DiagnosticStage: String, Codable, CaseIterable {
     case preflight, localRead, credential, snapshot, decoding, validation, association
     case lease, request, response, merge, save, localWrite, presentation
     case jobCreate, jobResume, jobWait, jobPoll, cleanup
+    case jdLogin, jdVerify, jdFetch, jdQuery, jdSessionSave
+    case jdCookieInjection, jdOrdersPage, jdOrdersParse, jdLogisticsPage, jdLogisticsParse, jdPageDOM
 }
 
 /// Safe rejection classification without retaining arbitrary underlying errors.

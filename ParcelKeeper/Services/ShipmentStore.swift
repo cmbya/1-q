@@ -287,11 +287,15 @@ final class ShipmentStore: ObservableObject {
     /// Confirmed mall import only; binding uses the refresh lease before the dataset lock.
     /// Existing user fields and explicit UAPI overrides are never replaced by mall metadata.
     @discardableResult func importMall(_ candidate: MallCandidate, platform: String) throws -> UUID {
-        guard platform == "pdd",
+        guard platform == "pdd" || platform == "jd",
               Shipment.validPlatformOrderID(candidate.orderID, platform: platform) else {
             throw PickupStorageError.stalePreview
         }
-        let sourceURL: String? = nil
+        let sourceURL: String?
+        if platform == "jd", let raw = candidate.sourceURL {
+            guard let safe = Shipment.logisticsEntry(raw, orderID: candidate.orderID) else { throw PickupStorageError.stalePreview }
+            sourceURL = safe
+        } else { sourceURL = nil }
         let number = try ShipmentShortcutParser.number(candidate.trackingNumber)
         guard let storage else { throw PickupStorageError.appGroupUnavailable }
         let matches = try storage.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }

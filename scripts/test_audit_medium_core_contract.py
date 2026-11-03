@@ -47,7 +47,7 @@ class AuditMediumCoreContract(unittest.TestCase):
         for token in ['testPhoneSavesAndClearRetireLegacySecretsWithoutCacheAccess', 'testAppDeleteClearsBothSecrets',
                       'testLegacySecretDeletionRequiresSuccessfulEmptyReadback',
                       'testPhoneDeletionFailureFailsClosed', 'testFailedPhoneSaveAlreadyInvalidates',
-                      'testOldMainAppButtonRejects', 'testTerminalOldConflictAndNewJobRace',
+                      'testOldMainAppButtonRejects', 'testTerminalOlderAndEqualResultsAcceptedButNewJobRace',
                       'testShortcutNeverReopens', 'testRefreshPreservesManualCompletion']:
             self.assertIn(token, source)
         self.assertIn('XCTAssertEqual(try store.exportBackup(), before)', source)

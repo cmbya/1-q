@@ -104,7 +104,29 @@ final class ShipmentShortcutTests: XCTestCase {
         XCTAssertEqual(try store.snapshot().shipments[0].uapiCarrierCode, "yuantong")
     }
 
-    func testOldOrCompletedRegressionWritesNothing() throws {
+    func testOlderAndUndatedUpdatesReplaceLogisticsWithoutChangingIdentity() throws {
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        let newer = Date(timeIntervalSinceReferenceDate: 2000)
+        let older = Date(timeIntervalSinceReferenceDate: 1000)
+        XCTAssertTrue(try service.upsert(input("运输中", time: newer)))
+        let original = try XCTUnwrap(store.snapshot().shipments.first)
+        XCTAssertFalse(try service.upsert(input("派送中", time: older)))
+        var saved = try XCTUnwrap(store.snapshot().shipments.first)
+        XCTAssertEqual(saved.id, original.id)
+        XCTAssertEqual(saved.logisticsInfo, "派送中")
+        XCTAssertEqual(saved.logisticsTime, older)
+        // Carrier-only/no-logistics input preserves the event and its date.
+        XCTAssertFalse(try service.upsert(input()))
+        XCTAssertEqual(try store.snapshot().shipments.first?.logisticsTime, older)
+        XCTAssertFalse(try service.upsert(input("本人签收")))
+        saved = try XCTUnwrap(store.snapshot().shipments.first)
+        XCTAssertEqual(saved.id, original.id)
+        XCTAssertEqual(saved.logisticsInfo, "本人签收")
+        XCTAssertNil(saved.logisticsTime)
+        XCTAssertEqual(saved.status, .delivered)
+        XCTAssertTrue(try XCTUnwrap(store.snapshot().records.first).isCompleted)
+    }
+    func testCompletedStatusRegressionWritesNothingRegardlessOfTime() throws {
         let service = ShipmentShortcutService(store: store, reloadWidgets: {})
         XCTAssertTrue(try service.upsert(input("已签收", time: Date(timeIntervalSinceReferenceDate: 2000))))
         let before = try store.exportBackup()

@@ -68,7 +68,7 @@ struct TrackingRefreshService {
         var source: String { self == .backend ? "kdyzm" : (self == .tmini ? "tmini" : (platform ?? "uapi")) }
     }
     private static func platformRoute(_ shipment: Shipment) throws -> Route {
-        if shipment.originPlatform == "jd" { throw RemovedJDTrackingError.removed }
+        if shipment.originPlatform == "jd" { return .mall("jd") }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         throw TaobaoTrackingError.unsupported
@@ -84,7 +84,7 @@ struct TrackingRefreshService {
         if shipment.refreshChannel == "uapi" { return .uapi }
         if shipment.refreshChannel == "tmini" { return .tmini }
         guard shipment.refreshChannel == nil else { throw TaobaoTrackingError.unsupported }
-        if shipment.originPlatform == "jd" { throw RemovedJDTrackingError.removed }
+        if shipment.originPlatform == "jd" { return .mall("jd") }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         // Missing origin is the legacy/manual UAPI path, not a platform fallback.
@@ -107,11 +107,12 @@ struct TrackingRefreshService {
         case .taobao: return .trackingRouteTaobao
         case .tmini: return .trackingRouteTmini
         case .uapi: return .trackingRouteUAPI
-        case .mall: return .trackingRoutePDD
+        case .mall(let platform): return platform == "jd" ? .trackingRouteJD : .trackingRoutePDD
         }
     }
     static func diagnosticReason(_ error: Error) -> DiagnosticReason {
         if error is CancellationError { return .cancelled }
+        if let failure = error as? JDLoggedError { return failure.reason }
         if let failure = error as? KDYZMTerminalResultError { return failure.originalReason }
         if let failure = error as? TrackingTimeRejection { return failure.reason }
         if let failure = error as? KDYZMSyncFailure {
@@ -219,12 +220,12 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let failure = error as? JDLoggedError { return failure.localizedDescription }
         if let failure = error as? TrackingTimeRejection { return failure.localizedDescription }
         if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
         if let failure = error as? TminiError { return failure.localizedDescription }
         if let terminal = error as? KDYZMTerminalResultError { return terminal.localizedDescription }
         if let backend = error as? KDYZMError { return backend.localizedDescription }
-        if let failure = error as? RemovedJDTrackingError { return failure.localizedDescription }
         if let direct = error as? MallDirectError { return direct.localizedDescription }
         if let platform, platform == "jd" || platform == "pdd" {
             let name = platform == "jd" ? "京东" : "拼多多"
@@ -424,10 +425,7 @@ struct TrackingRefreshService {
             var current = data.shipments[index]
             guard Self.sameIdentity(current, before) else { throw PickupStorageError.stalePreview }
             guard current.status != .archived else { throw ShipmentShortcutError.statusConflict }
-            if let old = current.logisticsTime {
-                guard let incoming = result.logisticsTime, incoming >= old else { throw ShipmentShortcutError.olderUpdate }
-            }
-            if let queried = current.lastQueriedAt, result.queriedAt < queried { throw TrackingTimeRejection(reason: .olderQuery) }
+            // Apply this response without comparing its event/query times to saved data.
             if current.status == .delivered, let state = result.status, state != .delivered { throw ShipmentShortcutError.statusConflict }
             guard let linked = data.records.firstIndex(where: { $0.shipmentID == id }),
                   data.records[linked].id == linkedID else { throw PickupStorageError.invalidData("运单关联记录缺失或已改变") }

@@ -33,10 +33,16 @@ final class TminiRoutingTests: XCTestCase {
         }
         let service = TrackingRefreshService(store: store, client: uapi, tminiClient: tmini, reloadWidgets: {})
         try service.setRefreshChannel(id: shipment.id, channel: "tmini")
+        try store.transaction {
+            $0.shipments[0].logisticsTime = .distantFuture
+            $0.shipments[0].lastQueriedAt = .distantFuture
+        }
         _ = try await service.refresh(id: shipment.id, phone: "not-a-phone")
         XCTAssertEqual(tmini.calls, 1); XCTAssertEqual(uapi.calls, 0)
         var after = try XCTUnwrap(store.snapshot().shipments.first)
         XCTAssertEqual(after.logisticsSource, "tmini")
+        XCTAssertLessThan(try XCTUnwrap(after.logisticsTime), Date.distantFuture)
+        XCTAssertLessThan(try XCTUnwrap(after.lastQueriedAt), Date.distantFuture)
         XCTAssertEqual(after.note, shipment.note); XCTAssertEqual(after.pickupCode, shipment.pickupCode)
         XCTAssertEqual(after.reminderDate, shipment.reminderDate); XCTAssertEqual(after.status, shipment.status)
         // Config changes during query cannot write a late success.

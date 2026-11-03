@@ -36,6 +36,7 @@ struct SettingsView: View {
                     NavigationLink("Tmini物流查询（付费）") { TminiSettingsView() }
                     NavigationLink("淘宝导入（试验）") { TaobaoTrialView() }
                     NavigationLink("拼多多导入（试验）") { MallImportView(platform: .pdd) }
+                    NavigationLink("京东导入（试验）") { MallImportView(platform: .jd) }
                 }
 
                 Section("AI") {

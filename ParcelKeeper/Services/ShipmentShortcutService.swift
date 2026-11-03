@@ -292,9 +292,7 @@ struct ShipmentShortcutService {
             }
             var shipment = data.shipments[index]
             let previousStatus = shipment.status
-            if let old = shipment.logisticsTime, let new = value.logisticsTime, new < old { throw ShipmentShortcutError.olderUpdate }
-            // An undated update cannot supersede an event with known time.
-            if shipment.logisticsTime != nil && value.logisticsTime == nil && (value.logisticsInfo != nil || value.status != nil) { throw ShipmentShortcutError.statusConflict }
+            // Explicit updates do not compare incoming event time with saved data.
             if [.delivered, .archived].contains(shipment.status), let state = value.status, state != .delivered && state != shipment.status { throw ShipmentShortcutError.statusConflict }
             if let name = value.carrierName {
                 let code = CarrierDetector.carrierMentioned(in: name)?.code ?? CarrierDetector.unknown.code
@@ -302,7 +300,11 @@ struct ShipmentShortcutService {
             }
             if let info = value.logisticsInfo { shipment.logisticsInfo = info }
             if let query = value.queryInfo { shipment.queryInfo = query }
-            if let time = value.logisticsTime { shipment.logisticsTime = time }
+            // Do not attach a previous event's date to replacement undated logistics.
+            // Missing logistics fields on a metadata-only write still preserve the event.
+            if value.logisticsTime != nil || value.logisticsInfo != nil || value.status != nil {
+                shipment.logisticsTime = value.logisticsTime
+            }
             if let state = value.status, shipment.status != .archived { shipment.status = state }
             shipment.updatedAt = now
             data.shipments[index] = shipment

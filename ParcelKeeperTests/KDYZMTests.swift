@@ -127,15 +127,20 @@ final class KDYZMTests: XCTestCase {
         s.shipments[0].station = String(repeating: "x", count: 201)
         XCTAssertThrowsError(try s.validated())
     }
-    func testLatestConflictAndReadyCannotRegress() throws {
+    func testEqualTimeConflictUsesRemoteStatusButDeliveredProtectionRemains() throws {
         var local = Shipment(trackingNumber: "JD123456789012", carrierName: "京东物流", carrierCode: "jd", logisticsInfo: "原节点", logisticsTime: Date(timeIntervalSince1970: 200))
         local.status = .readyForPickup
         var remote = snapshot().shipments[0]; remote.status = "transit"; remote.logisticsState = "ok"; remote.logisticsUpdatedAt = 400_000
         remote.logisticsEvents = [.init(time: 200_000, timeText: "", description: "冲突节点", location: "")]
-        let before = local
-        XCTAssertFalse(try KDYZMMerger.update(remote, local: &local)); XCTAssertEqual(local, before)
-        remote.logisticsEvents = [.init(time: 300_000, timeText: "", description: "较新节点", location: "")]
-        XCTAssertTrue(try KDYZMMerger.update(remote, local: &local)); XCTAssertEqual(local.status, .readyForPickup)
+        XCTAssertTrue(try KDYZMMerger.update(remote, local: &local))
+        XCTAssertEqual(local.logisticsInfo, "冲突节点")
+        XCTAssertEqual(local.status, .inTransit)
+        local.status = .delivered
+        remote.logisticsEvents = [.init(time: 100_000, timeText: "", description: "本次较早节点", location: "")]
+        XCTAssertTrue(try KDYZMMerger.update(remote, local: &local))
+        XCTAssertEqual(local.logisticsInfo, "本次较早节点")
+        XCTAssertEqual(local.logisticsTime, Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(local.status, .delivered)
     }
     func testScopeAndTokenValidation() throws {
         var scope = KDYZMScope(familyIds: [], legacyAccountIds: ["a"], families: [], accountIds: ["a"], accounts: [.init(id: "a", platform: "jd", label: "账号")], includeFutureAccounts: false)

@@ -206,7 +206,7 @@ final class AuditMediumCoreTests: XCTestCase {
         try app.setPickupCompleted(id: latest.id, completed: true)
         XCTAssertTrue(try store.snapshot().records[0].isCompleted)
     }
-    func testTerminalOldConflictAndNewJobRaceNeverRepeatPOST() async throws {
+    func testTerminalOlderAndEqualResultsAcceptedButNewJobRaceNeverRepeatsPOST() async throws {
         for mode in 0..<4 {
             let credential = KDYZMCredential(baseURL: "https://example.com", token: "pcd_TEST_ONLY", deviceID: "d", generation: UUID())
             let keys = KDYZMNetworkTests.Keys(); keys.value = credential
@@ -233,15 +233,19 @@ final class AuditMediumCoreTests: XCTestCase {
             let service = KDYZMRefreshService(store: store, connection: KDYZMConnection(keys: keys), client: KDYZMClient(transport: transport), reloadWidgets: {})
             do {
                 _ = try await service.refresh(before: before)
-                XCTAssertEqual(mode, 3)
+                XCTAssertNotEqual(mode, 2)
             } catch {
-                XCTAssertNotEqual(mode, 3)
-                if mode != 2 { XCTAssertTrue(error is KDYZMTerminalResultError) }
+                XCTAssertEqual(mode, 2)
+                // A replacement job still fails closed and must never be cleared.
+                XCTAssertTrue(error is KDYZMTerminalResultError)
             }
             let after = try store.snapshot().shipments[0]
             XCTAssertEqual(after.backendRefreshJobID, mode == 2 ? "new-job" : nil)
-            if mode != 3 { XCTAssertEqual(after.logisticsInfo, "本地轨迹") }
-            else { XCTAssertEqual(after.logisticsInfo, "远端轨迹") }
+            if mode == 2 { XCTAssertEqual(after.logisticsInfo, "本地轨迹") }
+            else {
+                XCTAssertEqual(after.logisticsInfo, "远端轨迹")
+                XCTAssertEqual(after.logisticsTime, Date(timeIntervalSince1970: Double(eventTime) / 1000))
+            }
             XCTAssertTrue(transport.requests.allSatisfy { $0.httpMethod == "GET" })
             XCTAssertEqual(transport.requests.count, 2)
         }

@@ -60,7 +60,7 @@ final class TrackingRefreshTests: XCTestCase {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(dataset)
     }
-    func testNetworkFailureAndOlderResultPreserveData() async throws {
+    func testNetworkFailurePreservesDataButOlderResultReplacesSavedTimes() async throws {
         let client = Client()
         let service = TrackingRefreshService(store: storage, client: client, reloadWidgets: {})
         let before = try storage.exportBackup()
@@ -68,10 +68,18 @@ final class TrackingRefreshTests: XCTestCase {
         do { _ = try await service.refresh(id: shipment.id); XCTFail() } catch {}
         XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(before))
         client.failure = nil
-        try storage.transaction { $0.shipments[0].logisticsTime = Date(timeIntervalSinceReferenceDate: 4000) }
-        let newer = try storage.exportBackup()
-        do { _ = try await service.refresh(id: shipment.id); XCTFail() } catch {}
-        XCTAssertEqual(try withoutRefreshDiagnostics(storage.exportBackup()), try withoutRefreshDiagnostics(newer))
+        try storage.transaction {
+            $0.shipments[0].logisticsTime = Date(timeIntervalSinceReferenceDate: 4000)
+            $0.shipments[0].lastQueriedAt = Date(timeIntervalSinceReferenceDate: 5000)
+        }
+        let newlyDelivered = try await service.refresh(id: shipment.id)
+        XCTAssertTrue(newlyDelivered)
+        let saved = try XCTUnwrap(storage.snapshot().shipments.first)
+        XCTAssertEqual(saved.logisticsTime, client.result.logisticsTime)
+        XCTAssertEqual(saved.lastQueriedAt, client.result.queriedAt)
+        XCTAssertEqual(saved.logisticsInfo, client.result.logisticsInfo)
+        XCTAssertEqual(saved.queryInfo, client.result.queryInfo)
+        XCTAssertNil(saved.lastRefreshError)
     }
     func testUnknownStatusPreservesStateAndCompletedRecordsAreNotBatched() async throws {
         let client = Client()

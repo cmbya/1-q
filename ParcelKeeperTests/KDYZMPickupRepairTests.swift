@@ -70,19 +70,36 @@ final class KDYZMPickupRepairTests: XCTestCase {
         XCTAssertTrue(try KDYZMMerger.update(remote, local: &local))
         XCTAssertEqual(local.status, .readyForPickup)
     }
-    func testSameTimestampCollectionRepairsStatusWithoutOverwritingConflictingTrace() throws {
+    func testSameTimestampCollectionAndOrdinaryConflictsUseThisResponse() throws {
         var local = dataset(source: "uapi").shipments[0]
         local.logisticsTime = Date(timeIntervalSince1970: 300)
-        let oldInfo = local.logisticsInfo, oldHistory = local.queryInfo
         XCTAssertTrue(try KDYZMMerger.update(snapshot(text: collected).shipments[0], local: &local))
         XCTAssertEqual(local.status, .delivered)
-        XCTAssertEqual(local.logisticsInfo, oldInfo)
-        XCTAssertEqual(local.queryInfo, oldHistory)
-        XCTAssertEqual(local.logisticsSource, "uapi")
+        XCTAssertEqual(local.logisticsInfo, collected)
+        XCTAssertTrue(local.queryInfo?.contains(collected) == true)
+        XCTAssertTrue(local.queryInfo?.contains("原历史") == true)
+        XCTAssertEqual(local.logisticsSource, "kdyzm")
         local.status = .inTransit
-        let before = local
-        XCTAssertFalse(try KDYZMMerger.update(snapshot(text: "冲突节点").shipments[0], local: &local))
-        XCTAssertEqual(local, before)
+        XCTAssertTrue(try KDYZMMerger.update(snapshot(text: "冲突节点").shipments[0], local: &local))
+        XCTAssertEqual(local.logisticsInfo, "冲突节点")
+        XCTAssertEqual(local.status, .readyForPickup)
+    }
+    func testOlderSnapshotReplacesMainNodeAndCacheTimestampButRetainsHistory() throws {
+        var data = dataset()
+        let remote = snapshot(text: "本次较早节点", status: "transit")
+        data.shipments[0].status = .readyForPickup
+        data.shipments[0].logisticsTime = Date(timeIntervalSince1970: 900)
+        data.shipments[0].backendLogisticsUpdatedAt = Date(timeIntervalSince1970: 1000)
+        data.shipments[0].backendEvents = [.init(time: 900_000, timeText: "", description: "已有较晚历史", location: "")]
+        let record = data.records[0]
+        let report = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+        XCTAssertEqual(report.updated, 1)
+        XCTAssertEqual(data.shipments[0].logisticsInfo, "本次较早节点")
+        XCTAssertEqual(data.shipments[0].logisticsTime, Date(timeIntervalSince1970: 300))
+        XCTAssertEqual(data.shipments[0].backendLogisticsUpdatedAt, Date(timeIntervalSince1970: 400))
+        XCTAssertEqual(data.shipments[0].status, .inTransit)
+        XCTAssertTrue(data.shipments[0].queryInfo?.contains("已有较晚历史") == true)
+        XCTAssertEqual(data.records[0], record)
     }
     func testEmptySnapshotDoesNotPromoteExistingTicketOrClearHistory() throws {
         var data = dataset()
@@ -111,7 +128,7 @@ final class KDYZMPickupRepairTests: XCTestCase {
                 "orders": [["id": "o", "accountId": "a", "platform": "jd", "platformOrderId": "po", "familyId": "f"]],
                 "shipments": [["id": "s", "orderId": "o", "accountId": "a", "familyId": "f", "waybillNo": local.trackingNumber, "carrier": "京东物流", "status": "transit", "logisticsState": "ok", "logisticsCheckedAt": 400_000, "logisticsUpdatedAt": 400_000, "logisticsEvents": [["time": 300_000, "timeText": "", "description": collected, "location": ""]]]]]
             let transport = KDYZMNetworkTests.Transport()
-            transport.responses = [(Data(#"{"accepted":true,"jobs":[{"id":"j","accountId":"a","orderId":"o","state":"completed","logisticsState":"ok","createdAt":200000}]}"#.utf8), 202), (try JSONSerialization.data(withJSONObject: payload), 200)]
+            transport.responses = [(Data(#"{"accepted":true,"jobs":[{"id":"j","accountId":"a","orderId":"o","state":"completed","logisticsState":"ok","createdAt":900000}]}"#.utf8), 202), (try JSONSerialization.data(withJSONObject: payload), 200)]
             let keys = KDYZMNetworkTests.Keys(); keys.value = credential
             let client = KDYZMClient(transport: transport)
             let service = KDYZMRefreshService(store: store, connection: KDYZMConnection(keys: keys, client: client), client: client, reloadWidgets: {})

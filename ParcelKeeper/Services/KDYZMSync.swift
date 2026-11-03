@@ -132,38 +132,16 @@ enum KDYZMMerger {
         current.taobaoOrderID == before.taobaoOrderID && current.uapiCarrierCode == before.uapiCarrierCode
     }
     static func update(_ remote: KDYZMRemoteShipment, local: inout Shipment, refresh: Bool = false, operation: UUID? = nil) throws -> Bool {
-        func reject(_ reason: DiagnosticReason) throws -> Bool {
-            DiagnosticLog.shared.record(.stageFailed, operation: operation, reason: reason, stage: .merge)
-            if refresh, operation != nil { throw TrackingTimeRejection(reason: reason) }
-            return false
-        }
         guard local.status != .archived else { return false }
         let original = local
         // Failed/empty cache responses never clear history, and never count as a successful refresh.
         guard remote.logisticsState == "ok", let incoming = remote.logisticsEvents, !incoming.isEmpty,
               let successTime = try KDYZMTime.date(remote.logisticsUpdatedAt ?? 0) else { return false }
-        if let old = local.backendLogisticsUpdatedAt, successTime < old { return try reject(.olderQuery) }
         let latest = incoming.compactMap { try? KDYZMTime.date($0.time) }.max()
-        if let old = local.logisticsTime, latest.map({ $0 >= old }) != true { return try reject(.olderEvent) }
         let latestDescriptions = incoming.filter { (try? KDYZMTime.date($0.time)) == latest }.map(\.description)
         let recipientCollected = latest != nil && MallDeliveryState.recipientCollected(events: latestDescriptions)
-        if let old = local.logisticsTime, latest == old {
-            let newest = incoming.filter { (try? KDYZMTime.date($0.time)) == old }
-            let sameLatest: Bool
-            if let prior = local.backendEvents {
-                sameLatest = Set(newest) == Set(prior.filter { (try? KDYZMTime.date($0.time)) == old })
-            } else {
-                sameLatest = newest.count == 1 && newest.first?.description == local.logisticsInfo
-            }
-            if !sameLatest {
-                // Explicit collection may repair status, not overwrite equal-time conflicts.
-                guard recipientCollected else { return try reject(.statusConflict) }
-                local.status = .delivered
-                if refresh { local.lastQueriedAt = Date(); local.lastRefreshError = nil }
-                if local != original { local.updatedAt = Date() }
-                return true
-            }
-        }
+        // Event ordering selects the main node within this response only.
+        // Older/equal remote times never block it from replacing the saved main node.
         let combined = Array(Set((local.backendEvents ?? []) + incoming)).sorted {
             $0.time == $1.time ? $0.description < $1.description : $0.time > $1.time
         }
@@ -174,7 +152,7 @@ enum KDYZMMerger {
         local.logisticsInfo = incoming.sorted {
             $0.time == $1.time ? $0.description < $1.description : $0.time > $1.time
         }.first?.description
-        if let latest { local.logisticsTime = latest }
+        local.logisticsTime = latest
 
         local.queryInfo = combined.map {
             let time = (try? KDYZMTime.date($0.time)).map { ShipmentDateDisplay.string($0) } ?? $0.timeText
@@ -190,7 +168,7 @@ enum KDYZMMerger {
             switch remote.status {
             case "signed": local.status = .delivered
             case "arrived": local.status = .readyForPickup
-            case "transit": if local.status != .readyForPickup { local.status = .inTransit }
+            case "transit": local.status = .inTransit
             default: break
             }
         }
@@ -316,7 +294,7 @@ struct KDYZMTerminalResultError: LocalizedError {
     var cleanupReason: DiagnosticReason? = nil
     var errorDescription: String? {
         if cleanupReason != nil { return "后台终态结果不可用，任务清理未完成；未覆盖本地轨迹，本次未重复提交，请检查后重试。" }
-        return "后台终态任务已清除，但结果过旧、冲突或不可用，未覆盖本地轨迹；本次未重复提交，可检查后再次手动刷新。"
+        return "后台终态任务已清除，但结果身份冲突或不可用，未覆盖本地轨迹；本次未重复提交，可检查后再次手动刷新。"
     }
 }
 
@@ -426,10 +404,7 @@ struct KDYZMRefreshService {
               !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id), remote.hidden != true, remote.deleted != true,
               CarrierDetector.sanitize(remote.waybillNo) == CarrierDetector.sanitize(before.trackingNumber),
               KDYZMMerger.carrierKey(remote.carrier) == KDYZMMerger.carrierKey(before.carrierName) || KDYZMMerger.carrierKey(remote.carrier) == before.carrierCode else { throw KDYZMError.stale }
-        guard remote.logisticsState == "ok", !(remote.logisticsEvents ?? []).isEmpty,
-              let createdAt = job.createdAt, createdAt > 0,
-              (remote.logisticsCheckedAt ?? 0) >= createdAt,
-              (remote.logisticsUpdatedAt ?? 0) >= createdAt else {
+        guard remote.logisticsState == "ok", !(remote.logisticsEvents ?? []).isEmpty else {
             throw KDYZMError.empty
         }
         trace.begin(.save)

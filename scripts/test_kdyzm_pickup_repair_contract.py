@@ -25,8 +25,10 @@ class PickupRepairContract(unittest.TestCase):
         self.assertIn('let wasDelivered = data.shipments[index].status == .delivered', SYNC)
         self.assertIn('newlyDelivered = !wasDelivered && data.shipments[index].status == .delivered', SYNC)
         self.assertIn('return newlyDelivered', SYNC)
-    def test_freshness_and_cleanup_are_preserved(self):
-        for token in ['successTime < old', 'latest.map({ $0 >= old })', '(remote.logisticsCheckedAt ?? 0) >= createdAt', '(remote.logisticsUpdatedAt ?? 0) >= createdAt', 'try await clearJob(expectedID', 'backendRefreshGeneration == credential.generation']:
+    def test_time_gates_removed_but_cleanup_and_generation_preserved(self):
+        for token in ['successTime < old', 'latest.map({ $0 >= old })', '(remote.logisticsCheckedAt ?? 0) >= createdAt', '(remote.logisticsUpdatedAt ?? 0) >= createdAt']:
+            self.assertNotIn(token, SYNC)
+        for token in ['try await clearJob(expectedID', 'backendRefreshGeneration == credential.generation']:
             self.assertIn(token, SYNC)
         self.assertNotIn('.isCompleted =', SYNC)
 
