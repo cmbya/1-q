@@ -5,14 +5,72 @@ final class JDPCClientTests: XCTestCase {
     private let order = "123456789012"
     private func cookies() throws -> [TaobaoTrialCookie] { try MallCookieImport.parse("thor=SYNTHETIC", platform: .jd) }
     private func list() -> [String: Any] {
-        ["success": true, "data": ["orderList": [["orderId": order, "statusInfo": ["orderStateName": "待收货"], "wareList": [["name": "合成商品"]]]]]]
+        ["success": true, "data": ["totalNum": 1, "orderList": [["orderId": order, "dateSubmit": "2026-10-15 12:00:00", "statusInfo": ["orderStateName": "待收货"], "wareList": [["name": "合成商品"]]]]]]
     }
     private func parcel(_ number: String, text: String = "运输中") -> [String: Any] {
         ["carriageInfo": ["carriageId": number, "carrier": "京东快递"], "trackGroupInfo": ["orderTrackShowList": [["CreationTime": "2026-11-01 10:00:00", "StatusName": text, "Content": "合成节点"]]]]
     }
+    private var now: Date { JDOrderImportPolicy.submittedDate("2026-11-04 12:00:00")! }
+    private func shopping(_ id: String, date: Any = "2026-10-15 12:00:00", status: String = "已签收", type: Int = 0) -> [String: Any] {
+        ["orderId": id, "dateSubmit": date, "orderType": type, "statusInfo": ["orderStateName": status], "wareList": [["name": "配送字样的购物商品"]]]
+    }
+    private func page(_ rows: [[String: Any]], total: Int? = nil) -> [String: Any] {
+        var data: [String: Any] = ["orderList": rows]
+        if let total { data["totalNum"] = total }
+        return ["success": true, "data": data]
+    }
+    func testTwentyTakeawaysDoNotHideOctober15CompletedShoppingOnSecondPage() async throws {
+        let takeaway = (0..<20).map { shopping(String(123456789100 + $0), status: "外卖 已完成") }
+        let network = JDPCFixtureNetwork([page(takeaway, total: 21), page([shopping(order)], total: 21), ["multiPackageTrackInfoList": [parcel("JD123456789")]]])
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertEqual(report.scanned, 21); XCTAssertEqual(report.excluded, 20)
+        XCTAssertEqual(report.eligible, 1); XCTAssertEqual(report.candidates.count, 1); XCTAssertFalse(report.limited)
+        XCTAssertEqual(network.requests.count, 3)
+        let body = String(data: network.requests[1].httpBody!, encoding: .utf8)!
+        let raw = URLComponents(string: "https://example.test/?" + body)!.queryItems!.first!.value!
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Int])?["page"], 2)
+    }
+    func testMissingDateOutsideExcludedAndNoWaybillAreSeparateOrders() async throws {
+        let network = JDPCFixtureNetwork([page([shopping(order), shopping("123456789013", date: ""), shopping("123456789014", date: "2026-10-05"), shopping("123456789015", type: 4)], total: 4), ["multiPackageTrackInfoList": []]])
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertEqual(report.scanned, 4); XCTAssertEqual(report.eligible, 1)
+        XCTAssertEqual(report.missingDate, 1); XCTAssertEqual(report.outsideWindow, 1); XCTAssertEqual(report.excluded, 1)
+        XCTAssertEqual(report.withoutWaybill, 1); XCTAssertTrue(report.candidates.isEmpty); XCTAssertFalse(report.limited)
+        XCTAssertEqual(network.requests.count, 2)
+    }
+    func testRepeatedPageStopsLimitedAndExplicitEmptyStopsComplete() async throws {
+        for repeated in [true, false] {
+            let rows = [shopping(order, type: 4)]
+            let network = JDPCFixtureNetwork([page(rows), page(repeated ? rows : [])])
+            let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+            XCTAssertEqual(report.scanned, 1); XCTAssertEqual(report.limited, repeated)
+            XCTAssertEqual(network.requests.count, 2)
+        }
+    }
+    func testTenPageAndTwentyDetailCapsAreExplicitNotSilentEight() async throws {
+        let pages = (0..<10).map { page([shopping(String(123456789100 + $0), type: 4)]) }
+        let capped = try await JDPCClient(cookies: cookies(), network: JDPCFixtureNetwork(pages), now: { self.now }).fetchOrderReport()
+        XCTAssertTrue(capped.limited); XCTAssertEqual(capped.scanned, 10)
+        let rows = (0..<21).map { shopping(String(123456789100 + $0)) }
+        let network = JDPCFixtureNetwork([page(rows, total: 21)] + Array(repeating: ["multiPackageTrackInfoList": []], count: 20))
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertTrue(report.limited); XCTAssertEqual(report.eligible, 21); XCTAssertEqual(report.withoutWaybill, 20)
+        XCTAssertEqual(network.requests.count, 21)
+    }
+    func testTimeoutAfterAcceptedListReturnsPartialWithoutInventingNoWaybill() async throws {
+        let network = JDPCFixtureNetwork([page([shopping(order)], total: 1)], exhaustedError: URLError(.timedOut))
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertTrue(report.limited); XCTAssertEqual(report.eligible, 1); XCTAssertEqual(report.withoutWaybill, 0)
+        XCTAssertTrue(report.candidates.isEmpty); XCTAssertEqual(network.requests.count, 2)
+    }
+    func testVerificationDoesNotRequireOrFilterMissingDate() async throws {
+        let network = JDPCFixtureNetwork([page([shopping(order, date: "")], total: 1)])
+        _ = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).verifySession()
+        XCTAssertEqual(network.requests.count, 1)
+    }
     func testCookieClientBuildsUnsignedListAndDetailAndKeepsSplitIdentity() async throws {
         let network = JDPCFixtureNetwork([list(), ["multiPackageTrackInfoList": [parcel("JD123456789"), parcel("SF123456789")]]])
-        let values = try await JDPCClient(cookies: cookies(), network: network).fetchOrders()
+        let values = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrders()
         XCTAssertEqual(values.map(\.trackingNumber), ["JD123456789", "SF123456789"])
         XCTAssertEqual(Set(values.map(\.orderID)), Set([order]))
         XCTAssertEqual(network.requests.count, 2)
@@ -108,12 +166,13 @@ private final class JDPCFixtureNetwork: AINetworking {
     let otherURL: URL?
     let oversized: Bool
     let headers: [String: String]?
-    init(_ responses: [[String: Any]], status: Int = 200, otherURL: URL? = nil, oversized: Bool = false, headers: [String: String]? = nil) {
-        self.responses = responses; self.status = status; self.otherURL = otherURL; self.oversized = oversized; self.headers = headers
+    let exhaustedError: Error
+    init(_ responses: [[String: Any]], status: Int = 200, otherURL: URL? = nil, oversized: Bool = false, headers: [String: String]? = nil, exhaustedError: Error = URLError(.badServerResponse)) {
+        self.responses = responses; self.status = status; self.otherURL = otherURL; self.oversized = oversized; self.headers = headers; self.exhaustedError = exhaustedError
     }
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         requests.append(request)
-        guard !responses.isEmpty else { throw URLError(.badServerResponse) }
+        guard !responses.isEmpty else { throw exhaustedError }
         let body = responses.removeFirst()
         let data: Data
         if oversized { data = Data(repeating: 65, count: 5 * 1024 * 1024 + 1) }

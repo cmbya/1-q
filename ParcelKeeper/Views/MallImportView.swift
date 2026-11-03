@@ -44,6 +44,13 @@ struct MallImportClient {
     }
 }
 
+extension MallImportClient {
+    func fetchOrderReport() async throws -> JDOrderImportReport {
+        guard platform == .jd else { throw MallWebError.unsupported }
+        return try await JDInAppClient(cookies: cookies).fetchOrderReport()
+    }
+}
+
 /// Dedicated ephemeral browser; no JS credential bridge, system cookies or credential logging.
 @MainActor
 private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDelegate {
@@ -54,27 +61,35 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     private(set) var active = true
     private(set) var jdDiagnostics: JDDiagnostics?
     let sessionGeneration: UUID
+    var validationTask: Task<Void, Never>?
+    @Published private(set) var validating = false
+    private var sessionCurrent: Bool { platform != .jd || MallSession.generation(for: platform) == sessionGeneration }
 
-    init(platform: MallPlatform, cookies: [TaobaoTrialCookie]) {
+    init(platform: MallPlatform, cookies: [TaobaoTrialCookie], mode: JDLoginMode = .resume) {
         self.platform = platform
         sessionGeneration = MallSession.generation(for: platform)
+        let jdPolicy = platform == .jd ? JDLoginPolicy(mode: mode, cookies: cookies) : nil
         if platform == .jd { jdDiagnostics = JDDiagnostics(.jdLogin) }
         let config = WKWebViewConfiguration()
+        // Resume is snapshot-isolated too: never borrow an unknown live account.
+        // Successful commit publishes this store for subsequent order/logistics reads.
         config.websiteDataStore = platform == .jd ? WKWebsiteDataStore.nonPersistent() : MallBrowserContext.store(for: platform)
         let view = WKWebView(frame: .zero, configuration: config)
         view.customUserAgent = platform.userAgent
         web = view
         super.init()
         if platform == .jd {
-            message = "请在京东官方手机网页手动登录并完成手机验证；不会自动发送短信。读取订单成功后才能保存会话，不购买、不支付、不确认收货。"
+            message = jdPolicy?.pcSessionSaved == true
+                ? "电脑版Cookie会话已保存，可直接读取订单；它不等于手机网页登录。需要更换为手机网页登录时，请取消后选择切换账号。"
+                : "继续网页登录会恢复已保存的手机Cookie并先打开订单页；过期后由京东提示登录。切换账号使用全新隔离网页。请在京东官方手机网页手动完成验证；不会自动发送短信，验证成功并保存后才替换本机会话。"
         }
         view.navigationDelegate = self
         setup = Task { @MainActor [weak self] in
             guard let self else { return }
             let existing = await config.websiteDataStore.httpCookieStore.allCookies()
-            let loginCookies = platform == .jd ? [] : cookies
+            let loginCookies = jdPolicy?.cookies ?? cookies
             for cookie in loginCookies {
-                guard self.active, !Task.isCancelled else { return }
+                guard self.active, self.sessionCurrent, !Task.isCancelled else { return }
                 if existing.contains(where: { $0.name == cookie.name && $0.domain == cookie.domain && $0.path == cookie.path }) { continue }
                 guard cookie.expires.map({ $0 > Date() }) ?? true,
                       let url = URL(string: "https://" + cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
@@ -95,27 +110,38 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
             guard self.active, !Task.isCancelled, platform.allowed(platform.loginURL) else { return }
             let current = await config.websiteDataStore.httpCookieStore.allCookies()
             let values = current.map { TaobaoTrialCookie(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path, secure: $0.isSecure, expires: $0.expiresDate) }
-            guard self.active, !Task.isCancelled else { return }
-            view.load(URLRequest(url: MallSession.hasLoginCredentials(values, platform: platform) ? platform.ordersURL : platform.loginURL))
+            guard self.active, self.sessionCurrent, !Task.isCancelled else { return }
+            if platform == .jd {
+                guard let initialURL = jdPolicy?.initialURL else { return }
+                view.load(URLRequest(url: initialURL))
+            } else {
+                view.load(URLRequest(url: MallSession.hasLoginCredentials(values, platform: platform) ? platform.ordersURL : platform.loginURL))
+            }
         }
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard active, let url = navigationAction.request.url, platform.allowed(url) else {
+        guard active, sessionCurrent, !validating, let url = navigationAction.request.url, platform.allowed(url) else {
             jdDiagnostics?.event(.jdNavigationRejected, reason: .url)
-            message = "已阻止平台许可范围之外的跳转；不打开外部App，不绕过验证。"
+            message = "已阻止非许可HTTPS或当前不可用的跳转；不主动调用外部App，不绕过验证。"
             decisionHandler(.cancel); return
         }
         if navigationAction.targetFrame == nil {
+            if platform == .jd {
+                jdDiagnostics?.event(.jdNavigationRejected, reason: .frame)
+                message = "已阻止新窗口跳转，请在当前京东网页继续。"
+                decisionHandler(.cancel); return
+            }
             webView.load(navigationAction.request); decisionHandler(.cancel); return
         }
+        // Public .allow does not guarantee suppressing HTTPS universal links.
         decisionHandler(.allow)
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
-        guard active, let url = navigationResponse.response.url, platform.allowed(url) else {
+        guard active, sessionCurrent, !validating, let url = navigationResponse.response.url, platform.allowed(url) else {
             jdDiagnostics?.event(.jdNavigationRejected, reason: .url)
             message = "已阻止平台许可范围之外的页面响应。"
             decisionHandler(.cancel); return
@@ -131,15 +157,19 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     private func recordNavigationFailure(_ error: Error) {
         var counts: [DiagnosticMetric: Int] = [:]
         if let code = JDDiagnostics.safeNetworkCode(error) { counts[.errorCode] = code }
-        jdDiagnostics?.event(.jdNavigationFailed, reason: JDDiagnostics.reason(error), counts: counts)
+        let safe = JDLoginPolicy.navigationFailure(error)
+        jdDiagnostics?.event(.jdNavigationFailed, reason: JDDiagnostics.reason(safe), counts: counts)
+        if platform == .jd, !(safe is CancellationError) {
+            message = (safe as? JDLoggedError)?.localizedDescription ?? "京东网页网络错误，请重试。"
+        }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         jdDiagnostics?.event(.jdProcessTerminated, reason: .unavailable)
     }
     func verify(_ cookies: [TaobaoTrialCookie]) async throws {
-        guard active, let web else { throw CancellationError() }
+        guard active, sessionCurrent, let web else { throw CancellationError() }
         if platform == .jd {
-            // Fresh official mobile context never borrows a PC thor session.
+            // Isolated official mobile context never borrows a PC thor session.
             try await JDInAppClient(cookies: cookies, browserStore: web.configuration.websiteDataStore).verifySession()
         } else {
             try await MallImportClient(platform: platform, cookies: cookies).verifySession()
@@ -151,16 +181,21 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     }
     func finishJDLogin() { jdDiagnostics?.finish() }
     func beginJDValidation() {
-        // A previous save attempt may have failed; each explicit retry is a new operation.
+        // Freeze this visible page during verification, preventing account changes
+        // between capture, hidden order verification and final snapshot/commit.
         jdDiagnostics?.finish()
-        if platform == .jd { jdDiagnostics = JDDiagnostics(.jdVerify) }
+        if platform == .jd {
+            jdDiagnostics = JDDiagnostics(.jdVerify)
+            validating = true; web?.stopLoading()
+        }
     }
+    func endValidation() { validating = false; validationTask = nil }
 
     func capture() async throws -> [TaobaoTrialCookie] {
-        guard active, let web, let url = web.url, platform.allowed(url) else { throw CancellationError() }
+        guard active, sessionCurrent, let web, let url = web.url, platform.allowed(url) else { throw CancellationError() }
         let values = await web.configuration.websiteDataStore.httpCookieStore.allCookies()
         try Task.checkCancellation()
-        guard active else { throw CancellationError() }
+        guard active, sessionCurrent else { throw CancellationError() }
         return values.compactMap { cookie in
             guard let origin = URL(string: "https://" + cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
                   platform.allowed(origin), cookie.expiresDate.map({ $0 > Date() }) ?? true else { return nil }
@@ -180,6 +215,7 @@ private final class MallLoginBrowser: NSObject, ObservableObject, WKNavigationDe
     func destroy() {
         jdDiagnostics?.fail(CancellationError())
         active = false
+        validationTask?.cancel(); validationTask = nil
         setup?.cancel(); setup = nil
         web?.stopLoading()
         web?.navigationDelegate = nil
@@ -200,27 +236,27 @@ private struct MallLoginSheet: View {
     let saved: () -> Void
     let readOnly: Bool
     @State private var saving = false
-    @State private var saveTask: Task<Void, Never>?
+    // Browser owns validation so actual dismissal can cancel it without relying on onDisappear.
 
     var body: some View {
         NavigationStack {
             VStack {
                 Text(browser.message).font(.footnote).padding(.horizontal)
-                if let web = browser.web { MallLoginWeb(web: web) }
+                if let web = browser.web { MallLoginWeb(web: web).allowsHitTesting(browser.platform != .jd || !saving) }
             }
             .navigationTitle(browser.platform.title + "网页登录（试验）")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") { saveTask?.cancel(); browser.destroy(); dismiss() }
+                    Button("取消") { browser.destroy(); dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(saving ? "正在保存" : "验证并保存会话") {
                         saving = true
                         browser.beginJDValidation()
                         let generation = browser.sessionGeneration
-                        saveTask = Task { @MainActor in
-                            defer { saving = false; browser.jdDiagnostics?.fail(CancellationError()) }
+                        browser.validationTask = Task { @MainActor in
+                            defer { saving = false; browser.endValidation(); browser.jdDiagnostics?.fail(CancellationError()) }
                             do {
                                 let cookies = try await browser.capture()
                                 guard browser.active, !Task.isCancelled, !readOnly else { return }
@@ -235,6 +271,12 @@ private struct MallLoginSheet: View {
                                 try Task.checkCancellation()
                                 guard browser.active, !Task.isCancelled, !readOnly else { return }
                                 guard MallSession.hasLoginCredentials(fresh, platform: browser.platform) else { throw MallWebError.authentication }
+                                if browser.platform == .jd {
+                                    // Token rotation is allowed; an account change during verification is not.
+                                    let before = Set(cookies.filter { $0.name == "pt_pin" }.map(\.value))
+                                    let after = Set(fresh.filter { $0.name == "pt_pin" }.map(\.value))
+                                    guard before.count == 1, before == after else { throw MallWebError.identityMismatch }
+                                }
                                 browser.jdDiagnostics?.begin(.jdSessionSave)
                                 try MallSession.withGeneration(platform: browser.platform, expected: generation) {
                                     try MallSession(platform: browser.platform).save(fresh, expectedGeneration: generation)
@@ -252,7 +294,9 @@ private struct MallLoginSheet: View {
                 }
             }
         }
-        .onDisappear { saveTask?.cancel(); browser.destroy() }
+        .interactiveDismissDisabled(browser.platform == .jd && saving)
+        // JD teardown belongs to the presenter's actual sheet onDismiss.
+        .onDisappear { if browser.platform != .jd { browser.destroy() } }
     }
 }
 
@@ -262,6 +306,8 @@ struct MallImportView: View {
     @State private var cookieImport = false
     @State private var cookieText = ""
     @State private var consent = false
+    @State private var loginMode: JDLoginMode = .resume
+    @State private var hasPCSession = false
     @State private var login = false
     @State private var browser: MallLoginBrowser?
     @State private var hasSession = false
@@ -288,9 +334,17 @@ struct MallImportView: View {
                     Text("拼多多使用已验证的Cookie直连读取，网页登录用于取得本机会话。")
                         .font(.footnote)
                 }
-                Text(hasSession ? "已保存候选会话（不代表登录有效）" : "尚未保存会话")
-                Button(platform == .jd ? "账号网页登录京东" : "登录／重新登录" + platform.title) { consent = true }
-                    .disabled(busy || store.isHistoricalSnapshot)
+                Text(platform == .jd && hasPCSession ? "电脑版Cookie会话已保存，可直接读取订单（不等于手机网页登录）" : (hasSession ? "已保存候选会话（不代表登录有效）" : "尚未保存会话"))
+                Button(platform == .jd ? "继续网页登录" : "登录／重新登录" + platform.title) {
+                    loginMode = .resume
+                    if platform == .jd && hasPCSession {
+                        message = "当前使用已保存的电脑版Cookie，请直接读取订单；如需改为手机网页登录，请选择切换账号。不会把thor转换为手机凭据。"
+                    } else { consent = true }
+                }.disabled(busy || store.isHistoricalSnapshot)
+                if platform == .jd {
+                    Button("切换账号（全新手机网页）") { loginMode = .switchAccount; consent = true }
+                        .disabled(busy || store.isHistoricalSnapshot)
+                }
                 Button(platform == .jd ? "导入Cookie" : "导入Cookie（备用）") { cookieText = ""; message = nil; cookieImport = true }
                     .disabled(busy || store.isHistoricalSnapshot)
                 Button(platform == .jd ? "清除本机京东会话" : "退出并清除本平台会话", role: .destructive) { clearSession() }
@@ -299,6 +353,10 @@ struct MallImportView: View {
             Section("手动读取与确认") {
                 Button(busy ? "正在处理" : "读取网页订单（不调用UAPI）") { fetch() }
                     .disabled(busy || !hasSession || store.isHistoricalSnapshot)
+                if platform == .jd {
+                    Text("临时测试模式：近30天购物订单，所有状态含已签收；排除明确外卖／秒送／虚拟／服务类订单。没有运单号的订单只计入统计，不生成快递；日期缺失、分页或时间预算受限会明确提示，不保证全量。")
+                        .font(.footnote)
+                }
                 Text("仅展示本次网页能够读取的订单，非全量同步；缺少运单号不会用订单号替代。请核对预览并勾选，确认后才保存。已有票仅补平台关联，不覆盖备注／取件码。")
                     .font(.footnote)
                 Text("确认后先导入／补关联，再按平台尝试刷新物流；整批物流请求预算20秒，登录／验证等错误会停止后续平台请求，但继续保存所选关联。未取得轨迹不代表已核实状态；不会自动调用UAPI。")
@@ -331,18 +389,20 @@ struct MallImportView: View {
         .navigationTitle(platform.title + "导入（试验）")
         .onAppear { loadSession() }
         .onChange(of: platform) { _, _ in cancel(); browser?.destroy(); browser = nil; login = false; candidates = []; selected = []; message = nil; loadSession() }
-        .onDisappear { cancel(); browser?.destroy(); browser = nil }
-        .confirmationDialog("允许在" + platform.title + "网页登录并保存本机会话？", isPresented: $consent, titleVisibility: .visible) {
+        .onDisappear {
+            // Presenting a sheet or returning from another App can hide this view.
+            // Keep JD's candidate alive until actual dismissal, not on every hide.
+            if platform == .jd { guard !login else { return } }
+            cancel(); browser?.destroy(); browser = nil
+        }
+        .confirmationDialog(platform == .jd && loginMode == .switchAccount ? "切换账号并打开全新京东手机网页？" : "允许在" + platform.title + "网页登录并保存本机会话？", isPresented: $consent, titleVisibility: .visible) {
             Button("同意并打开平台网页") {
                 guard !store.isHistoricalSnapshot else { return }
-                browser?.destroy()
-                // A missing/expired saved session must not prevent first-time login.
-                browser = MallLoginBrowser(platform: platform, cookies: (try? session.load()) ?? [])
-                login = true
+                openLogin()
             }
             Button("取消", role: .cancel) {}
         } message: { Text(platform == .jd
-            ? "仅打开京东官方手机网页，由你手动登录及完成手机验证；不会自动发送短信。只有实际订单访问成功后才保存，取消或验证失败不替换原会话；清除只删除本机京东会话，不请求远端退出。"
+            ? "继续网页登录仅恢复已保存的手机Cookie并先打开订单页；切换账号不带入旧Cookie。电脑版Cookie不与手机网页登录互通。网页仅使用许可HTTPS，仍可能受系统HTTPS App链接影响；不主动打开外部App。手动验证，不自动发送短信。验证成功并保存前不替换原会话；清除不请求远端退出。"
             : "平台将收到正常网页请求与登录信息，可能要求验证码或重新登录；保存候选Cookie不能证明登录成功，需手动读取订单验证。") }
         .sheet(isPresented: $cookieImport, onDismiss: { cookieText = "" }) {
             NavigationStack {
@@ -369,6 +429,20 @@ struct MallImportView: View {
                 }, readOnly: store.isHistoricalSnapshot)
             }
         }
+    }
+
+    private func openLogin() {
+        guard !busy, !store.isHistoricalSnapshot else { return }
+        let cookies = (try? session.load()) ?? []
+        if platform == .jd && JDLoginPolicy(mode: loginMode, cookies: cookies).pcSessionSaved {
+            hasPCSession = true
+            message = "电脑版Cookie会话已保存，请直接读取订单；若要替换为手机网页登录，请显式选择切换账号。"
+            return
+        }
+        cancel(); browser?.destroy()
+        // Missing/expired mobile credentials start at login; valid snapshots go to orders.
+        browser = MallLoginBrowser(platform: platform, cookies: cookies, mode: loginMode)
+        login = true
     }
 
     private func saveImportedCookie() {
@@ -401,7 +475,8 @@ struct MallImportView: View {
                     try MallSession(platform: currentPlatform).save(fresh, expectedGeneration: generation)
                     let old = MallBrowserContext.detach(currentPlatform)
                     jdDiagnostics?.finish()
-                    hasSession = true; cookieImport = false; candidates = []; selected = []; candidateGeneration = nil
+                    hasSession = true; hasPCSession = currentPlatform == .jd && MallSession.hasJDPCSession(fresh)
+                    cookieImport = false; candidates = []; selected = []; candidateGeneration = nil
                     message = "Cookie已通过订单访问验证并保存；未导入订单，未调用UAPI。"
                     return old
                 }
@@ -420,8 +495,12 @@ struct MallImportView: View {
         return (error as? MallWebError)?.localizedDescription ?? "本机安全保存或读取失败。"
     }
     private func loadSession() {
-        do { hasSession = !(try session.load()).isEmpty }
-        catch { hasSession = false; message = "无法读取本机会话，请重新登录或清除会话。" }
+        do {
+            let cookies = try session.load()
+            hasSession = !cookies.isEmpty
+            hasPCSession = platform == .jd && MallSession.hasJDPCSession(cookies)
+        }
+        catch { hasSession = false; hasPCSession = false; message = "无法读取本机会话，请重新登录或清除会话。" }
     }
 
     private func cancel() {
@@ -441,13 +520,13 @@ struct MallImportView: View {
                 guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
                 let cleared = try MallSession.withGeneration(platform: currentPlatform, expected: MallSession.generation(for: currentPlatform)) {
                     try MallSession(platform: currentPlatform).clear()
-                    hasSession = false
+                    hasSession = false; hasPCSession = false
                     return (MallBrowserContext.detach(currentPlatform), MallSession.generation(for: currentPlatform))
                 }
                 await MallBrowserContext.removeData(from: cleared.0)
                 guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
                 try MallSession.withGeneration(platform: currentPlatform, expected: cleared.1) {
-                    hasSession = false; message = "本平台会话与网页上下文已清除，其他平台不受影响。"
+                    hasSession = false; hasPCSession = false; message = "本平台会话与网页上下文已清除，其他平台不受影响。"
                 }
             } catch {
                 guard operationID == id, !Task.isCancelled, platform == currentPlatform else { return }
@@ -471,7 +550,15 @@ struct MallImportView: View {
                 }
                 jdDiagnostics?.begin(.jdFetch)
                 let values: [MallCandidate]
-                values = try await MallImportClient(platform: currentPlatform, cookies: cookies).fetchOrders()
+                let reportMessage: String?
+                let client = MallImportClient(platform: currentPlatform, cookies: cookies)
+                if currentPlatform == .jd {
+                    let report = try await client.fetchOrderReport()
+                    values = report.candidates; reportMessage = report.message
+                } else {
+                    values = try await MallImportClient(platform: currentPlatform, cookies: cookies).fetchOrders()
+                    reportMessage = nil
+                }
                 try Task.checkCancellation()
                 guard operationID == id, platform == currentPlatform, !store.isHistoricalSnapshot else {
                     jdDiagnostics?.fail(CancellationError()); return
@@ -479,7 +566,8 @@ struct MallImportView: View {
                 try MallSession.withGeneration(platform: currentPlatform, expected: generation) {
                     jdDiagnostics?.finish()
                     candidates = values; candidateGeneration = generation
-                    let outcome = values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。"
+                    let outcome = reportMessage.map { $0 + "\n请核对预览并勾选，尚未导入，也未调用UAPI。" }
+                        ?? (values.isEmpty ? "本页未取得可导入运单，不代表账号没有其他快递。" : "请核对预览并勾选，尚未导入，也未调用UAPI。")
                     message = [message, outcome].compactMap { $0 }.joined(separator: "\n")
                 }
             } catch is CancellationError { jdDiagnostics?.fail(CancellationError()) }

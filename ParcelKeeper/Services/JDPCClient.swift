@@ -8,32 +8,71 @@ struct JDPCClient {
     let cookies: [TaobaoTrialCookie]
     var network: any AINetworking = AISecureNetwork()
     var diagnosticLog: DiagnosticLog = .shared
+    var now: () -> Date = { Date() }
 
     @discardableResult
     func verifySession() async throws -> [TaobaoTrialCookie] {
         try await perform(.jdVerify, seconds: 20) { session in
-            _ = try await session.orders()
+            _ = try await session.orders(page: 1)
             guard MallSession.hasJDPCSession(session.cookies) else { throw MallWebError.authentication }
             return session.cookies
         }
     }
     func fetchOrders() async throws -> [MallCandidate] {
+        try await fetchOrderReport().candidates
+    }
+    func fetchOrderReport() async throws -> JDOrderImportReport {
         try await perform(.jdFetch, seconds: 30) { session in
-            let list = try await session.orders()
-            var result: [MallCandidate] = []
-            for order in list.filter(\.pending).prefix(8) {
-                let parcels = try await session.parcels(orderID: order.id)
-                for parcel in parcels {
-                    if let old = result.first(where: { $0.trackingNumber == parcel.number }) {
-                        guard old.orderID == order.id else { throw MallWebError.identityMismatch }
-                        continue
-                    }
-                    result.append(MallCandidate(trackingNumber: parcel.number, carrier: parcel.carrier,
-                        title: order.title, orderID: order.id,
-                        sourceURL: "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(order.id)"))
+            let policy = JDOrderImportPolicy(now: now())
+            var report = JDOrderImportReport()
+            var seen = Set<String>()
+            var eligibleOrders: [JDPCParser.Order] = []
+            // Lists first: twenty local-delivery rows must not hide an older completed shopping order.
+            for page in 1...JDOrderImportPolicy.maxPages {
+                try Task.checkCancellation()
+                if ProcessInfo.processInfo.systemUptime >= session.deadline {
+                    if page == 1 { throw MallWebError.timeout }
+                    report.limited = true; break
                 }
+                let response: JDPCParser.Page
+                do { response = try await session.orders(page: page) }
+                catch {
+                    try Task.checkCancellation()
+                    guard page > 1, JDOrderImportPolicy.isTimeout(error) else { throw error }
+                    report.limited = true; break
+                }
+                if response.orders.isEmpty {
+                    if let total = response.totalNum, seen.count < total { report.limited = true }
+                    break
+                }
+                var added = 0
+                for order in response.orders where seen.insert(order.id).inserted {
+                    added += 1
+                    if report.consider(submittedAt: order.submittedAt, excluded: order.excluded, policy: policy) {
+                        eligibleOrders.append(order)
+                    }
+                }
+                if added == 0 { report.limited = true; break }
+                if let total = response.totalNum, seen.count >= total { break }
+                // No sort-order assumption: an old date does not prove later pages are old.
+                if page == JDOrderImportPolicy.maxPages { report.limited = true }
             }
-            return result
+            for (index, order) in eligibleOrders.enumerated() {
+                try Task.checkCancellation()
+                guard index < JDOrderImportPolicy.maxDetails,
+                      ProcessInfo.processInfo.systemUptime < session.deadline else { report.limited = true; break }
+                let parcels: [MallWebDetail]
+                do { parcels = try await session.parcels(orderID: order.id) }
+                catch {
+                    try Task.checkCancellation()
+                    guard JDOrderImportPolicy.isTimeout(error) else { throw error }
+                    report.limited = true; break
+                }
+                try report.append(parcels, orderID: order.id, title: order.title,
+                    url: "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(order.id)")
+            }
+            report.logSummary(session.diagnostics)
+            return report
         }
     }
     func query(orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
@@ -84,11 +123,11 @@ private final class JDPCSession {
     init(cookies: [TaobaoTrialCookie], network: any AINetworking, diagnostics: JDDiagnostics, deadline: TimeInterval) {
         self.cookies = cookies; self.network = network; self.diagnostics = diagnostics; self.deadline = deadline
     }
-    func orders() async throws -> [JDPCParser.Order] {
-        let root = try await request(detail: false, body: ["page": 1, "d": 1, "s": 4096])
+    func orders(page: Int) async throws -> JDPCParser.Page {
+        let root = try await request(detail: false, body: ["page": page, "d": 1, "s": 4096])
         diagnostics.begin(.jdOrdersParse)
-        let values = try JDPCParser.orders(root)
-        diagnostics.event(.jdResponseAccepted, counts: [.rows: values.count])
+        let values = try JDPCParser.page(root)
+        diagnostics.event(.jdResponseAccepted, counts: [.rows: values.orders.count])
         return values
     }
     func parcels(orderID: String) async throws -> [MallWebDetail] {
@@ -192,7 +231,20 @@ private final class JDPCSession {
 }
 
 enum JDPCParser {
-    struct Order { let id: String; let title: String; let pending: Bool }
+    struct Order { let id: String; let title: String; let submittedAt: Date?; let excluded: Bool }
+    struct Page { let orders: [Order]; let totalNum: Int? }
+    static func page(_ root: [String: Any]) throws -> Page {
+        let values = try orders(root)
+        let data = root["data"] as? [String: Any] ?? [:]
+        let total: Int?
+        if let raw = data["totalNum"] {
+            let value = text(raw)
+            guard value.range(of: #"^[0-9]{1,9}$"#, options: .regularExpression) != nil,
+                  let count = Int(value) else { throw MallWebError.unsupported }
+            total = count
+        } else { total = nil }
+        return Page(orders: values, totalNum: total)
+    }
     static func text(_ value: Any?) -> String {
         if let string = value as? String { return string }
         if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() { return number.stringValue }
@@ -208,10 +260,12 @@ enum JDPCParser {
                   let status = row["statusInfo"] as? [String: Any], let name = status["orderStateName"] as? String,
                   name.utf8.count <= 1000, let goods = row["wareList"] as? [[String: Any]], goods.count <= 200 else { throw MallWebError.unsupported }
             let title = goods.compactMap { $0["name"] as? String }.joined(separator: "、")
-            let excluded = ["4", "69"].contains(text(row["orderType"])) || (!goods.isEmpty && goods.allSatisfy { text($0["wareType"]) == "1" })
-            let terminal = ["取消", "关闭", "退款", "付款", "未支付", "完成", "已签收", "待使用", "服务", "虚拟"].contains(where: name.contains)
-            let pending = !excluded && !terminal && ["待收货", "等待收货", "已发货", "等待揽收", "运输", "派送", "派件", "出库", "待发货", "等待发货", "待取", "待自提", "待签收"].contains(where: name.contains)
-            result.append(Order(id: id, title: title.isEmpty ? "京东订单" : String(title.prefix(200)), pending: pending))
+            // Product names (including 配送) do not determine the business kind.
+            let evidence = [name, text(row["orderTypeName"])].joined(separator: " ")
+            let excluded = JDOrderImportPolicy.excluded(orderType: text(row["orderType"]),
+                allVirtual: !goods.isEmpty && goods.allSatisfy { text($0["wareType"]) == "1" }, evidence: evidence)
+            result.append(Order(id: id, title: title.isEmpty ? "京东订单" : String(title.prefix(200)),
+                submittedAt: JDOrderImportPolicy.submittedDate(row["dateSubmit"]), excluded: excluded))
         }
         return result
     }

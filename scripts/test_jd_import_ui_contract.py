@@ -48,7 +48,9 @@ class JDImportUIContract(unittest.TestCase):
         self.assertIn('httpOnly: cookie.isHTTPOnly', view)
         # Existing PDD capture remains without the added attributes.
         self.assertIn('path: cookie.path, secure: cookie.isSecure, expires: cookie.expiresDate)', view)
-        self.assertIn('Button("取消") { saveTask?.cancel(); browser.destroy(); dismiss() }', view)
+        self.assertIn('Button("取消") { browser.destroy(); dismiss() }', view)
+        self.assertIn('validationTask?.cancel(); validationTask = nil', view)
+        self.assertIn('.sheet(isPresented: $login, onDismiss: { browser?.destroy(); browser = nil })', view)
         clear = view.split('private func clearSession()', 1)[1].split('private func fetch()', 1)[0]
         self.assertIn('MallSession(platform: currentPlatform).clear()', clear)
         self.assertIn('MallBrowserContext.detach(currentPlatform)', clear)

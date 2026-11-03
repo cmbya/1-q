@@ -9,6 +9,7 @@ struct JDInAppClient {
     let cookies: [TaobaoTrialCookie]
     var diagnosticLog: DiagnosticLog = .shared
     var browserStore: WKWebsiteDataStore? = nil
+    var now: () -> Date = { Date() }
 
     func verifySession() async throws {
         if browserStore == nil && MallSession.hasJDPCSession(cookies) { try await JDPCClient(cookies: cookies, diagnosticLog: diagnosticLog).verifySession(); return }
@@ -18,34 +19,46 @@ struct JDInAppClient {
     }
 
     func fetchOrders() async throws -> [MallCandidate] {
-        if browserStore == nil && MallSession.hasJDPCSession(cookies) { return try await JDPCClient(cookies: cookies, diagnosticLog: diagnosticLog).fetchOrders() }
+        try await fetchOrderReport().candidates
+    }
+    func fetchOrderReport() async throws -> JDOrderImportReport {
+        if browserStore == nil && MallSession.hasJDPCSession(cookies) {
+            return try await JDPCClient(cookies: cookies, diagnosticLog: diagnosticLog, now: now).fetchOrderReport()
+        }
         let diagnostics = JDDiagnostics(.jdFetch, log: diagnosticLog)
         do {
-            let values = try await collectOrders(diagnostics: diagnostics)
-            diagnostics.finish(); return values
+            let report = try await collectOrders(diagnostics: diagnostics)
+            report.logSummary(diagnostics)
+            diagnostics.finish(); return report
         } catch { diagnostics.fail(error); throw error }
     }
-    private func collectOrders(diagnostics: JDDiagnostics) async throws -> [MallCandidate] {
+    private func collectOrders(diagnostics: JDDiagnostics) async throws -> JDOrderImportReport {
         let deadline = ProcessInfo.processInfo.systemUptime + 30
+        let policy = JDOrderImportPolicy(now: now())
         let list = try await orders(deadline: deadline, diagnostics: diagnostics)
-        var result: [MallCandidate] = []
-        // One list page, at most eight detail pages; no silent pagination/loop.
-        for order in list.filter(\.importable).prefix(8) {
+        var report = JDOrderImportReport()
+        // Only the page's own observed response/DOM is evidenced. No invented
+        // mobile pagination parameters, signed endpoints, scroll selectors or total claims.
+        report.limited = true
+        let eligible = list.filter { report.consider(submittedAt: $0.submittedAt, excluded: $0.excluded, policy: policy) }
+        for (index, order) in eligible.enumerated() {
             try Task.checkCancellation()
-            let page = try await JDPageBrowser(cookies: cookies, diagnostics: diagnostics, browserStore: browserStore).read(url: order.url, orderID: order.id, operationDeadline: deadline)
+            guard index < JDOrderImportPolicy.maxDetails,
+                  ProcessInfo.processInfo.systemUptime < deadline else { report.limited = true; break }
+            let page: [String: Any]
+            do {
+                page = try await JDPageBrowser(cookies: cookies, diagnostics: diagnostics, browserStore: browserStore).read(url: order.url, orderID: order.id, operationDeadline: deadline)
+            } catch {
+                try Task.checkCancellation()
+                guard JDOrderImportPolicy.isTimeout(error) else { throw error }
+                report.limited = true; break
+            }
             diagnostics.begin(.jdLogisticsParse)
             let parcels = try JDPageParser.parcels(page, orderID: order.id)
             diagnostics.event(.jdResponseAccepted, counts: [.rows: parcels.count])
-            for parcel in parcels {
-                if let existing = result.first(where: { $0.trackingNumber == parcel.number }) {
-                    guard existing.orderID == order.id else { throw MallWebError.identityMismatch }
-                    continue
-                }
-                result.append(MallCandidate(trackingNumber: parcel.number, carrier: parcel.carrier,
-                    title: order.title, orderID: order.id, sourceURL: order.url.absoluteString))
-            }
+            try report.append(parcels, orderID: order.id, title: order.title, url: order.url.absoluteString)
         }
-        return result
+        return report
     }
 
     func query(orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
@@ -87,10 +100,8 @@ enum JDPageParser {
         let title: String
         let status: String
         let url: URL
-        var importable: Bool {
-            !["取消", "关闭", "退款", "付款", "未支付", "完成", "已签收", "待使用", "服务", "外卖", "秒送", "虚拟"].contains(where: status.contains)
-            && ["待收货", "等待收货", "运输", "派送", "派件", "出库", "待发货", "等待发货", "待取", "自提"].contains(where: status.contains)
-        }
+        let submittedAt: Date?
+        let excluded: Bool
     }
     static func failure(_ page: [String: Any]) throws {
         if let error = page["error"] as? String {
@@ -112,7 +123,10 @@ enum JDPageParser {
                   let raw = row["url"] as? String,
                   let safe = Shipment.logisticsEntry(raw, orderID: id), let url = URL(string: safe) else { throw MallWebError.unsupported }
             if result.contains(where: { $0.id == id }) { throw MallWebError.identityMismatch }
-            result.append(Order(id: id, title: String(title.prefix(200)), status: status, url: url))
+            // A missing/unparseable submit date affects import statistics, not session/schema validity.
+            let excluded = row["excluded"] as? Bool == true || JDOrderImportPolicy.excluded(orderType: "", allVirtual: false, evidence: status)
+            result.append(Order(id: id, title: String(title.prefix(200)), status: status, url: url,
+                submittedAt: JDOrderImportPolicy.submittedDate(row["submittedAt"]), excluded: excluded))
         }
         return result
     }
@@ -151,6 +165,7 @@ enum JDPageParser {
     private let cookies: [TaobaoTrialCookie]
     private var web: WKWebView?
     private var captured: [String: Any]?
+    private var emptyCapture: [String: Any]?
     private var failed: Error?
     private var finished = false
     private var expectedOrder: String?
@@ -203,7 +218,7 @@ enum JDPageParser {
                 }
             }
             diagnostics.begin(orderID == nil ? .jdOrdersPage : .jdLogisticsPage)
-            view.load(URLRequest(url: url))
+            view.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
             while ProcessInfo.processInfo.systemUptime < deadline {
                 try Task.checkCancellation()
                 if let failed { throw failed }
@@ -238,6 +253,11 @@ enum JDPageParser {
                 }
                 try await Task.sleep(nanoseconds: 200_000_000)
             }
+            // An evidenced empty structured response is provisional until the normal
+            // capture window ends: later numbered split-package data still takes precedence.
+            try Task.checkCancellation()
+            if finished, let emptyCapture { return emptyCapture }
+            if let operationDeadline, ProcessInfo.processInfo.systemUptime >= operationDeadline { throw MallWebError.timeout }
             throw finished ? MallWebError.unsupported : MallWebError.timeout
         }, onCancel: { [weak self] in
             Task { @MainActor [weak self] in self?.web?.stopLoading() }
@@ -278,13 +298,23 @@ enum JDPageParser {
         if let expectedOrder {
             guard current.path == "/order/deal_wuliu_jdm.shtml",
                   Shipment.logisticsEntry(current.absoluteString, orderID: expectedOrder) != nil,
-                  body["kind"] as? String == "logistics" else {
+                  ["logistics", "logisticsEmpty"].contains(body["kind"] as? String ?? "") else {
                 diagnostics.event(.jdBridgeRejected, reason: .identity); return
             }
         } else {
             guard current.path == MallPlatform.jd.ordersURL.path, body["kind"] as? String == "orders" else {
                 diagnostics.event(.jdBridgeRejected, reason: .identity); return
             }
+        }
+        if body["kind"] as? String == "logisticsEmpty" {
+            guard let expectedOrder, body["orderID"] as? String == expectedOrder,
+                  body["recognized"] as? Bool == true,
+                  let parcels = body["parcels"] as? [[String: Any]], parcels.isEmpty else {
+                diagnostics.event(.jdBridgeRejected, reason: .identity); return
+            }
+            var empty = body; empty["kind"] = "logistics"
+            emptyCapture = empty
+            return
         }
         diagnostics.event(.jdBridgeAccepted, counts: [.bytes: data.count])
         captured = body
@@ -401,8 +431,12 @@ function capture(raw, requestURL, requestBody, responseURL) {
         const status = o.orderStatusInfo || o.statusInfo || {};
         const goods = (o.wareInfoList || o.wareList || [])[0] || {};
         const order = text(o.orderId);
-        const excluded = [4,69].includes(Number(o.orderType)) || (Array.isArray(o.wareList) && o.wareList.length > 0 && o.wareList.every(w => Number(w.wareType) === 1));
-        return {id:order, title:text(goods.wareName || goods.name,200), status:excluded ? '虚拟服务' : text(status.orderStatusName || status.orderStateName,1000), url:safeLink(o.progressInfo && o.progressInfo.progressLink,order)};
+        const statusName = text(status.orderStatusName || status.orderStateName,1000);
+        const allGoods = o.wareInfoList || o.wareList || [];
+        const excluded = [4,69].includes(Number(o.orderType)) || (Array.isArray(allGoods) && allGoods.length > 0 && allGoods.every(w => Number(w.wareType) === 1)) || /外卖|秒送|虚拟|服务/.test(statusName + ' ' + text(o.orderTypeName));
+        // Only dateSubmit is evidenced as an order submission field. Do not guess
+        // createTime/orderTime/deliveryTime or use an event's date to qualify an order.
+        return {id:order, title:text(goods.wareName || goods.name,200), status:statusName, excluded, submittedAt:text(o.dateSubmit,80), url:safeLink(o.progressInfo && o.progressInfo.progressLink,order)};
       });
       emit({kind:'orders',recognized:true,orders}); return;
     }
@@ -420,10 +454,10 @@ function capture(raw, requestURL, requestBody, responseURL) {
     } else if (Object.prototype.hasOwnProperty.call(b,'carriageId') && Array.isArray(b.tracePointVOList)) {
       parcels = [{number:text(b.carriageId,40),carrier:text(b.carrier,100),points:points(b.tracePointVOList,'createTime','wlStateDesc')}];
     } else { diagnostic('schema'); return; }
-    // Missing waybills are not a recognized detail response: allow later page
-    // responses/snapshots instead of ending the browser with an empty identity.
+    // Provisional structured empty evidence, not an immediate successful capture.
+    // Native waits for subsequent numbered responses before counting withoutWaybill.
     parcels = parcels.filter(p => p.number !== '');
-    if (!parcels.length) { diagnostic('schema'); return; }
+    if (!parcels.length) { emit({kind:'logisticsEmpty',recognized:true,orderID,parcels:[]}); return; }
     emit({kind:'logistics',recognized:true,orderID,parcels});
   } catch (_) { diagnostic('json'); }
 }
@@ -473,7 +507,11 @@ window.__parcelJDSnapshot = () => {
       const value = (card.innerText || '').slice(0,1000);
       const explicit = value.match(/订单(?:号|编号)\s*[:：]?\s*(\d{6,32})/);
       if (explicit && explicit[1] !== order) continue;
-      seen.add(order); orders.push({id:order,title:value.slice(0,200),status:value,url});
+      const submitted = value.match(/(?:^|[\n\r])[ \t]*(?:下单时间|下单日期|提交订单时间|订单创建时间)[ \t]*[:：]?[ \t]*([0-9]{4}-[0-9]{2}-[0-9]{2}(?:[ T][0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?)(?=[ \t]*(?:$|[\n\r]))/);
+      // Classify business labels/status lines, not arbitrary product-title text.
+      const business = value.split(/[\n\r]/).filter(line => /^(?:京东外卖|京东秒送|外卖订单|秒送订单|虚拟订单|服务订单)(?:\s|$|[:：])/.test(line.trim())).join(' ');
+      const state = value.split(/[\n\r]/).filter(line => /^(?:已完成|已签收|待收货|待发货|已取消|待付款|运输中|配送中|派送中)$/.test(line.trim())).join(' ');
+      seen.add(order); orders.push({id:order,title:value.slice(0,200),status:state,excluded:/外卖|秒送|虚拟|服务/.test(business),submittedAt:submitted ? submitted[1] : '',url});
       if (orders.length >= 200) break;
     }
     // A positive, page-local empty-state is different from an unknown page.

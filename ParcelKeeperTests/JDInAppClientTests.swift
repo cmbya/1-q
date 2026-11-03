@@ -15,6 +15,26 @@ final class JDInAppClientTests: XCTestCase {
     private func detail(_ rows: [[String: Any]], order: String = "123456789012") -> [String: Any] {
         ["kind": "logistics", "recognized": true, "orderID": order, "parcels": rows]
     }
+    func testCompletedOrdersAndMissingSubmitDatesRemainRecognizedWithoutPendingGate() throws {
+        var completed = row(); completed["status"] = "已签收"; completed["submittedAt"] = "2026-10-15 12:00:00"
+        var missing = row("123456789013"); missing["submittedAt"] = "not a date"
+        let orders = try JDPageParser.orders(list([completed, missing]))
+        XCTAssertNotNil(orders[0].submittedAt); XCTAssertFalse(orders[0].excluded)
+        XCTAssertNil(orders[1].submittedAt)
+        var report = JDOrderImportReport()
+        let policy = JDOrderImportPolicy(now: JDOrderImportPolicy.submittedDate("2026-11-04")!)
+        XCTAssertTrue(report.consider(submittedAt: orders[0].submittedAt, excluded: orders[0].excluded, policy: policy))
+        XCTAssertFalse(report.consider(submittedAt: orders[1].submittedAt, excluded: orders[1].excluded, policy: policy))
+        XCTAssertEqual(report.missingDate, 1)
+    }
+    func testMobileExplicitBusinessExclusionAndNoTitleBasedDeliveryGuess() throws {
+        var physical = row(); physical["title"] = "服务机器人配送商品"; physical["status"] = "已完成"
+        XCTAssertFalse(try JDPageParser.orders(list([physical]))[0].excluded)
+        for label in ["外卖", "京东秒送", "虚拟服务"] {
+            var excluded = row(); excluded["status"] = label
+            XCTAssertTrue(try JDPageParser.orders(list([excluded]))[0].excluded)
+        }
+    }
     func testExplicitEmptyListIsDifferentFromUnknownSchema() throws {
         XCTAssertTrue(try JDPageParser.orders(list([])).isEmpty)
         let malformed: [[String: Any]] = [[:], ["orders": []], ["kind": "orders", "recognized": false, "orders": []]]
