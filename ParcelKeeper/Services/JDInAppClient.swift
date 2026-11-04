@@ -49,30 +49,20 @@ struct JDInAppClient {
         let deadline = ProcessInfo.processInfo.systemUptime + 60
         let policy = JDOrderImportPolicy(now: now())
         var report = JDOrderImportReport()
-        // Real next links still do not prove full mobile history coverage. No invented
-        // pagination API, scrolling selectors, signatures, date fields or total claims.
+        // Collect bounded natural pages in ONE list view before opening separate detail views.
+        // No request replay, fabricated signature or global-total claim.
         report.limited = true
-        var next: URL? = MallPlatform.jd.ordersURL
-        var visited = Set<String>(), seen = Set<String>(), blocked = Set<String>()
+        var seen = Set<String>(), blocked = Set<String>()
         var detailReads = 0, dateReads = 0
         var rotationSafe = true
-        for _ in 0..<JDOrderImportPolicy.maxPages {
-            try Task.checkCancellation()
-            guard let url = next, visited.insert(url.absoluteString).inserted,
-                  ProcessInfo.processInfo.systemUptime < deadline else { break }
-            let page: [String: Any]
-            let list: [JDPageParser.Order]
-            do {
-                page = try await JDPageBrowser(cookies: cookies, diagnostics: diagnostics, browserStore: store).read(url: url, orderID: nil, operationDeadline: deadline)
-                diagnostics.begin(.jdOrdersParse)
-                list = try JDPageParser.orders(page)
-            } catch {
-                if error is CancellationError { throw error }
-                if seen.isEmpty { throw error }
-                report.stoppedReason = JDDiagnostics.reason(error); break
-            }
-            diagnostics.event(.jdResponseAccepted, counts: [.rows: list.count])
-            next = JDPageParser.nextURL(page)
+        let page = try await JDPageBrowser(cookies: cookies, diagnostics: diagnostics, browserStore: store).read(
+            url: MallPlatform.jd.ordersURL, orderID: nil, operationDeadline: min(deadline, ProcessInfo.processInfo.systemUptime + 20), maxOrderPages: JDOrderImportPolicy.maxPages)
+        diagnostics.begin(.jdOrdersParse)
+        let list = try JDPageParser.orders(page)
+        if page["listUnsettled"] as? Bool == true { rotationSafe = false }
+        diagnostics.event(.jdResponseAccepted, counts: [.rows: list.count, .round: page["listPages"] as? Int ?? 1,
+            .hasDate: list.filter { $0.submittedAt != nil }.count, .hasLink: list.filter { $0.dateURL != nil }.count])
+        do {
             for var order in list where seen.insert(order.id).inserted {
                 try Task.checkCancellation()
                 // Supplement BEFORE consider(): unknown dates must not be filtered first.
@@ -82,10 +72,12 @@ struct JDInAppClient {
                     do {
                         let datePage = try await JDPageBrowser(cookies: cookies, diagnostics: diagnostics, browserStore: store).read(url: dateURL, orderID: order.id, dateOnly: true, operationDeadline: deadline)
                         order.submittedAt = try JDPageParser.submission(datePage, orderID: order.id)
+                        diagnostics.event(.jdResponseAccepted, counts: [.hasDate: order.submittedAt == nil ? 0 : 1])
                     } catch {
                         if error is CancellationError { throw error }
                         rotationSafe = false
                         let reason = JDDiagnostics.reason(error)
+                        diagnostics.event(.jdResponseRejected, reason: reason)
                         if reason == .authentication || reason == .verification { report.stoppedReason = reason }
                         if reason == .identity { blocked.insert(order.id) }
                     }
@@ -123,7 +115,6 @@ struct JDInAppClient {
                     // Preserve independently accepted orders on isolated parse/network failures.
                 }
             }
-            if report.stoppedReason != nil { break }
         }
         return (report, rotationSafe)
     }
@@ -189,8 +180,8 @@ enum JDPageParser {
               MallPlatform.jd.allowed(url), url.host == "trade.m.jd.com", url.path.hasPrefix("/order/"),
               url.path.lowercased().contains("detail"), parts.fragment == nil else { return nil }
         let items = parts.queryItems ?? []
-        let ids = items.filter { ["orderId", "orderid", "dealId"].contains($0.name) }.compactMap(\.value)
-        guard ids == [orderID], Shipment.validPlatformOrderID(orderID, platform: "jd"),
+        let ids = items.filter { ["orderId", "orderid", "dealId", "deal_id"].contains($0.name) }.map(\.value)
+        guard ids == [Optional(orderID)], Shipment.validPlatformOrderID(orderID, platform: "jd"),
               !items.contains(where: { $0.name.range(of: "cookie|token|pt_|thor|password|pin", options: [.regularExpression, .caseInsensitive]) != nil }) else { return nil }
         return url
     }
@@ -304,7 +295,7 @@ enum JDPageParser {
         self.cookies = cookies; self.diagnostics = diagnostics; self.browserStore = browserStore
     }
 
-    func read(url: URL, orderID: String?, dateOnly: Bool = false, operationDeadline: TimeInterval? = nil) async throws -> [String: Any] {
+    func read(url: URL, orderID: String?, dateOnly: Bool = false, operationDeadline: TimeInterval? = nil, maxOrderPages: Int = 1) async throws -> [String: Any] {
         diagnostics.begin(.credential)
         try Task.checkCancellation()
         guard MallPlatform.jd.allowed(url), cookies.allSatisfy({ MallSession.valid($0, platform: .jd) }),
@@ -331,7 +322,8 @@ enum JDPageParser {
         defer { cleanup() }
         return try await withTaskCancellationHandler(operation: {
             // The budget includes cookie injection, navigation, XHR capture and DOM.
-            let deadline = min(ProcessInfo.processInfo.systemUptime + 12, operationDeadline ?? .greatestFiniteMagnitude)
+            let pageBudget: TimeInterval = orderID == nil && maxOrderPages > 1 ? 20 : 12
+            let deadline = min(ProcessInfo.processInfo.systemUptime + pageBudget, operationDeadline ?? .greatestFiniteMagnitude)
             diagnostics.begin(.jdCookieInjection)
             let existing = await view.configuration.websiteDataStore.httpCookieStore.allCookies()
             let live = existing.map { TaobaoTrialCookie(name: $0.name, value: $0.value, domain: $0.domain, path: $0.path, secure: $0.isSecure, expires: $0.expiresDate, httpOnly: $0.isHTTPOnly) }.filter { MallSession.valid($0, platform: .jd) }
@@ -356,6 +348,9 @@ enum JDPageParser {
             diagnostics.begin(orderID == nil ? .jdOrdersPage : .jdLogisticsPage)
             view.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
             var lastSnapshot: [String: Any]?
+            var lastPagingAttempt: TimeInterval = 0
+            var attemptedPage = 0
+            var listUnsettled = false
             // Leave callback headroom inside the hard deadline; do not begin a DOM
             // evaluation at the last instant and discard already captured split data.
             while ProcessInfo.processInfo.systemUptime + 0.3 < deadline {
@@ -363,7 +358,15 @@ enum JDPageParser {
                 if let failed { throw failed }
                 // Do not return the first numbered response. Keep the full bounded
                 // capture window for later split parcels and still-running requests.
-                if let captured { try JDPageParser.failure(captured) }
+                if let captured {
+                    try JDPageParser.failure(captured)
+                    if dateOnly {
+                        guard let orderID, let current = view.url,
+                              JDPageParser.dateURL(current.absoluteString, orderID: orderID) != nil else { throw MallWebError.identityMismatch }
+                        try await validateLiveAccount(view)
+                        return captured
+                    }
+                }
                 if finished {
                     guard let current = view.url, MallPlatform.jd.allowed(current) else { throw MallWebError.unsupported }
                     if let failure = MallWebParser.pageFailure(url: current, text: "") { throw failure }
@@ -390,6 +393,32 @@ enum JDPageParser {
                         loggedDOM = true
                         try JDPageParser.failure(snapshot)
                         lastSnapshot = snapshot
+                        if orderID == nil, let page = captured, snapshot["pendingRequests"] as? Int == 0 {
+                            let count = page["listPages"] as? Int ?? 1
+                            let now = ProcessInfo.processInfo.systemUptime
+                            let canAdvance = page["listCanAdvance"] as? Bool == true
+                            if maxOrderPages <= 1 || !canAdvance || count >= maxOrderPages { break }
+                            if attemptedPage == count {
+                                if now - lastPagingAttempt >= 3 { listUnsettled = true; break }
+                            } else {
+                                attemptedPage = count
+                                lastPagingAttempt = now
+                                // Give React time to commit the response before invoking its scroll handler.
+                                try await Task.sleep(nanoseconds: 350_000_000)
+                                try Task.checkCancellation()
+                                guard ProcessInfo.processInfo.systemUptime + 0.3 < deadline else { listUnsettled = true; break }
+                                var delivered: Bool? = nil
+                                view.evaluateJavaScript("window.__parcelJDNextPage ? window.__parcelJDNextPage() : false") { value, _ in
+                                    delivered = value as? Bool ?? false
+                                }
+                                while delivered == nil {
+                                    try Task.checkCancellation()
+                                    guard ProcessInfo.processInfo.systemUptime < deadline else { throw MallWebError.timeout }
+                                    try await Task.sleep(nanoseconds: 20_000_000)
+                                }
+                                if delivered != true { listUnsettled = true; break }
+                            }
+                        }
                         if dateOnly, snapshot["recognized"] as? Bool == true {
                             guard let orderID, snapshot["orderID"] as? String == orderID,
                                   let current = view.url, JDPageParser.dateURL(current.absoluteString, orderID: orderID) != nil else { throw MallWebError.identityMismatch }
@@ -411,13 +440,17 @@ enum JDPageParser {
             } else {
                 guard current.host == "trade.m.jd.com", current.path == MallPlatform.jd.ordersURL.path else { throw MallWebError.identityMismatch }
             }
-            guard (lastSnapshot?["pendingRequests"] as? Int ?? 0) == 0 else { throw MallWebError.timeout }
+            let pending = lastSnapshot?["pendingRequests"] as? Int ?? 0
+            guard pending == 0 || (orderID == nil && captured != nil) else { throw MallWebError.timeout }
+            if orderID == nil, pending > 0 { listUnsettled = true }
             try await validateLiveAccount(view)
             try Task.checkCancellation()
             if let captured {
                 try JDPageParser.failure(captured)
                 if orderID == nil, let lastSnapshot, lastSnapshot["kind"] as? String == "orders" {
-                    return try JDPageParser.supplement(captured, snapshot: lastSnapshot)
+                    var result = try JDPageParser.supplement(captured, snapshot: lastSnapshot)
+                    result["listUnsettled"] = listUnsettled
+                    return result
                 }
                 return captured
             }
@@ -472,7 +505,18 @@ enum JDPageParser {
             return
         }
         if let expectedOrder {
-            guard !dateOnly else { return }
+            if dateOnly {
+                guard JDPageParser.dateURL(current.absoluteString, orderID: expectedOrder) != nil,
+                      body["kind"] as? String == "orderDate" else {
+                    diagnostics.event(.jdBridgeRejected, reason: .identity); return
+                }
+                do {
+                    _ = try JDPageParser.submission(body, orderID: expectedOrder)
+                    diagnostics.event(.jdBridgeAccepted, counts: [.bytes: data.count])
+                    captured = body
+                } catch { failed = error }
+                return
+            }
             guard current.path == "/order/deal_wuliu_jdm.shtml",
                   Shipment.logisticsEntry(current.absoluteString, orderID: expectedOrder) != nil,
                   ["logistics", "logisticsEmpty"].contains(body["kind"] as? String ?? "") else {
@@ -571,7 +615,7 @@ function safeLink(raw, order) {
 }
 function evidenceURL(raw, order) {
   try {
-    const u = new URL(raw,location.href), keys=['orderId','orderid','dealId'];
+    const u = new URL(raw,location.href), keys=['orderId','orderid','dealId','deal_id'];
     const values=keys.flatMap(key=>u.searchParams.getAll(key));
     if (!allowed(u.href) || u.hostname !== 'trade.m.jd.com' || !u.pathname.startsWith('/order/') || !/detail/i.test(u.pathname) || ['/order/deal_wuliu_jdm.shtml','/order/orderlist_jdm.shtml'].includes(u.pathname) || u.hash || values.length !== 1 || values[0] !== order || !id(order)) return '';
     if (u.href.length > 2048 || Array.from(u.searchParams.keys()).some(k=>/cookie|token|pt_|thor|password|pin/i.test(k))) return '';
@@ -596,6 +640,49 @@ function submission(value) {
   return rows.length === 1 ? rows[0] : '';
 }
 let pendingRequests=0;
+let listPages=0, listContext='', listCanAdvance=false, pagingBusy=false;
+const listOrders=new Map();
+function observeList(orders, raw, requestBody, total) {
+  let request;
+  try { const u=new URL(raw,location.href), p=new URLSearchParams(typeof requestBody==='string'?requestBody:''); request=JSON.parse(u.searchParams.get('body')||p.get('body')||'{}'); } catch (_) { return listPages ? null : {kind:'orders',recognized:true,orders}; }
+  const page=request.page, size=request.pageSize;
+  if (!Number.isInteger(page) || !Number.isInteger(size) || size<1 || size>200 || page<1 || page>10) return listPages ? null : {kind:'orders',recognized:true,orders};
+  // Retain a closed business context only in memory; never forward request bodies or credentials.
+  const context=JSON.stringify(['curTab','orderListTag','bizType','source','tenantCode'].map(k=>[k,request[k]===undefined?null:request[k]]));
+  if (!listPages && page!==1) return null;
+  if (listPages && (context!==listContext || page!==listPages+1)) return null;
+  if (new Set(orders.map(o=>o.id)).size!==orders.length || orders.some(o=>!id(o.id))) { emit({error:'identity'}); return null; }
+  const added=orders.filter(o=>!listOrders.has(o.id)).length;
+  if (listOrders.size+added>200) { listCanAdvance=false; return null; }
+  for (const order of orders) {
+    const old=listOrders.get(order.id);
+    if (old && old.dateURL && order.dateURL && old.dateURL!==order.dateURL) { emit({error:'identity'}); return null; }
+    listOrders.set(order.id,old ? {...old,...order,dateURL:order.dateURL||old.dateURL,submittedAt:order.submittedAt||old.submittedAt} : order);
+  }
+  listContext=context; listPages=page;
+  // The current mobile client uses totalNum as this page's end gate, not a global total.
+  listCanAdvance=orders.length>0 && added>0 && Number.isInteger(total) && total>=size && page<10;
+  return {kind:'orders',recognized:true,orders:Array.from(listOrders.values()),listPages,listCanAdvance};
+}
+window.__parcelJDNextPage=function(){
+  if (!listCanAdvance || pagingBusy || pendingRequests || listPages>=10) return false;
+  const pages=Array.from(document.querySelectorAll('.taro_page')).filter(e=>e.id.split('?')[0]===location.pathname && e.getClientRects().length>0 && getComputedStyle(e).display!=='none');
+  if (pages.length!==1) return false;
+  const el=pages[0], max=el.scrollHeight-el.clientHeight;
+  if (max<=400) return false;
+  pagingBusy=true;
+  // Taro's reach-bottom lock resets only on a scroll observing distance >400.
+  el.scrollTop=Math.max(0,max-450);
+  requestAnimationFrame(()=>{
+    if(el.scrollHeight-el.scrollTop-el.clientHeight<=400){pagingBusy=false;return;}
+    el.dispatchEvent(new Event('scroll'));
+    requestAnimationFrame(()=>{
+      el.scrollTop=el.scrollHeight-el.clientHeight;
+      requestAnimationFrame(()=>{ if(el.scrollHeight-el.scrollTop-el.clientHeight<400) el.dispatchEvent(new Event('scroll')); pagingBusy=false; });
+    });
+  });
+  return true;
+};
 function emit(value) { try { if (JSON.stringify(value).length <= MAX) window.webkit.messageHandlers.jdCapture.postMessage(value); } catch (_) {} }
 function diagnostic(label, status) {
   if (!['schema','json','business','network','networkResponse'].includes(label)) return;
@@ -608,7 +695,7 @@ function knownRequest(raw, body) {
     if (!allowed(raw)) return false;
     const u = new URL(raw,location.href);
     const fn = u.searchParams.get('functionId') || new URLSearchParams(typeof body === 'string' ? body : '').get('functionId');
-    return ['order_list_m','get_logistics_list_by_order_m','pcorder_center_list','pcdetail_traceMultiPackage'].includes(fn);
+    return ['order_list_m','order_detail_m','get_logistics_list_by_order_m','pcorder_center_list','pcdetail_traceMultiPackage'].includes(fn);
   } catch (_) { return false; }
 }
 function requestOrder(raw, body) {
@@ -650,13 +737,28 @@ function capture(raw, requestURL, requestBody, responseURL) {
   try {
     const u = new URL(requestURL, location.href);
     const fn = u.searchParams.get('functionId') || new URLSearchParams(typeof requestBody === 'string' ? requestBody : '').get('functionId');
-    if (!['order_list_m','get_logistics_list_by_order_m','pcorder_center_list','pcdetail_traceMultiPackage'].includes(fn)) return;
+    if (!['order_list_m','order_detail_m','get_logistics_list_by_order_m','pcorder_center_list','pcdetail_traceMultiPackage'].includes(fn)) return;
     const root = JSON.parse(raw);
     if (root.code === 3 || root.code === '3') { emit({error:'authentication'}); return; }
     if (root.code === 403 || root.code === '403' || root.code === 429 || root.code === '429') { emit({error:'verification'}); return; }
     if (root.code !== undefined && ![0,'0',200,'200'].includes(root.code)) { diagnostic('business'); return; }
     if (root.success === false) { diagnostic('business'); return; }
     const b = root.body || root.data || root;
+    if (fn === 'order_detail_m') {
+      // Public JD OrderInfo consumes body.orderCommonVo.orderId and summaryList
+      // title/content. Values remain server-owned: only an explicit submission label qualifies.
+      const requestID = requestOrder(requestURL,requestBody);
+      const returned = text(b.orderCommonVo && b.orderCommonVo.orderId,40);
+      const here = new URL(location.href);
+      if (!requestID || returned !== requestID || !evidenceURL(here.href,requestID)) { emit({error:'identity'}); return; }
+      if (!Array.isArray(b.summaryList) || b.summaryList.length > 100) { diagnostic('schema'); return; }
+      const dates = b.summaryList.filter(row => typeof row.title==='string' && /^(?:下单时间|下单日期|提交订单时间|订单创建时间)[:：]?$/.test(row.title.trim()));
+      if (dates.length !== 1 || typeof dates[0].content!=='string' || dates[0].content.length>100) { diagnostic('schema'); return; }
+      const content = dates[0].content.replace(/<br\s*\/?\s*>/gi,' ').trim();
+      const submittedAt = submission('下单时间：'+content);
+      if (!submittedAt) { diagnostic('schema'); return; }
+      emit({kind:'orderDate',recognized:true,orderID:requestID,submittedAt}); return;
+    }
     if (fn === 'order_list_m' || fn === 'pcorder_center_list') {
       if (!Array.isArray(b.orderList) || b.orderList.length > 200) { diagnostic('schema'); return; }
       const orders = b.orderList.map(o => {
@@ -668,9 +770,10 @@ function capture(raw, requestURL, requestBody, responseURL) {
         const excluded = [4,69].includes(Number(o.orderType)) || (Array.isArray(allGoods) && allGoods.length > 0 && allGoods.every(w => Number(w.wareType) === 1)) || /外卖|秒送|虚拟订单|虚拟业务|虚拟服务|服务订单|生活服务/.test(statusName + ' ' + text(o.orderTypeName));
         // Only dateSubmit is evidenced as an order submission field. Do not guess
         // createTime/orderTime/deliveryTime or use an event's date to qualify an order.
-        return {id:order, title:text(goods.wareName || goods.name,200), status:statusName, excluded, submittedAt:text(o.dateSubmit,80), url:safeLink(o.progressInfo && o.progressInfo.progressLink,order)};
+        return {id:order, title:text(goods.wareName || goods.name,200), status:statusName, excluded, submittedAt:text(o.dateSubmit,80), url:safeLink(o.progressInfo && o.progressInfo.progressLink,order), dateURL:evidenceURL(o.orderDetailLink && o.orderDetailLink.url,order)};
       });
-      emit({kind:'orders',recognized:true,orders}); return;
+      const page=fn==='order_list_m' ? observeList(orders,requestURL,requestBody,b.totalNum) : {kind:'orders',recognized:true,orders};
+      if(page) emit(page); return;
     }
     const requestID = requestOrder(requestURL,requestBody);
     const returnedID = text(b.orderId || b.orderID || root.orderId);
@@ -772,7 +875,7 @@ window.__parcelJDSnapshot = () => {
     const empty = /暂无订单|暂时没有订单|您还没有相关订单/.test(body);
     return {kind:'orders',recognized:orders.length > 0 || empty,orders,nextURL:nextLink(),pendingRequests};
   }
-  const dateOrder=['orderId','orderid','dealId'].flatMap(key=>here.searchParams.getAll(key));
+  const dateOrder=['orderId','orderid','dealId','deal_id'].flatMap(key=>here.searchParams.getAll(key));
   if (dateOrder.length === 1 && evidenceURL(here.href,dateOrder[0])) {
     // Read only an explicit date label, never trace text. Page URL alone is not identity evidence.
     const ids=Array.from(body.matchAll(/(?:^|[\n\r])[ \t]*订单(?:号|编号)[ \t]*[:：]?[ \t]*(\d{6,32})(?=[ \t]*(?:$|[\n\r]))/g),m=>m[1]);

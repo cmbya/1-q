@@ -107,6 +107,17 @@ final class JDInAppClientTests: XCTestCase {
         raw["submittedAt"] = "2026-10-16 12:00:00"
         XCTAssertThrowsError(try JDPageParser.supplement(list([raw]), snapshot: list([dom])))
     }
+    func testRealMobileStructuredDetailEntrySurvivesWithoutDOMAnchors() throws {
+        let rawURL = "https://trade.m.jd.com/order/n_detail_jdm.shtml?deal_id=\(orderID)"
+        var wire = row(); wire["dateURL"] = rawURL
+        let value = try XCTUnwrap(JDPageParser.orders(list([wire])).first)
+        XCTAssertEqual(value.dateURL?.absoluteString, rawURL)
+        let supplemented = try JDPageParser.supplement(list([wire]), snapshot: ["recognized":false])
+        XCTAssertEqual(try JDPageParser.orders(supplemented).first?.dateURL?.absoluteString, rawURL)
+        for unsafe in [rawURL + "&deal_id=\(orderID)", rawURL + "&deal_id", rawURL + "&orderId=\(orderID)", rawURL + "&pt_key=SECRET", rawURL.replacingOccurrences(of: orderID, with: "987654321000")] {
+            XCTAssertNil(JDPageParser.dateURL(unsafe, orderID: orderID))
+        }
+    }
     func testDateDetailRequiresExactIdentityAndExplicitEnvelope() throws {
         let page: [String: Any] = ["kind":"orderDate", "recognized":true, "orderID":orderID, "submittedAt":"2026-10-15 12:00:00"]
         XCTAssertNotNil(try JDPageParser.submission(page, orderID: orderID))
