@@ -19,8 +19,8 @@ class TminiContract(unittest.TestCase):
         for needle in ['case automatic, platformOnly, uapi, tmini', 'if mode == .tmini { return .tmini }', 'shipment.refreshChannel == "tmini"', '(try? Self.route(before, mode: mode)) == .backend', 'case .tmini:', 'tminiClient.query(trackingNumber: number)', 'blockedPlatforms.insert("tmini")', 'validateConfiguration']:
             self.assertIn(needle, s)
         branch = s.split('private static func route(')[1].split('func setRefreshChannel')[0]
-        self.assertLess(branch.index('if mode == .tmini { return .tmini }'), branch.index('throw RetiredTrackingChannel.backend'))
-        self.assertLess(branch.index('if mode == .uapi { return .uapi }'), branch.index('throw RetiredTrackingChannel.backend'))
+        self.assertLess(branch.index('if mode == .tmini { return .tmini }'), branch.index('return .backend'))
+        self.assertLess(branch.index('if mode == .uapi { return .uapi }'), branch.index('return .backend'))
         branch = s.split('case .tmini:')[-1].split('case .uapi:')[0]
         self.assertNotIn('phones.', branch)
     def test_ui_and_intents(self):

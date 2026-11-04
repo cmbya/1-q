@@ -236,7 +236,7 @@ final class KDYZMTests: XCTestCase {
         XCTAssertThrowsError(try KDYZMMerger.apply(s, origin: "https://example.com", to: &d))
         XCTAssertEqual(d.shipments, original)
     }
-    func testBackendBindingWithoutTraceDoesNotClaimCollectedOrJDSource() {
+    func testBackendBindingWithoutTraceDoesNotClaimCollectionOrSuccessfulSource() {
         var s = Shipment(trackingNumber: "YT1234567890123", carrierName: "圆通", carrierCode: "yto", originPlatform: "douyin", platformOrderID: "order")
         s.backendBinding = .init(origin: "https://example.com", accountID: "a", orderID: "o", shipmentID: "s")
         XCTAssertTrue(ShipmentRefreshPresentation.source(s).contains("后台关联"))
@@ -256,3 +256,4 @@ final class KDYZMTests: XCTestCase {
         XCTAssertThrowsError(try failed.success(for: binding, expectedID: "wrong"))
     }
 }
+

@@ -29,7 +29,7 @@ final class MallRoutingTests: XCTestCase {
         }
         return item
     }
-    private func order(_ platform: String) -> String { platform == "jd" ? "123456789012" : "261102-123456789012345" }
+    private func order(_ platform: String) -> String { "261102-123456789012345" }
     func testOldBackupDecodesAndPlatformOrderRoundTripsIndependentlyOfTaobao() throws {
         let item = try add(nil)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: storage.exportBackup()) as? [String: Any])
@@ -38,7 +38,7 @@ final class MallRoutingTests: XCTestCase {
         let old = try JSONDecoder().decode(PickupDataset.self, from: JSONSerialization.data(withJSONObject: object))
         XCTAssertNil(old.shipments[0].platformOrderID)
         XCTAssertEqual(old.shipments[0].id, item.id)
-        for platform in ["jd", "pdd"] {
+        for platform in ["pdd"] {
             var bound = item
             bound.originPlatform = platform; bound.platformOrderID = order(platform)
             bound.taobaoOrderID = "987654321"
@@ -62,23 +62,10 @@ final class MallRoutingTests: XCTestCase {
             XCTAssertEqual(saved.reminderDate, item.reminderDate)
         }
     }
-    func testRetiredJDNeverDispatchesOrChargesAndPreservesHistory() async throws {
-        for (index, mode) in [TrackingRefreshMode.automatic, .platformOnly].enumerated() {
-            let item = try add("jd", order: order("jd"), index: index)
-            let mall = Mall(); let uapi = TrackingRefreshTests.Client()
-            do {
-                _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
-                XCTFail("Retired channel must not run")
-            } catch { XCTAssertEqual(error as? RetiredTrackingChannel, .jd) }
-            XCTAssertTrue(mall.calls.isEmpty); XCTAssertEqual(uapi.calls, 0)
-            let saved = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == item.id })
-            XCTAssertEqual(saved.logisticsInfo, item.logisticsInfo)
-            XCTAssertEqual(saved.note, item.note)
-        }
-    }
+
     func testExplicitUAPIOverrideAndModeRemainAvailable() async throws {
         for (index, mode) in [TrackingRefreshMode.automatic, .uapi].enumerated() {
-            let item = try add("jd", order: order("jd"), channel: index == 0 ? "uapi" : nil, index: index)
+            let item = try add("unsupported_market", channel: index == 0 ? "uapi" : nil, index: index)
             let mall = Mall(); let uapi = TrackingRefreshTests.Client()
             uapi.result = UAPITrackingResult(trackingNumber: item.trackingNumber, carrierName: "", carrierCode: "", status: nil, logisticsInfo: "新轨迹", logisticsTime: nil, queryInfo: "新详情", queriedAt: Date())
             _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
@@ -92,7 +79,7 @@ final class MallRoutingTests: XCTestCase {
         XCTAssertEqual(mall.calls.count, 1); XCTAssertEqual(uapi.calls, 0)
     }
     func testUnknownPlatformMissingAndMalformedBindingNeverChargeOrDispatchMall() async throws {
-        for (index, pair) in [("douyin", "123456"), ("jd", ""), ("jd", " 123456"), ("jd", "123-456"), ("pdd", "123456"), ("pdd", "261102-123456\n")].enumerated() {
+        for (index, pair) in [("douyin", "123456"), ("pdd", "123456"), ("pdd", "261102-123456\n")].enumerated() {
             let item = try add(pair.0, order: pair.1, index: index)
             let mall = Mall(); let uapi = TrackingRefreshTests.Client()
             do { _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id); XCTFail() } catch {}
@@ -127,7 +114,7 @@ final class MallRoutingTests: XCTestCase {
         XCTAssertEqual(uapi.calls, 0)
     }
     func testPlatformBlockingIsScopedAndReportCountsSources() async throws {
-        for (index, platform) in ["jd", "jd", "pdd"].enumerated() {
+        for (index, platform) in ["pdd", "pdd", "pdd"].enumerated() {
             let item = try add(platform, order: order(platform), index: index)
             try storage.transaction { data in
                 let i = data.shipments.firstIndex { $0.id == item.id }!
@@ -138,7 +125,7 @@ final class MallRoutingTests: XCTestCase {
         let uapi = TrackingRefreshTests.Client()
         let report = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refreshPending()
         XCTAssertEqual(mall.calls.map { $0.0 }, ["pdd"])
-        XCTAssertEqual(report.jdCount, 0); XCTAssertEqual(report.pddCount, 1)
+        XCTAssertEqual(report.pddCount, 1)
         XCTAssertEqual(report.taobaoCount, 0); XCTAssertEqual(report.uapiCount, 0)
         XCTAssertEqual(report.failed, 1); XCTAssertEqual(report.skipped, 2)
     }
@@ -150,7 +137,7 @@ final class MallRoutingTests: XCTestCase {
                 try self.storage.transaction { data in
                     let i = data.shipments.firstIndex { $0.id == item.id }!
                     if changeChannel { data.shipments[i].refreshChannel = "uapi" }
-                    else { data.shipments[i].originPlatform = "jd" }
+                    else { data.shipments[i].originPlatform = "unsupported_market" }
                 }
             }
             do { _ = try await TrackingRefreshService(store: storage, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refresh(id: item.id); XCTFail() }
@@ -207,7 +194,7 @@ final class MallRoutingTests: XCTestCase {
         XCTAssertEqual(try storage.exportBackup(), before)
     }
     @MainActor func testImportBindsUniqueRecordWithoutChangingUserFieldsOrOverride() throws {
-        for (index, platform) in ["pdd", "jd"].enumerated() {
+        for (index, platform) in ["pdd"].enumerated() {
             let item = try add(nil, channel: "uapi", index: index)
             let records = try storage.snapshot().records
             let store = ShipmentStore(storageProvider: { self.storage })
@@ -227,7 +214,7 @@ final class MallRoutingTests: XCTestCase {
         let candidate = MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: order("pdd"))
         XCTAssertThrowsError(try store.importMall(candidate, platform: "pdd"))
         XCTAssertThrowsError(try store.importMall(candidate, platform: "douyin"))
-        for (platform, invalid) in [("jd", "123-456"), ("jd", "123456\n"), ("pdd", "123456"), ("pdd", " 261102-123456")] {
+        for (platform, invalid) in [("pdd", "123456"), ("pdd", " 261102-123456")] {
             XCTAssertThrowsError(try store.importMall(MallCandidate(trackingNumber: item.trackingNumber, carrier: "", title: "", orderID: invalid), platform: platform))
         }
         let lease = try storage.acquireTrackingQuery(id: item.id)

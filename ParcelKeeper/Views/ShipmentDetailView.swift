@@ -225,16 +225,13 @@ struct ShipmentDetailView: View {
     private func resolvedChannelName(_ shipment: Shipment) -> String {
         do {
             switch try TrackingRefreshService.resolvedChannel(shipment) {
-            case "kdyzm": return "后台（已停用）"
+            case "kdyzm": return "取件助手后台"
             case "taobao": return "淘宝"
             case "pdd": return "拼多多"
-            case "jd": return "京东（已停用）"
             case "uapi": return "UAPI"
             case "tmini": return "Tmini"
             default: return "不可用"
             }
-        } catch let retired as RetiredTrackingChannel {
-            return retired == .jd ? "京东（已停用）" : "后台（已停用）"
         } catch { return "不可用" }
     }
 

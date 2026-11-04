@@ -11,11 +11,6 @@ enum DiagnosticEvent: String, Codable, CaseIterable {
     case syncStarted, syncFinished, syncFailed
     case stageStarted, stageFinished, stageFailed
     case trackingStarted, trackingFinished, trackingFailed
-    case trackingRouteJD
-    case jdOperationStarted, jdOperationFinished, jdOperationFailed
-    case jdNavigation, jdNavigationRejected, jdNavigationFailed, jdProcessTerminated
-    case jdBridgeAccepted, jdBridgeRejected, jdPageDOMResult, jdScriptFailed
-    case jdNetworkResponse, jdResponseRejected, jdResponseAccepted
     case trackingRouteBackend, trackingRouteTaobao, trackingRoutePDD, trackingRouteUAPI, trackingRouteTmini
 }
 
@@ -33,8 +28,6 @@ enum DiagnosticStage: String, Codable, CaseIterable {
     case preflight, localRead, credential, snapshot, decoding, validation, association
     case lease, request, response, merge, save, localWrite, presentation
     case jobCreate, jobResume, jobWait, jobPoll, cleanup
-    case jdLogin, jdVerify, jdFetch, jdQuery, jdSessionSave
-    case jdCookieInjection, jdOrdersPage, jdOrdersParse, jdLogisticsPage, jdLogisticsParse, jdPageDOM
 }
 
 /// Safe rejection classification without retaining arbitrary underlying errors.
@@ -79,17 +72,12 @@ enum DiagnosticMetric: String, Codable, CaseIterable {
     case rows, candidates, responses, bytes, httpStatus, errorCode, round
     case hasProgress, hasType, hasLink, hasDate, accepted, rejected
     case hasBackendBinding, explicitPaidChannel, forcedPaidMode
-    case jdMissingDate, jdBusinessExcluded, jdOutsideWindow, jdDetailFailed, jdWithoutWaybill, jdLimited
-    case jdRequestKind, jdRootType, jdBodyType, jdListType, jdSchemaStep, jdBusinessSource
 
     // Numeric fields are measurements only, never identifiers. Even accidental
     // large numbers cannot preserve phone/order/tracking identifiers verbatim.
     func bounded(_ value: Int) -> Int {
         switch self {
-        case .jdRequestKind: return min(5, max(0, value))
-        case .jdRootType, .jdBodyType, .jdListType, .jdSchemaStep: return min(6, max(0, value))
-        case .jdBusinessSource: return min(4, max(0, value))
-        case .hasBackendBinding, .explicitPaidChannel, .forcedPaidMode, .jdLimited: return min(1, max(0, value))
+        case .hasBackendBinding, .explicitPaidChannel, .forcedPaidMode: return min(1, max(0, value))
         case .hasProgress, .hasType, .hasLink, .hasDate: return min(200, max(0, value))
         case .httpStatus: return min(599, max(0, value))
         case .errorCode: return min(99_999, max(-99_999, value))
@@ -274,7 +262,7 @@ final class DiagnosticLog {
             let data = try Data(contentsOf: fileURL)
             guard data.count <= Self.maximumBytes else { status = .corrupt; return }
             let decoded: Archive
-            do { decoded = try JSONDecoder().decode(Archive.self, from: data) }
+            do { decoded = try JSONDecoder().decode(Archive.self, from: Self.compatibleArchive(data)) }
             catch { status = .corrupt; return }
             guard decoded.schema == 1, decoded.entries.count <= Self.maximumEntries,
                   decoded.entries.allSatisfy({ entry in
@@ -293,6 +281,21 @@ final class DiagnosticLog {
                 issue = nil
             } else { status = .ioFailure; issue = .read }
         }
+    }
+
+    /// Drop retired connector entries while retaining the strict allowlist for all other data.
+    /// Unknown non-retired payloads still fail decoding and are never exported.
+    private static func compatibleArchive(_ data: Data) throws -> Data {
+        guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let entries = root["entries"] as? [[String: Any]], entries.count <= maximumEntries else { return data }
+        let kept = entries.filter { entry in
+            let event = entry["event"] as? String ?? ""
+            let stage = entry["stage"] as? String ?? ""
+            return !event.hasPrefix("jd") && event != "trackingRouteJD" && !stage.hasPrefix("jd")
+        }
+        guard kept.count != entries.count else { return data }
+        root["entries"] = kept
+        return try JSONSerialization.data(withJSONObject: root)
     }
 
     private func prepareDirectory(_ url: URL) throws {
@@ -360,3 +363,4 @@ final class DiagnosticLog {
                                      entryCount: archive.entries.count, text: lines.joined(separator: "\n"))
     }
 }
+

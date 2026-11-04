@@ -30,7 +30,7 @@ struct TaobaoTrialCookie: Codable {
     let path: String
     let secure: Bool
     let expires: Date?
-    // Optional for old stored sessions. New JD sessions preserve native attributes.
+    // Optional for old stored sessions. Stored sessions preserve native attributes.
     var httpOnly: Bool? = nil
     func webCookie() -> HTTPCookie? {
         var properties: [HTTPCookiePropertyKey: Any] = [
@@ -260,3 +260,4 @@ final class TaobaoTrialClient {
         return report
     }
 }
+

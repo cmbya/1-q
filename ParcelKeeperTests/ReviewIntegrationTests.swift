@@ -2,15 +2,14 @@ import XCTest
 @testable import ParcelKeeper
 
 final class ReviewIntegrationTests: XCTestCase {
-    func testPublicJDEntryRoundTripsWithoutArbitraryTokens() throws {
-        let raw = "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=123456789&dealState=7&orderType=0&skuid=1&shopid=2&token=private"
-        let safe = try XCTUnwrap(Shipment.logisticsEntry(raw, orderID: "123456789"))
-        XCTAssertFalse(safe.contains("token")); XCTAssertTrue(safe.contains("dealState=7"))
-        var shipment = Shipment(trackingNumber: "JD123456789", carrierName: "京东", carrierCode: "jd")
-        shipment.platformLogisticsURL = safe
+    func testLegacyMetadataRoundTripsWithoutExecutableConnector() throws {
+        var shipment = Shipment(trackingNumber: "YT123456789", carrierName: "圆通", carrierCode: "yto")
+        shipment.platformLogisticsURL = "https://example.invalid/legacy-order"
+        shipment.originPlatform = "removed_market"
         let restored = try JSONDecoder().decode(Shipment.self, from: JSONEncoder().encode(shipment))
-        XCTAssertEqual(restored.platformLogisticsURL, safe)
-        XCTAssertNil(Shipment.logisticsEntry(raw, orderID: "987654321"))
-        XCTAssertNil(Shipment.logisticsEntry(raw.replacingOccurrences(of: "trade.m.jd.com", with: "evil.test"), orderID: "123456789"))
+        XCTAssertEqual(restored, shipment)
+        XCTAssertThrowsError(try TrackingRefreshService.resolvedChannel(restored))
+        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(restored, mode: .uapi), "uapi")
+        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(restored, mode: .tmini), "tmini")
     }
 }

@@ -13,10 +13,10 @@ final class RefreshOutcomeTests: XCTestCase {
         var shipment = Shipment(trackingNumber: "YT1234567890123", carrierName: "圆通", carrierCode: "yto", originPlatform: "taobao")
         XCTAssertEqual(try TrackingRefreshService.resolvedChannel(shipment), "taobao")
         shipment.backendBinding = .init(origin: "https://example.com", accountID: "a", orderID: "o", shipmentID: "s")
-        XCTAssertThrowsError(try TrackingRefreshService.resolvedChannel(shipment))
+        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(shipment), "kdyzm")
         shipment.refreshChannel = "uapi"
         XCTAssertEqual(try TrackingRefreshService.resolvedChannel(shipment), "uapi")
-        XCTAssertThrowsError(try TrackingRefreshService.resolvedChannel(shipment, mode: .platformOnly))
+        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(shipment, mode: .platformOnly), "kdyzm")
         XCTAssertEqual(try TrackingRefreshService.resolvedChannel(shipment, mode: .tmini), "tmini")
     }
     func testSafeDiagnosticReasonsAndBoundedRouteFlags() {
@@ -28,7 +28,7 @@ final class RefreshOutcomeTests: XCTestCase {
         let shipment = Shipment(trackingNumber: "YT1234567890123", carrierName: "圆通", carrierCode: "yto")
         XCTAssertEqual(TrackingRefreshService.routingDiagnostics(shipment, mode: .tmini)[.forcedPaidMode], 1)
     }
-    func testRetiredBackendBatchSkipsWithoutCreatingJobOrPaidFallback() async throws {
+    func testQueuedBackendBatchRetainsJobWithoutPaidFallback() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
@@ -48,13 +48,11 @@ final class RefreshOutcomeTests: XCTestCase {
         service.backendConnection = KDYZMConnection(keys: keys, client: client)
         service.backendClient = client
         let report = try await service.refreshPending()
-        XCTAssertEqual(report.queued.count, 0)
-        XCTAssertEqual(report.skipped, 1)
+        XCTAssertEqual(report.queued.count, 1)
         XCTAssertEqual(report.failed, 0)
         XCTAssertEqual(report.succeeded, 0)
         XCTAssertEqual(paid.calls, 0)
-        XCTAssertNil(try store.snapshot().shipments.first?.backendRefreshJobID)
-        XCTAssertEqual(transport.requests.count, 0)
+        XCTAssertEqual(try store.snapshot().shipments.first?.backendRefreshJobID, "j")
+        XCTAssertEqual(transport.requests.count, 1)
     }
 }
-

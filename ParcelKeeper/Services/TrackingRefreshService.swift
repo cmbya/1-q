@@ -1,16 +1,6 @@
 import Foundation
 import WidgetKit
 
-enum RetiredTrackingChannel: Error, LocalizedError, Equatable {
-    case jd, backend
-    var errorDescription: String? {
-        switch self {
-        case .jd: return "京东查询已停用，请手动选择 Tmini 或 UAPI。"
-        case .backend: return "取件助手后台已停用，请手动选择 Tmini 或 UAPI。"
-        }
-    }
-}
-
 enum TrackingRefreshMode: String, Codable, CaseIterable {
     case automatic, platformOnly, uapi, tmini
 }
@@ -25,7 +15,6 @@ struct TrackingRefreshReport {
     var tminiCount = 0
     var cachedCount = 0
     var backendCount = 0
-    var jdCount = 0
     var pddCount = 0
     struct Failure {
         let trackingNumber: String
@@ -39,7 +28,7 @@ struct TrackingRefreshReport {
     var stoppedReason: String?
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
-        value += " 按渠道尝试票数：淘宝\(taobaoCount)票，拼多多\(pddCount)票，UAPI\(uapiCount)票，Tmini\(tminiCount)票。"
+        value += " 按渠道尝试票数：取件助手后台\(backendCount)票，淘宝\(taobaoCount)票，拼多多\(pddCount)票，UAPI\(uapiCount)票，Tmini\(tminiCount)票。"
         value += " 包含本地预检失败，不代表实际网络请求或收费次数；付费以接口实际计费为准。"
         if cachedCount > 0 { value += " 本地缓存命中 \(cachedCount) 票（未联网、未新增收费）。" }
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
@@ -79,7 +68,6 @@ struct TrackingRefreshService {
         var source: String { self == .backend ? "kdyzm" : (self == .tmini ? "tmini" : (platform ?? "uapi")) }
     }
     private static func platformRoute(_ shipment: Shipment) throws -> Route {
-        if shipment.originPlatform == "jd" { throw RetiredTrackingChannel.jd }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         throw TaobaoTrackingError.unsupported
@@ -90,12 +78,11 @@ struct TrackingRefreshService {
     private static func route(_ shipment: Shipment, mode: TrackingRefreshMode) throws -> Route {
         if mode == .uapi { return .uapi }
         if mode == .tmini { return .tmini }
-        if shipment.backendBinding != nil, mode == .platformOnly || shipment.refreshChannel == nil { throw RetiredTrackingChannel.backend }
+        if shipment.backendBinding != nil, mode == .platformOnly || shipment.refreshChannel == nil { return .backend }
         if mode == .platformOnly { return try platformRoute(shipment) }
         if shipment.refreshChannel == "uapi" { return .uapi }
         if shipment.refreshChannel == "tmini" { return .tmini }
         guard shipment.refreshChannel == nil else { throw TaobaoTrackingError.unsupported }
-        if shipment.originPlatform == "jd" { throw RetiredTrackingChannel.jd }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         // Missing origin is the legacy/manual UAPI path, not a platform fallback.
@@ -118,13 +105,11 @@ struct TrackingRefreshService {
         case .taobao: return .trackingRouteTaobao
         case .tmini: return .trackingRouteTmini
         case .uapi: return .trackingRouteUAPI
-        case .mall(let platform): return platform == "jd" ? .trackingRouteJD : .trackingRoutePDD
+        case .mall: return .trackingRoutePDD
         }
     }
     static func diagnosticReason(_ error: Error) -> DiagnosticReason {
-        if error is RetiredTrackingChannel { return .unsupported }
         if error is CancellationError { return .cancelled }
-        if let failure = error as? JDLoggedError { return failure.reason }
         if let failure = error as? KDYZMTerminalResultError { return failure.originalReason }
         if let failure = error as? TrackingTimeRejection { return failure.reason }
         if let failure = error as? KDYZMSyncFailure {
@@ -233,16 +218,14 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
-        if let retired = error as? RetiredTrackingChannel { return retired.localizedDescription }
-        if let failure = error as? JDLoggedError { return failure.localizedDescription }
         if let failure = error as? TrackingTimeRejection { return failure.localizedDescription }
         if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
         if let failure = error as? TminiError { return failure.localizedDescription }
         if let terminal = error as? KDYZMTerminalResultError { return terminal.localizedDescription }
         if let backend = error as? KDYZMError { return backend.localizedDescription }
         if let direct = error as? MallDirectError { return direct.localizedDescription }
-        if let platform, platform == "jd" || platform == "pdd" {
-            let name = platform == "jd" ? "京东" : "拼多多"
+        if let platform, platform == "pdd" {
+            let name = "拼多多"
             let detail: String
             if let failure = error as? MallWebError {
                 switch failure {
@@ -306,62 +289,6 @@ struct TrackingRefreshService {
     }
     static func isPending(_ shipment: Shipment) -> Bool {
         shipment.status != .delivered && shipment.status != .archived
-    }
-    /// Apply only this confirmation's JD preview. No network, fallback or persistent query cache.
-    @discardableResult
-    func applyMallPreview(id: UUID, candidate: MallCandidate, expectedGeneration: UUID) throws -> Bool {
-        let diagnostics = JDDiagnostics(.localRead, log: diagnosticLog)
-        do {
-            try Task.checkCancellation()
-            let result = try candidate.jdPreviewResult()
-            diagnostics.begin(.lease)
-            let lease = try store.acquireTrackingQuery(id: id)
-            defer { lease.release() }
-            let delivered = try MallSession.withGeneration(platform: .jd, expected: expectedGeneration) {
-                try Task.checkCancellation()
-                diagnostics.begin(.merge)
-                return try store.transaction { data -> Bool in
-                    guard let index = data.shipments.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
-                    var current = data.shipments[index]
-                    guard current.originPlatform == "jd", current.taobaoOrderID == nil,
-                          current.platformOrderID == candidate.orderID,
-                          current.trackingNumber == candidate.trackingNumber,
-                          let detail = candidate.previewDetail,
-                          detail.acceptsCarrier(name: current.carrierName, code: current.carrierCode) else { throw MallWebError.identityMismatch }
-                    if let entry = current.platformLogisticsURL, Shipment.logisticsEntry(entry, orderID: candidate.orderID) == nil { throw MallWebError.identityMismatch }
-                    guard current.backendBinding == nil, current.refreshChannel == nil else {
-                        throw PickupStorageError.invalidData("保留既有后台绑定或指定刷新渠道，未覆盖平台物流；未请求付费接口。")
-                    }
-                    guard current.status != .archived else { throw ShipmentShortcutError.statusConflict }
-                    if current.status == .delivered, let state = result.status, state != .delivered { throw ShipmentShortcutError.statusConflict }
-                    let linkedIndices = data.records.indices.filter { data.records[$0].shipmentID == id }
-                    guard linkedIndices.count == 1, let linked = linkedIndices.first else { throw PickupStorageError.invalidData("运单关联记录缺失或已改变") }
-                    let oldStatus = current.status
-                    current.logisticsInfo = result.logisticsInfo
-                    current.logisticsTime = result.logisticsTime
-                    current.queryInfo = TrackingQueryHistory.merged(result.queryInfo, current.queryInfo, current.backendPreviousHistory)
-                    current.lastQueriedAt = result.queriedAt
-                    if !result.carrierName.isEmpty { current.carrierName = result.carrierName }
-                    current.logisticsSource = "jd"
-                    current.lastRefreshError = nil
-                    if let state = result.status { current.status = state }
-                    current.updatedAt = Date()
-                    if current.status != oldStatus, current.status == .delivered {
-                        data.records[linked].isCompleted = true
-                    }
-                    data.records[linked].updatedAt = current.updatedAt
-                    data.shipments[index] = current
-                    diagnostics.begin(.save)
-                    return oldStatus != .delivered && current.status == .delivered
-                }
-            }
-            reloadWidgets()
-            diagnostics.finish()
-            return delivered
-        } catch {
-            diagnostics.fail(error)
-            throw error
-        }
     }
     func refresh(trackingNumber: String, phone: String? = nil, mode: TrackingRefreshMode = .automatic) async throws -> Bool {
         let number = try ShipmentShortcutParser.number(trackingNumber)
@@ -473,7 +400,7 @@ struct TrackingRefreshService {
                   Shipment.validPlatformOrderID(orderID, platform: platform),
                   let mallPlatform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
             mallGeneration = (mallPlatform, MallSession.generation(for: mallPlatform))
-            result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number, sourceURL: before.platformLogisticsURL.flatMap { Shipment.logisticsEntry($0, orderID: orderID) })
+            result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number)
         case .tmini:
             tminiConfiguration = try tminiClient.configurationToken()
             result = try await tminiClient.query(trackingNumber: number)
@@ -580,11 +507,8 @@ struct TrackingRefreshService {
             }
             // Recheck before each request; another process may have completed/deleted it.
             guard let latest = try store.snapshot().shipments.first(where: { $0.id == id }), Self.isPending(latest) else { continue }
-            do { _ = try Self.route(latest, mode: mode) }
-            catch is RetiredTrackingChannel { report.skipped += 1; continue }
-            catch { }
             let route = try? Self.route(latest, mode: mode)
-            if mode == .platformOnly, latest.originPlatform != "jd", route == nil { report.skipped += 1; continue }
+            if mode == .platformOnly, route == nil { report.skipped += 1; continue }
             if route == .tmini, blockedPlatforms.contains("tmini") { report.skipped += 1; continue }
             if let platform = route?.platform, blockedPlatforms.contains(platform) { report.skipped += 1; continue }
             do {
@@ -601,7 +525,6 @@ struct TrackingRefreshService {
                 if route == .uapi { report.uapiCount += 1 }
                 if route == .tmini { report.tminiCount += 1 }
                 if route == .backend { report.backendCount += 1 }
-                if route == .mall("jd") { report.jdCount += 1 }
                 if route == .mall("pdd") { report.pddCount += 1 }
                 if try await refresh(id: id, expectedTrackingNumber: CarrierDetector.sanitize(latest.trackingNumber), pendingOnly: true, mode: mode, cacheFeedback: { cached in
                     if cached {
@@ -636,10 +559,7 @@ struct TrackingRefreshService {
                     blockedPlatforms.insert(platform)
                     report.stoppedReason = reason
                 }
-                if let failure = error as? JDLoggedError, failure.stopsBatch, let platform = route?.platform {
-                    blockedPlatforms.insert(platform)
-                    report.stoppedReason = reason
-                }
+
                 let number = (try? ShipmentShortcutParser.number(latest.trackingNumber)) ?? "无效运单号"
                 report.failures.append(.init(trackingNumber: number, reason: reason))
                 if error is PaidTrackingCacheError {
@@ -657,4 +577,3 @@ struct TrackingRefreshService {
         return report
     }
 }
-

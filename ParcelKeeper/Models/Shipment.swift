@@ -53,9 +53,9 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var taobaoOrderID: String?
     var logisticsSource: String?
     var lastRefreshError: String?
-    // JD/PDD order identity is separate from both the waybill and Taobao binding.
+    // Platform order identity is separate from both the waybill and Taobao binding.
     var platformOrderID: String?
-    // Validated platform logistics entry; never contains credentials.
+    // Inert legacy metadata retained for backup round trips; never opened or requested.
     var platformLogisticsURL: String?
     var backendBinding: KDYZMBinding?
     var backendEvents: [KDYZMLogisticsEvent]?
@@ -64,32 +64,16 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var backendRefreshGeneration: UUID?
     var backendPreviousHistory: String?
 
-    /// No schema change: an unqueried JD number-only import is not evidence of movement.
+    /// An imported number without a successful query does not prove movement.
     var statusDisplayText: String {
         let hasTrace = !(logisticsInfo?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        return originPlatform == "jd" && status == .inTransit && lastQueriedAt == nil && !hasTrace
+        return originPlatform != nil && status == .inTransit && lastQueriedAt == nil && !hasTrace
             ? "物流状态未核实" : status.rawValue
-    }
-
-    /// Store only public logistics parameters, never arbitrary platform tokens.
-    static func logisticsEntry(_ raw: String, orderID: String) -> String? {
-        guard raw.utf8.count <= 8192, let c = URLComponents(string: raw), c.scheme == "https",
-              c.host == "trade.m.jd.com", c.path == "/order/deal_wuliu_jdm.shtml",
-              c.user == nil, c.password == nil, c.fragment == nil, c.port == nil || c.port == 443,
-              let items = c.queryItems, items.filter({ $0.name == "dealId" }).map(\.value) == [Optional(orderID)] else { return nil }
-        let allowed = Set(["from", "dealState", "dealId", "orderType", "skuid", "shopid", "source"])
-        let kept = items.filter { allowed.contains($0.name) }
-        guard Set(kept.map(\.name)).count == kept.count,
-              kept.allSatisfy({ ($0.value ?? "").utf8.count <= 256 }) else { return nil }
-        var safe = URLComponents(string: "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml")!
-        safe.queryItems = kept
-        return safe.url?.absoluteString
     }
 
     static func validPlatformOrderID(_ orderID: String, platform: String) -> Bool {
         let pattern: String
         switch platform {
-        case "jd": pattern = #"\A[0-9]{6,32}\z"#
         case "pdd": pattern = #"\A[0-9]{6}-[0-9]{6,32}\z"#
         default: return false
         }
@@ -170,3 +154,4 @@ enum ShipmentStatus: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 }
+

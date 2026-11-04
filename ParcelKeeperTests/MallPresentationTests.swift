@@ -3,7 +3,7 @@ import XCTest
 
 final class MallPresentationTests: XCTestCase {
     func testMallNamesDoNotChangeCarrierOrActualSource() {
-        for (raw, title) in [("jd", "京东"), ("pdd", "拼多多")] {
+        for (raw, title) in [("pdd", "拼多多")] {
             var shipment = Shipment(trackingNumber: "SF123456789", carrierName: "顺丰速运", carrierCode: "sf")
             shipment.originPlatform = raw
             shipment.logisticsSource = "uapi"
@@ -18,14 +18,27 @@ final class MallPresentationTests: XCTestCase {
 
     func testMissingActualSourceDoesNotPretendImportWasSuccessfulRefresh() {
         var shipment = Shipment(trackingNumber: "JD123456789", carrierName: "京东物流", carrierCode: "jd")
-        shipment.originPlatform = "jd"
+        shipment.originPlatform = "pdd"
         XCTAssertEqual(ShipmentRefreshPresentation.source(shipment), "未关联")
         XCTAssertTrue(ShipmentRefreshPresentation.details(shipment).contains("暂无物流轨迹"))
     }
 
+    func testImportedNumberNeedsTraceOrQueryBeforeClaimingMovement() {
+        for origin in ["pdd", "taobao", "removed_market"] {
+            var shipment = Shipment(trackingNumber: "SF123456789", carrierName: "顺丰速运", carrierCode: "sf", originPlatform: origin)
+            shipment.status = .inTransit
+            XCTAssertEqual(shipment.statusDisplayText, "物流状态未核实")
+            shipment.logisticsInfo = "运输中"
+            XCTAssertEqual(shipment.statusDisplayText, shipment.status.rawValue)
+            shipment.logisticsInfo = nil
+            shipment.lastQueriedAt = Date()
+            XCTAssertEqual(shipment.statusDisplayText, shipment.status.rawValue)
+        }
+    }
+
     func testImportAndRefreshCountsAreReportedSeparately() {
-        let report = MallImportSummary(added: 2, bound: 1, importFailed: 1, refreshed: 1, refreshFailed: 1, skipped: 1, previewApplied: 2, noTrace: 3)
-        XCTAssertEqual(report.message, "导入：新增2票，已有记录补关联1票，失败1票。\n物流：保存本次预览2票，平台刷新1票，失败1票，无有效轨迹3票，保留／未请求1票。未调用UAPI或Tmini。")
+        let report = MallImportSummary(added: 2, bound: 1, importFailed: 1, refreshed: 1, refreshFailed: 1, skipped: 1)
+        XCTAssertEqual(report.message, "导入：新增2票，已有记录补关联1票，失败1票。\n物流：平台刷新1票，失败1票，保留／未请求1票。未调用UAPI或Tmini。")
     }
 
     func testSavedShortcutDefaultAndChannelsRemainUnchanged() {
@@ -34,3 +47,4 @@ final class MallPresentationTests: XCTestCase {
         XCTAssertEqual(QueryChannelChoice.uapi.mode, .uapi)
     }
 }
+

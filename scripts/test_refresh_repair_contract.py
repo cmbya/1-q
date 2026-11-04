@@ -7,9 +7,9 @@ SERVICES = ROOT / "ParcelKeeper/Services"
 
 
 class RefreshRepairContract(unittest.TestCase):
-    def test_jd_logged_failure_blocks_only_its_platform(self):
+    def test_mall_failure_blocks_only_its_platform(self):
         text = (SERVICES / "TrackingRefreshService.swift").read_text()
-        self.assertIn("error as? JDLoggedError, failure.stopsBatch", text)
+        self.assertIn("error as? MallWebError, failure.stopsBatch", text)
         self.assertIn('blockedPlatforms.insert(platform)', text)
 
     def test_mall_generation_wraps_small_commit_not_network(self):
@@ -67,3 +67,4 @@ class RefreshRepairContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

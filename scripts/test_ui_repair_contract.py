@@ -9,9 +9,10 @@ def read(path):
     return (ROOT / path).read_text()
 
 class UIRepairContracts(unittest.TestCase):
-    def test_jd_channel_has_a_label(self):
+    def test_default_channel_is_visible_and_backend_remains_available(self):
         detail = read('ParcelKeeper/Views/ShipmentDetailView.swift')
-        self.assertRegex(detail, r'case "jd": return "京东[^"\n]*"')
+        self.assertIn('Picker("默认渠道"', detail)
+        self.assertIn('case "kdyzm": return "取件助手后台"', detail)
 
     def test_reminder_sync_is_read_only_and_observes_commits_and_unlock(self):
         detail = read('ParcelKeeper/Views/ShipmentDetailView.swift')
@@ -88,3 +89,4 @@ class UIRepairContracts(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+

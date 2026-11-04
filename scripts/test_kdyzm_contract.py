@@ -35,17 +35,15 @@ class KDYZMContract(unittest.TestCase):
         merge = (ROOT/'ParcelKeeper/Services/KDYZMSync.swift').read_text()
         store = (ROOT/'ParcelKeeper/Services/ShipmentStore.swift').read_text()
         refresh = (ROOT/'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
-        # Backend sync stays platform-agnostic; independent JD import is now explicitly authorized.
+        # Backend sync accepts authorized records independently of direct mall connectors.
         self.assertNotIn('platform == "jd"', merge)
-        self.assertIn('platform == "pdd" || platform == "jd"', store)
+        self.assertIn('guard platform == "pdd",', store)
         self.assertIn('originPlatform: order.platform', merge)
         self.assertIn('local.originPlatform = order.platform', merge)
         self.assertIn('case backend', refresh)
         self.assertIn('backendCount', refresh)
         route = refresh.split('private static func route(')[1].split('func setRefreshChannel')[0]
-        self.assertIn('throw RetiredTrackingChannel.backend', route)
-        self.assertNotIn('return .backend', route)
-        self.assertNotIn('KDYZMSettingsView()', (ROOT/'ParcelKeeper/Views/SettingsView.swift').read_text())
+        self.assertLess(route.index('return .backend'), route.index('return try platformRoute(shipment)'))
         self.assertIn('if route == .backend { report.backendCount += 1 }', refresh)
         self.assertIn('$0.platform == before.originPlatform && $0.platformOrderId == before.platformOrderID', merge)
         self.assertIn('remoteNumbers[number]?.count == 1', merge)

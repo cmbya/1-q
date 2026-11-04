@@ -85,7 +85,7 @@ final class DiagnosticChainTests: XCTestCase {
             f.transport.onSend = { lease = try f.store.acquireTrackingQuery(id: f.shipment.id) }
             defer { lease?.release() }
             let reason: DiagnosticReason = state == "gone" ? .jobGone : (state == "cooldown" ? .queued : .unavailable)
-            do { _ = try await f.backend().refresh(before: f.shipment); XCTFail() }
+            do { _ = try await f.outer().refresh(id: f.shipment.id); XCTFail() }
             catch {
                 let failure = try XCTUnwrap(error as? KDYZMTerminalResultError)
                 XCTAssertEqual(failure.originalReason, reason)
@@ -94,19 +94,18 @@ final class DiagnosticChainTests: XCTestCase {
             }
             let text = f.log.snapshotForTesting().text
             XCTAssertTrue(text.contains("reason=busy stage=cleanup"))
-            XCTAssertTrue(text.components(separatedBy: "\n").contains { $0.contains("reason=\(reason.rawValue)") && !$0.contains("stage=preflight") })
+            XCTAssertTrue(text.components(separatedBy: "\n").contains { $0.contains("trackingFailed") && $0.contains("reason=\(reason.rawValue)") && !$0.contains("stage=preflight") })
             XCTAssertEqual(f.transport.requests.map(\.httpMethod), ["GET"])
             XCTAssertEqual(try f.store.snapshot().shipments[0].backendRefreshJobID, "j")
         }
     }
-    func testRetiredBackendBatchPreservesPendingJobWithoutPolling() async throws {
+    func testCooldownSuccessfulCleanupStillCountsAsQueued() async throws {
         let f = try Fixture(pending: true); defer { try? FileManager.default.removeItem(at: f.root) }
         f.respond(state: "cooldown")
         let report = try await f.outer().refreshPending()
-        XCTAssertEqual(report.queued.count, 0); XCTAssertEqual(report.failed, 0)
-        XCTAssertEqual(report.skipped, 1)
-        XCTAssertEqual(try f.store.snapshot().shipments[0].backendRefreshJobID, "j")
-        XCTAssertTrue(f.transport.requests.isEmpty)
+        XCTAssertEqual(report.queued.count, 1); XCTAssertEqual(report.failed, 0)
+        XCTAssertNil(try f.store.snapshot().shipments[0].backendRefreshJobID)
+        XCTAssertEqual(f.transport.requests.map(\.httpMethod), ["GET"])
     }
     func testPollingGoneCleanupFailureKeepsPollStageWithoutRepost() async throws {
         let f = try Fixture(pending: true); defer { try? FileManager.default.removeItem(at: f.root) }
@@ -128,28 +127,24 @@ final class DiagnosticChainTests: XCTestCase {
         }
         XCTAssertEqual(f.transport.requests.map(\.httpMethod), ["GET", "GET"])
     }
-    func testRetiredBackendDoesNotEnterCooldownCleanup() async throws {
+    func testCooldownCleanupFailureIsExplicitBatchFailureNotSilentQueue() async throws {
         let f = try Fixture(pending: true); defer { try? FileManager.default.removeItem(at: f.root) }
         f.respond(state: "cooldown")
         var lease: SharedPickupStore.TrackingQueryLease?
         defer { lease?.release() }
         f.transport.onSend = { lease = try f.store.acquireTrackingQuery(id: f.shipment.id) }
         let report = try await f.outer().refreshPending()
-        XCTAssertEqual(report.queued.count, 0); XCTAssertEqual(report.failed, 0)
-        XCTAssertEqual(report.skipped, 1)
-        XCTAssertEqual(try f.store.snapshot().shipments[0].backendRefreshJobID, "j")
-        XCTAssertTrue(f.transport.requests.isEmpty)
+        XCTAssertEqual(report.queued.count, 0); XCTAssertEqual(report.failed, 1)
+        XCTAssertTrue(report.failures[0].reason.contains("任务清理未完成"))
+        XCTAssertEqual(f.transport.requests.map(\.httpMethod), ["GET"])
     }
-    func testRetiredBackendReportsUnsupportedWithoutNetwork() async throws {
+    func testOuterOrdinaryBackendFailureKeepsInnerStage() async throws {
         let f = try Fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
         f.transport.status = 500
-        let before = try f.store.exportBackup()
-        do { _ = try await f.outer().refresh(id: f.shipment.id); XCTFail() }
-        catch { XCTAssertEqual(error as? RetiredTrackingChannel, .backend) }
+        do { _ = try await f.outer().refresh(id: f.shipment.id); XCTFail() } catch {}
         let text = f.log.snapshotForTesting().text
-        XCTAssertTrue(text.components(separatedBy: "\n").contains { $0.contains("trackingFailed") && $0.contains("reason=unsupported") })
-        XCTAssertTrue(f.transport.requests.isEmpty)
-        XCTAssertEqual(try f.store.exportBackup(), before)
+        XCTAssertTrue(text.components(separatedBy: "\n").contains { $0.contains("trackingFailed") && $0.contains("stage=jobCreate") })
+        XCTAssertEqual(f.transport.requests.count, 1)
     }
     @MainActor func testSyncStaleMergerIsAssociationNotLease() async throws {
         let f = try Fixture(); defer { try? FileManager.default.removeItem(at: f.root) }
@@ -216,4 +211,3 @@ final class DiagnosticChainTests: XCTestCase {
         XCTAssertEqual(DiagnosticLog(directory: root).snapshotForTesting().status, .ready)
     }
 }
-
