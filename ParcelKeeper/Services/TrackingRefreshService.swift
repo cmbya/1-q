@@ -1,6 +1,16 @@
 import Foundation
 import WidgetKit
 
+enum RetiredTrackingChannel: Error, LocalizedError, Equatable {
+    case jd, backend
+    var errorDescription: String? {
+        switch self {
+        case .jd: return "京东查询已停用，请手动选择 Tmini 或 UAPI。"
+        case .backend: return "取件助手后台已停用，请手动选择 Tmini 或 UAPI。"
+        }
+    }
+}
+
 enum TrackingRefreshMode: String, Codable, CaseIterable {
     case automatic, platformOnly, uapi, tmini
 }
@@ -29,7 +39,7 @@ struct TrackingRefreshReport {
     var stoppedReason: String?
     var message: String {
         var value = "更新成功 \(succeeded) 票，失败 \(failed) 票，新增签收 \(newlyDelivered) 票，未处理 \(remaining) 票。"
-        value += " 按渠道尝试票数：取件助手后台\(backendCount)票，淘宝\(taobaoCount)票，京东\(jdCount)票，拼多多\(pddCount)票，UAPI\(uapiCount)票，Tmini\(tminiCount)票。"
+        value += " 按渠道尝试票数：淘宝\(taobaoCount)票，拼多多\(pddCount)票，UAPI\(uapiCount)票，Tmini\(tminiCount)票。"
         value += " 包含本地预检失败，不代表实际网络请求或收费次数；付费以接口实际计费为准。"
         if cachedCount > 0 { value += " 本地缓存命中 \(cachedCount) 票（未联网、未新增收费）。" }
         if skipped > 0 { value += " 跳过 \(skipped) 票。" }
@@ -69,7 +79,7 @@ struct TrackingRefreshService {
         var source: String { self == .backend ? "kdyzm" : (self == .tmini ? "tmini" : (platform ?? "uapi")) }
     }
     private static func platformRoute(_ shipment: Shipment) throws -> Route {
-        if shipment.originPlatform == "jd" { return .mall("jd") }
+        if shipment.originPlatform == "jd" { throw RetiredTrackingChannel.jd }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         throw TaobaoTrackingError.unsupported
@@ -80,12 +90,12 @@ struct TrackingRefreshService {
     private static func route(_ shipment: Shipment, mode: TrackingRefreshMode) throws -> Route {
         if mode == .uapi { return .uapi }
         if mode == .tmini { return .tmini }
-        if shipment.backendBinding != nil, mode == .platformOnly || shipment.refreshChannel == nil { return .backend }
+        if shipment.backendBinding != nil, mode == .platformOnly || shipment.refreshChannel == nil { throw RetiredTrackingChannel.backend }
         if mode == .platformOnly { return try platformRoute(shipment) }
         if shipment.refreshChannel == "uapi" { return .uapi }
         if shipment.refreshChannel == "tmini" { return .tmini }
         guard shipment.refreshChannel == nil else { throw TaobaoTrackingError.unsupported }
-        if shipment.originPlatform == "jd" { return .mall("jd") }
+        if shipment.originPlatform == "jd" { throw RetiredTrackingChannel.jd }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         // Missing origin is the legacy/manual UAPI path, not a platform fallback.
@@ -112,6 +122,7 @@ struct TrackingRefreshService {
         }
     }
     static func diagnosticReason(_ error: Error) -> DiagnosticReason {
+        if error is RetiredTrackingChannel { return .unsupported }
         if error is CancellationError { return .cancelled }
         if let failure = error as? JDLoggedError { return failure.reason }
         if let failure = error as? KDYZMTerminalResultError { return failure.originalReason }
@@ -222,6 +233,7 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let retired = error as? RetiredTrackingChannel { return retired.localizedDescription }
         if let failure = error as? JDLoggedError { return failure.localizedDescription }
         if let failure = error as? TrackingTimeRejection { return failure.localizedDescription }
         if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
@@ -568,6 +580,9 @@ struct TrackingRefreshService {
             }
             // Recheck before each request; another process may have completed/deleted it.
             guard let latest = try store.snapshot().shipments.first(where: { $0.id == id }), Self.isPending(latest) else { continue }
+            do { _ = try Self.route(latest, mode: mode) }
+            catch is RetiredTrackingChannel { report.skipped += 1; continue }
+            catch { }
             let route = try? Self.route(latest, mode: mode)
             if mode == .platformOnly, latest.originPlatform != "jd", route == nil { report.skipped += 1; continue }
             if route == .tmini, blockedPlatforms.contains("tmini") { report.skipped += 1; continue }
@@ -642,3 +657,4 @@ struct TrackingRefreshService {
         return report
     }
 }
+

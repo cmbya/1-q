@@ -43,10 +43,13 @@ class KDYZMContract(unittest.TestCase):
         self.assertIn('case backend', refresh)
         self.assertIn('backendCount', refresh)
         route = refresh.split('private static func route(')[1].split('func setRefreshChannel')[0]
-        self.assertLess(route.index('return .backend'), route.index('return try platformRoute(shipment)'))
+        self.assertIn('throw RetiredTrackingChannel.backend', route)
+        self.assertNotIn('return .backend', route)
+        self.assertNotIn('KDYZMSettingsView()', (ROOT/'ParcelKeeper/Views/SettingsView.swift').read_text())
         self.assertIn('if route == .backend { report.backendCount += 1 }', refresh)
         self.assertIn('$0.platform == before.originPlatform && $0.platformOrderId == before.platformOrderID', merge)
         self.assertIn('remoteNumbers[number]?.count == 1', merge)
         self.assertIn('local.taobaoOrderID == nil', merge)
         self.assertNotIn('后台（京东）', (ROOT/'ParcelKeeper/Intents/TrackingRefreshIntents.swift').read_text())
 if __name__ == '__main__': unittest.main()
+

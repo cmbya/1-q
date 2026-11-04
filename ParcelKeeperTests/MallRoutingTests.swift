@@ -62,32 +62,19 @@ final class MallRoutingTests: XCTestCase {
             XCTAssertEqual(saved.reminderDate, item.reminderDate)
         }
     }
-    func testJDDispatchesInAppConnectorWithoutPaidFallback() async throws {
+    func testRetiredJDNeverDispatchesOrChargesAndPreservesHistory() async throws {
         for (index, mode) in [TrackingRefreshMode.automatic, .platformOnly].enumerated() {
             let item = try add("jd", order: order("jd"), index: index)
             let mall = Mall(); let uapi = TrackingRefreshTests.Client()
-            _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
-            XCTAssertEqual(mall.calls.count, 1)
-            XCTAssertEqual(mall.calls.first?.0, "jd")
-            XCTAssertEqual(uapi.calls, 0)
+            do {
+                _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id, mode: mode)
+                XCTFail("Retired channel must not run")
+            } catch { XCTAssertEqual(error as? RetiredTrackingChannel, .jd) }
+            XCTAssertTrue(mall.calls.isEmpty); XCTAssertEqual(uapi.calls, 0)
             let saved = try XCTUnwrap(storage.snapshot().shipments.first { $0.id == item.id })
-            XCTAssertEqual(saved.logisticsSource, "jd")
+            XCTAssertEqual(saved.logisticsInfo, item.logisticsInfo)
             XCTAssertEqual(saved.note, item.note)
         }
-    }
-    func testJDInAppFailurePreservesHistoryAndNeverCharges() async throws {
-        let item = try add("jd", order: order("jd"))
-        let mall = Mall(); mall.failure = MallWebError.authentication
-        let uapi = TrackingRefreshTests.Client()
-        do {
-            _ = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refresh(id: item.id)
-            XCTFail("Expected authentication")
-        } catch { XCTAssertEqual(error as? MallWebError, .authentication) }
-        var saved = try XCTUnwrap(storage.snapshot().shipments.first)
-        XCTAssertTrue(try XCTUnwrap(saved.lastRefreshError).contains("京东"))
-        saved.lastRefreshError = nil
-        XCTAssertEqual(saved, item)
-        XCTAssertEqual(uapi.calls, 0)
     }
     func testExplicitUAPIOverrideAndModeRemainAvailable() async throws {
         for (index, mode) in [TrackingRefreshMode.automatic, .uapi].enumerated() {
@@ -150,10 +137,10 @@ final class MallRoutingTests: XCTestCase {
         let mall = Mall(); mall.failure = MallWebError.authentication
         let uapi = TrackingRefreshTests.Client()
         let report = try await TrackingRefreshService(store: storage, client: uapi, reloadWidgets: {}, mallClient: mall).refreshPending()
-        XCTAssertEqual(mall.calls.map { $0.0 }, ["jd", "pdd"])
-        XCTAssertEqual(report.jdCount, 1); XCTAssertEqual(report.pddCount, 1)
+        XCTAssertEqual(mall.calls.map { $0.0 }, ["pdd"])
+        XCTAssertEqual(report.jdCount, 0); XCTAssertEqual(report.pddCount, 1)
         XCTAssertEqual(report.taobaoCount, 0); XCTAssertEqual(report.uapiCount, 0)
-        XCTAssertEqual(report.failed, 2); XCTAssertEqual(report.skipped, 1)
+        XCTAssertEqual(report.failed, 1); XCTAssertEqual(report.skipped, 2)
     }
     func testPlatformAndChannelChangesRejectStaleResponseAndPreserveCompletion() async throws {
         for (index, changeChannel) in [false, true].enumerated() {
@@ -260,3 +247,4 @@ final class MallRoutingTests: XCTestCase {
         XCTAssertEqual(try storage.snapshot().records.filter { $0.shipmentID == id }.count, 1)
     }
 }
+

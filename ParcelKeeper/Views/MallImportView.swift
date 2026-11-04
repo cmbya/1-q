@@ -416,7 +416,7 @@ struct MallImportView: View {
                         Text("请使用本人京东电脑版订单页的完整Cookie，必须含thor；不要求pin。只有pt_key／pt_pin的手机凭据不适用于此入口，请改用账号网页登录。格式校验不等于登录成功，仍需访问订单验证。")
                             .font(.footnote)
                     }
-                    SecureField("Cookie", text: $cookieText).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("Cookie", text: $cookieText, axis: .vertical).lineLimit(4...8).textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button(busy ? "正在验证" : "验证并保存") { saveImportedCookie() }
                         .disabled(busy || cookieText.isEmpty || store.isHistoricalSnapshot)
                     if let message { Text(message).font(.footnote).textSelection(.enabled) }
@@ -685,3 +685,4 @@ struct MallImportView: View {
         }
     }
 }
+

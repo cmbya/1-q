@@ -19,22 +19,21 @@ class RemovedPlatformContract(unittest.TestCase):
             self.assertIsNone(re.search(r'\b' + re.escape(token) + r'\b', text), token)
         self.assertNotIn('name: "mallResponse"', text)  # old broad bridge remains removed
         self.assertTrue((ROOT / 'ParcelKeeper/Services/JDInAppClient.swift').exists())
-        self.assertIn('platform: .jd', source('ParcelKeeper/Views/SettingsView.swift'))
+        self.assertNotIn('platform: .jd', source('ParcelKeeper/Views/SettingsView.swift'))
 
     def test_removed_route_cannot_charge_without_explicit_choice(self):
         service = source('ParcelKeeper/Services/TrackingRefreshService.swift')
         route = service.split('private static func route(', 1)[1].split('func setRefreshChannel', 1)[0]
         self.assertLess(route.index('mode == .uapi'), route.index('originPlatform == "jd"'))
         self.assertLess(route.index('refreshChannel == "uapi"'), route.index('originPlatform == "jd"'))
-        self.assertIn('originPlatform == "jd" { return .mall("jd") }', route)
+        self.assertIn('originPlatform == "jd" { throw RetiredTrackingChannel.jd }', route)
         self.assertNotIn('throw RemovedJDTrackingError.removed', route)
         web = source('ParcelKeeper/Services/MallWebClient.swift')
         client = web.split('struct MallTrackingClient', 1)[1].split('enum MallWebError', 1)[0]
         self.assertIn('JDInAppClient(cookies: cookies)', client)
         self.assertNotIn('UAPITrackingClient', client)
         tests = source('ParcelKeeperTests/MallRoutingTests.swift')
-        for case in ['testJDDispatchesInAppConnectorWithoutPaidFallback',
-                     'testJDInAppFailurePreservesHistoryAndNeverCharges',
+        for case in ['testRetiredJDNeverDispatchesOrChargesAndPreservesHistory',
                      'testExplicitUAPIOverrideAndModeRemainAvailable',
                      'testPDDDispatchWithoutPhoneOrUAPIFallback']:
             self.assertIn(case, tests)
@@ -97,3 +96,4 @@ class RemovedPlatformContract(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

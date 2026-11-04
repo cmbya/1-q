@@ -21,9 +21,10 @@ class UsageContract(unittest.TestCase):
         self.assertNotIn('try? JSONDecoder', s)
     def test_ui_disclosure_and_tests(self):
         s = (ROOT/'ParcelKeeper/Views/TminiSettingsView.swift').read_text()
-        for text in ['累计查询次数','累计记账积分','本地估算，非平台账单或余额','刷新记账显示（不查询）','loadUsage()', 'scenePhase']:
+        for text in ['累计查询次数','累计记账积分','本地估算，不代表平台余额','刷新记账显示（不查询）','loadUsage()', 'scenePhase']:
             self.assertIn(text,s)
         t = (ROOT/'ParcelKeeperTests/TminiUsageTests.swift').read_text()
         for text in ['concurrentPerform', 'testCorruptionIsPreservedAndOverflowRejected', 'testOnlyDispatchCountsIncludingFailuresAndCredentialReplacement']:
             self.assertIn(text,t)
 if __name__ == '__main__': unittest.main()
+

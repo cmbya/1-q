@@ -19,10 +19,12 @@ class JDContract(unittest.TestCase):
         self.assertIn('case jd', source)
         self.assertIn('JDInAppClient(cookies: cookies)', source)
         route = (ROOT / 'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
-        self.assertIn('return .mall("jd")', route)
+        self.assertIn('throw RetiredTrackingChannel.jd', route)
+        self.assertNotIn('return .mall("jd")', route)
         self.assertNotIn('throw RemovedJDTrackingError.removed', route)
     def test_javascript(self):
         subprocess.run(['node', str(ROOT / 'scripts/test_jd_in_app_js.mjs')], check=True)
 
 if __name__ == '__main__':
     unittest.main()
+

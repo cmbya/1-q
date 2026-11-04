@@ -28,7 +28,7 @@ final class RefreshRepairTests: XCTestCase {
         }
         return item
     }
-    func testLoggedJDAccountFailuresBlockJDOnlyAndNeverFallback() async throws {
+    func testRetiredJDSkipsWithoutBlockingPDDOrPaidFallback() async throws {
         for reason in [DiagnosticReason.authentication, .verification] {
             try store.transaction { $0.shipments.removeAll(); $0.records.removeAll() }
             _ = try add("jd", index: 0); _ = try add("jd", index: 1); _ = try add("pdd", index: 2)
@@ -36,22 +36,22 @@ final class RefreshRepairTests: XCTestCase {
             mall.failure = JDLoggedError(reason: reason, stage: .credential)
             let paid = TrackingRefreshTests.Client()
             let report = try await TrackingRefreshService(store: store, client: paid, reloadWidgets: {}, mallClient: mall).refreshPending()
-            XCTAssertEqual(mall.calls.map { $0.0 }, ["jd", "pdd"])
-            XCTAssertEqual(report.jdCount, 1); XCTAssertEqual(report.pddCount, 1)
-            XCTAssertEqual(report.failed, 2); XCTAssertEqual(report.skipped, 1)
+            XCTAssertEqual(mall.calls.map { $0.0 }, ["pdd"])
+            XCTAssertEqual(report.jdCount, 0); XCTAssertEqual(report.pddCount, 1)
+            XCTAssertEqual(report.failed, 1); XCTAssertEqual(report.skipped, 2)
             XCTAssertEqual(paid.calls, 0)
         }
     }
-    func testLoggedJDTransientFailureContinuesSamePlatform() async throws {
+    func testRetiredJDBatchMakesNoRequests() async throws {
         _ = try add("jd", index: 0); _ = try add("jd", index: 1)
         let mall = MallRoutingTests.Mall(); mall.failure = JDLoggedError(reason: .network, stage: .request)
         let report = try await TrackingRefreshService(store: store, client: TrackingRefreshTests.Client(), reloadWidgets: {}, mallClient: mall).refreshPending()
-        XCTAssertEqual(mall.calls.count, 2); XCTAssertEqual(report.failed, 2)
-        XCTAssertEqual(report.skipped, 0)
+        XCTAssertEqual(mall.calls.count, 0); XCTAssertEqual(report.failed, 0)
+        XCTAssertEqual(report.skipped, 2)
     }
     func testMallClearOrReplacementWhileQueryRunsRejectsAllLateWrites() async throws {
         let keys = UAPITrackingClientTests.Keys()
-        for platform in [MallPlatform.jd, .pdd] {
+        for platform in [MallPlatform.pdd] {
             for replace in [false, true] {
                 try store.transaction { $0.shipments.removeAll(); $0.records.removeAll() }
                 let item = try add(platform.rawValue)
@@ -76,7 +76,7 @@ final class RefreshRepairTests: XCTestCase {
         }
     }
     func testRetiredMallFailureCannotPersistDiagnostic() async throws {
-        for platform in [MallPlatform.jd, .pdd] {
+        for platform in [MallPlatform.pdd] {
             try store.transaction { $0.shipments.removeAll(); $0.records.removeAll() }
             let item = try add(platform.rawValue)
             let before = try store.exportBackup()
@@ -115,11 +115,11 @@ final class RefreshRepairTests: XCTestCase {
         }
     }
     func testPreflightFailureCountsRouteAttemptsWithoutClaimingNetworkOrBilling() async throws {
-        let item = try add("jd")
+        let item = try add("pdd")
         try store.transaction { $0.shipments[0].platformOrderID = nil }
         let mall = MallRoutingTests.Mall(), paid = TrackingRefreshTests.Client()
         let report = try await TrackingRefreshService(store: store, client: paid, reloadWidgets: {}, mallClient: mall).refreshPending()
-        XCTAssertEqual(report.jdCount, 1); XCTAssertEqual(report.failed, 1)
+        XCTAssertEqual(report.pddCount, 1); XCTAssertEqual(report.failed, 1)
         XCTAssertTrue(mall.calls.isEmpty); XCTAssertEqual(paid.calls, 0)
         XCTAssertTrue(report.message.contains("按渠道尝试票数"))
         XCTAssertTrue(report.message.contains("不代表实际网络请求或收费次数"))
@@ -157,3 +157,4 @@ final class RefreshRepairTests: XCTestCase {
         XCTAssertEqual(try store.snapshot().records.first?.groupID, record.groupID)
     }
 }
+

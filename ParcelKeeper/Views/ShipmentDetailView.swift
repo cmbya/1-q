@@ -13,7 +13,8 @@ struct ShipmentDetailView: View {
     @State private var reminderBusy = false
     @State private var reminderError: String?
     @State private var queryPhone = ""
-    @State private var hasSavedPhone = false
+    @State private var savedPhone = ""
+    @State private var phoneLoaded = false
     @State private var querying = false
     @State private var queryMessage: String?
 
@@ -40,99 +41,21 @@ struct ShipmentDetailView: View {
                             .labelsHidden()
                         }
 
-                        LabeledContent("运单号") {
+                        HStack {
                             Text(shipment.trackingNumber)
                                 .fontDesign(.monospaced)
                                 .textSelection(.enabled)
+                            Spacer()
+                            Button {
+                                UIPasteboard.general.string = shipment.trackingNumber
+                            } label: { Image(systemName: "doc.on.doc") }
+                            .accessibilityLabel("复制运单号")
                         }
-
-                        Button {
-                            UIPasteboard.general.string = shipment.trackingNumber
-                        } label: {
-                            Label("复制运单号", systemImage: "doc.on.doc")
-                        }
-                    }
-
-                    Section("物流刷新与来源") {
-                        LabeledContent("添加来源", value: ShipmentRefreshPresentation.origin(shipment))
-                        LabeledContent("当前物流来源", value: ShipmentRefreshPresentation.source(shipment))
-                        LabeledContent("实际默认查询渠道", value: resolvedChannelName(shipment))
-                        Picker("默认查询渠道", selection: Binding(
-                            get: { shipment.refreshChannel ?? "automatic" },
-                            set: { channel in
-                                guard !querying, !store.isHistoricalSnapshot else { return }
-                                do {
-                                    try TrackingRefreshService.live().setRefreshChannel(id: shipmentID, channel: channel == "automatic" ? nil : channel)
-                                    try store.reload()
-                                } catch { queryMessage = error.localizedDescription; try? store.reload() }
-                            }
-                        )) {
-                            Text("跟随添加来源").tag("automatic")
-                            Text("UAPI（可能消耗积分）").tag("uapi")
-                            Text("Tmini（付费查询）").tag("tmini")
-                        }
-                        .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("跟随来源：淘宝／拼多多关联票使用对应平台；京东关联票使用App内京东会话，后台关联票优先使用后台；原UAPI／未关联票沿用UAPI。商城失败不会自动转收费查询；修改渠道不会改变添加来源。当前物流来源仅表示上次成功查询渠道，不因导入或切换默认渠道而改变。")
-                            .font(.footnote)
-                        Button(querying ? "正在查询" : "刷新物流（按默认渠道）") {
-                            refreshLogistics(mode: .automatic)
-                        }
-                        .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        LabeledContent("上次成功查询", value: shipment.lastQueriedAt.map { ShipmentDateDisplay.string($0) } ?? "尚无成功查询")
-                        if let error = shipment.lastRefreshError, !error.isEmpty {
-                            Text("最近刷新失败：\(error)").font(.footnote).foregroundStyle(.red)
-                            Text("失败未覆盖已有物流；以下可能是上次成功数据，并非实时结果。")
-                                .font(.footnote)
-                        }
-                        if shipment.logisticsInfo?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
-                            Text("暂无物流轨迹；显示的状态不代表实时物流。")
-                                .font(.footnote)
-                        }
-                        if let queryMessage { Text(queryMessage).font(.footnote) }
-                    }
-
-                    Section("Tmini单次查询（付费）") {
-                        Text("明确选择时向 api.tmini.net 发送单号及调用密钥；不读取或发送手机尾号。不自动重试、不回退UAPI，计费以平台为准。接口取件码、地址仅作说明，不自动覆盖个人字段。")
-                            .font(.footnote)
-                        Button("仅本次使用Tmini付费刷新") { refreshLogistics(mode: .tmini) }
-                            .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("每次查询都会联网，可能计费；每次派发新增4积分本地估算记账，实际收费以平台为准。不自动重试。")
-                            .font(.footnote)
-                    }
-
-                    Section("UAPI备用查询（可能消耗积分）") {
-                        LabeledContent("本票手机尾号", value: hasSavedPhone ? "已保存" : "未保存")
-                        TextField("手机尾号（留空复用已保存值）", text: $queryPhone)
-                            .keyboardType(.numberPad)
-                            .disabled(querying || store.isHistoricalSnapshot)
-                        Text("以下尾号仅供UAPI使用，商城查询不使用此尾号。填写后在UAPI查询时为本票保存，后续UAPI刷新及快捷指令复用。仅存本机钥匙串，不进入JSON备份。网络查询失败也会保留填写值。")
-                            .font(.footnote)
-                        Button("保存／修改尾号（不查询）") {
-                            do {
-                                try TrackingRefreshService.live().setPhone(id: shipmentID, phone: queryPhone)
-                                queryPhone = ""
-                                hasSavedPhone = true
-                                queryMessage = "本票手机尾号已保存。"
-                            } catch { queryMessage = error.localizedDescription }
-                        }.disabled(querying || store.isHistoricalSnapshot || queryPhone.isEmpty)
-                        Button("清除本票已保存尾号", role: .destructive) {
-                            do {
-                                try TrackingRefreshService.live().setPhone(id: shipmentID, phone: nil)
-                                queryPhone = ""
-                                hasSavedPhone = false
-                                queryMessage = "本票保存的手机尾号已清除。"
-                            } catch { queryMessage = error.localizedDescription }
-                        }.disabled(querying || store.isHistoricalSnapshot)
-                        Button(querying ? "正在查询" : "仅本次使用UAPI备用刷新（可能消耗积分）") {
-                            refreshLogistics(mode: .uapi)
-                        }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
-                        Text("每次查询都会联网，可能计费，实际扣费以平台返回为准。这是单次明确选择，不修改默认渠道或添加来源；不自动重试、不切换其他付费渠道。")
-                            .font(.footnote)
                     }
 
                     Section("状态") {
                         if shipment.statusDisplayText != shipment.status.rawValue {
-                            Text("物流状态未核实；下方是本地状态，可手动设置，或显式刷新后核实。")
+                            Text("本地状态，待刷新核实")
                                 .font(.footnote)
                         }
                         Picker("物流状态", selection: Binding(
@@ -143,6 +66,52 @@ struct ShipmentDetailView: View {
                                 Text(status.rawValue).tag(status)
                             }
                         }
+                    }
+
+                    Section("物流刷新") {
+                        Picker("默认渠道", selection: Binding(
+                            get: { shipment.refreshChannel ?? "automatic" },
+                            set: { channel in
+                                guard !querying, !store.isHistoricalSnapshot else { return }
+                                do {
+                                    try TrackingRefreshService.live().setRefreshChannel(id: shipmentID, channel: channel == "automatic" ? nil : channel)
+                                    try store.reload()
+                                } catch { queryMessage = error.localizedDescription; try? store.reload() }
+                            }
+                        )) {
+                            Text("跟随来源 · \(automaticChannelName(shipment))").tag("automatic")
+                            Text("UAPI").tag("uapi")
+                            Text("Tmini").tag("tmini")
+                        }
+                        .disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        Button(querying ? "正在查询" : "刷新物流 · \(resolvedChannelName(shipment))") {
+                            refreshLogistics(mode: .automatic)
+                        }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        Button { refreshLogistics(mode: .tmini) } label: {
+                            HStack { Text("Tmini 刷新"); Spacer(); Text("4积分/次").foregroundStyle(.secondary) }
+                        }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        Button { refreshLogistics(mode: .uapi) } label: {
+                            HStack { Text("UAPI 刷新"); Spacer(); Text("40积分/次").foregroundStyle(.secondary) }
+                        }.disabled(querying || store.isHistoricalSnapshot || shipment.status == .archived)
+                        HStack {
+                            Text("手机尾号")
+                            TextField("选填 · 顺丰查询", text: $queryPhone)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .onChange(of: queryPhone) { _, value in
+                                    guard phoneLoaded, value != savedPhone else { return }
+                                    guard value.isEmpty || (value.utf8.count == 4 && value.utf8.allSatisfy({ (48...57).contains($0) })) else { return }
+                                    savePhone()
+                                }
+                        }.disabled(querying || store.isHistoricalSnapshot)
+                        LabeledContent("添加来源", value: ShipmentRefreshPresentation.origin(shipment))
+                            .font(.footnote).foregroundStyle(.secondary)
+                        LabeledContent("上次查询", value: "\(ShipmentRefreshPresentation.source(shipment)) · \(shipment.lastQueriedAt.map { ShipmentDateDisplay.string($0) } ?? "未查询")")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        if let error = shipment.lastRefreshError, !error.isEmpty {
+                            Text(error).font(.footnote).foregroundStyle(.red)
+                        }
+                        if let queryMessage { Text(queryMessage).font(.footnote) }
                     }
 
                     if let info = shipment.logisticsInfo, !info.isEmpty {
@@ -158,17 +127,6 @@ struct ShipmentDetailView: View {
                         Section("本次查询完整信息") {
                             Text(query).textSelection(.enabled)
                         }
-                    }
-
-                    Section("备注与取件码") {
-                        TextField("备注", text: Binding(
-                            get: { shipment.note },
-                            set: { value in saveEdit { try store.updateNoteThrowing(id: shipmentID, note: value) } }
-                        ))
-                        TextField("取件码", text: Binding(
-                            get: { shipment.pickupCode },
-                            set: { value in saveEdit { try store.updatePickupCodeThrowing(id: shipmentID, pickupCode: value) } }
-                        ))
                     }
 
                     Section("提醒") {
@@ -212,6 +170,14 @@ struct ShipmentDetailView: View {
                         }
                     }
 
+                    Section("备注") {
+                        TextField("添加备注", text: Binding(
+                            get: { shipment.note },
+                            set: { value in saveEdit { try store.updateNoteThrowing(id: shipmentID, note: value) } }
+                        ), axis: .vertical)
+                        .lineLimit(2...6)
+                    }.disabled(store.isHistoricalSnapshot)
+
                     Section {
                         Button("删除这条快递", role: .destructive) {
                             showingDeleteConfirmation = true
@@ -223,7 +189,11 @@ struct ShipmentDetailView: View {
                 .navigationBarTitleDisplayMode(.inline)
                 .onAppear {
                     synchronizeReminderControls()
-                    do { hasSavedPhone = try TrackingRefreshService.live().savedPhone(id: shipmentID) != nil }
+                    do {
+                        savedPhone = try TrackingRefreshService.live().savedPhone(id: shipmentID) ?? ""
+                        queryPhone = savedPhone
+                        phoneLoaded = true
+                    }
                     catch { queryMessage = "无法读取已保存尾号：\(error.localizedDescription)" }
                 }
                 .confirmationDialog("确定删除这条快递吗？", isPresented: $showingDeleteConfirmation, titleVisibility: .visible) {
@@ -255,28 +225,47 @@ struct ShipmentDetailView: View {
     private func resolvedChannelName(_ shipment: Shipment) -> String {
         do {
             switch try TrackingRefreshService.resolvedChannel(shipment) {
-            case "kdyzm": return "取件助手后台"
+            case "kdyzm": return "后台（已停用）"
             case "taobao": return "淘宝"
             case "pdd": return "拼多多"
-            case "jd": return "京东（App内会话）"
-            case "uapi": return "UAPI（每次联网，可能计费）"
-            case "tmini": return "Tmini（每次联网，付费查询）"
+            case "jd": return "京东（已停用）"
+            case "uapi": return "UAPI"
+            case "tmini": return "Tmini"
             default: return "不可用"
             }
+        } catch let retired as RetiredTrackingChannel {
+            return retired == .jd ? "京东（已停用）" : "后台（已停用）"
         } catch { return "不可用" }
+    }
+
+    private func automaticChannelName(_ shipment: Shipment) -> String {
+        var automatic = shipment
+        automatic.refreshChannel = nil
+        return resolvedChannelName(automatic)
+    }
+
+    @discardableResult private func savePhone() -> Bool {
+        guard phoneLoaded, !querying, !store.isHistoricalSnapshot else { return false }
+        if queryPhone == savedPhone { return true }
+        do {
+            try TrackingRefreshService.live().setPhone(id: shipmentID, phone: queryPhone.isEmpty ? nil : queryPhone)
+            savedPhone = queryPhone
+            return true
+        } catch { queryMessage = error.localizedDescription; return false }
     }
 
     private func refreshLogistics(mode: TrackingRefreshMode) {
         guard !querying, !store.isHistoricalSnapshot, let current = shipment,
               current.status != .archived else { return }
         let usesUAPI = (try? TrackingRefreshService.resolvedChannel(current, mode: mode)) == "uapi"
-        let suppliedPhone = usesUAPI && !queryPhone.isEmpty ? queryPhone : nil
+        guard savePhone() else { return }
+        let suppliedPhone = usesUAPI && !savedPhone.isEmpty ? savedPhone : nil
         querying = true
         Task { @MainActor in
             defer {
                 querying = false
                 if let saved = try? TrackingRefreshService.live().savedPhone(id: shipmentID) {
-                    hasSavedPhone = !saved.isEmpty
+                    savedPhone = saved
                 }
             }
             do {
@@ -284,11 +273,11 @@ struct ShipmentDetailView: View {
                 var isCached = false
                 let completed = try await service.refresh(id: shipmentID, phone: suppliedPhone,
                     expectedTrackingNumber: CarrierDetector.sanitize(current.trackingNumber), mode: mode, cacheFeedback: { isCached = $0 })
-                let latest = try ShipmentRefreshPresentation.snapshot(service, id: shipmentID,
+                _ = try ShipmentRefreshPresentation.snapshot(service, id: shipmentID,
                     number: CarrierDetector.sanitize(current.trackingNumber))
                 try store.reload()
-                if usesUAPI { queryPhone = "" }
-                queryMessage = ShipmentRefreshPresentation.result(latest, newlyDelivered: completed, isCached: isCached)
+
+                queryMessage = isCached ? "已读取缓存" : (completed ? "物流已更新，已签收" : "物流已更新")
             } catch {
                 queryMessage = error.localizedDescription
                 try? store.reload()
@@ -388,3 +377,4 @@ struct ShipmentDetailView: View {
         }
     }
 }
+

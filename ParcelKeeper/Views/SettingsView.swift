@@ -32,12 +32,10 @@ struct SettingsView: View {
                 }
 
                 Section("物流查询") {
-                    NavigationLink("取件助手后台") { KDYZMSettingsView() }
                     NavigationLink("UAPI物流查询") { UAPISettingsView() }
-                    NavigationLink("Tmini物流查询（付费）") { TminiSettingsView() }
+                    NavigationLink("Tmini物流查询") { TminiSettingsView() }
                     NavigationLink("淘宝导入（试验）") { TaobaoTrialView() }
                     NavigationLink("拼多多导入（试验）") { MallImportView(platform: .pdd) }
-                    NavigationLink("京东导入（试验）") { MallImportView(platform: .jd) }
                 }
 
                 Section("AI") {
@@ -194,3 +192,4 @@ struct SettingsView: View {
         }
     }
 }
+

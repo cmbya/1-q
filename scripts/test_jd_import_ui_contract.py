@@ -13,7 +13,7 @@ def source(path):
 class JDImportUIContract(unittest.TestCase):
     def test_settings_adds_only_jd_without_replacing_working_entries(self):
         view = source('ParcelKeeper/Views/SettingsView.swift')
-        self.assertIn('NavigationLink("京东导入（试验）") { MallImportView(platform: .jd) }', view)
+        self.assertNotIn('NavigationLink("京东导入（试验）") { MallImportView(platform: .jd) }', view)
         self.assertIn('NavigationLink("拼多多导入（试验）") { MallImportView(platform: .pdd) }', view)
         self.assertIn('NavigationLink("淘宝导入（试验）") { TaobaoTrialView() }', view)
         self.assertNotIn('Section("平台账号")', view)
@@ -74,3 +74,4 @@ class JDImportUIContract(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

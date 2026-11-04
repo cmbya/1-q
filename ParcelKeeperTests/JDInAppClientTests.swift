@@ -84,14 +84,14 @@ final class JDInAppClientTests: XCTestCase {
         XCTAssertFalse(MallPlatform.jd.allowed(MallPlatform.pdd.ordersURL))
         XCTAssertNotEqual(MallPlatform.jd.sessionService, MallPlatform.pdd.sessionService)
     }
-    func testJDBindingKeepsBackendDefaultAndExplicitPaidOverride() throws {
+    func testRetiredJDBindingBlocksBackendDefaultAndAllowsExplicitPaidOverride() throws {
         var item = Shipment(trackingNumber: "JD123456789", carrierName: "京东快递", carrierCode: "jd", originPlatform: "jd", platformOrderID: orderID)
         item.backendBinding = .init(origin: "https://example.com", accountID: "a", orderID: "o", shipmentID: "s")
-        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(item), "kdyzm")
-        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(item, mode: .platformOnly), "kdyzm")
+        XCTAssertThrowsError(try TrackingRefreshService.resolvedChannel(item))
+        XCTAssertThrowsError(try TrackingRefreshService.resolvedChannel(item, mode: .platformOnly))
         item.refreshChannel = "uapi"
         XCTAssertEqual(try TrackingRefreshService.resolvedChannel(item), "uapi")
-        XCTAssertEqual(try TrackingRefreshService.resolvedChannel(item, mode: .platformOnly), "kdyzm")
+        XCTAssertThrowsError(try TrackingRefreshService.resolvedChannel(item, mode: .platformOnly))
         XCTAssertNotNil(item.backendBinding)
     }
     func testStructuredMissingDateIsSupplementedBeforePolicyConsider() throws {
@@ -149,3 +149,4 @@ final class JDInAppClientTests: XCTestCase {
         XCTAssertFalse(MallBrowserContext.store(for: .jd).isPersistent)
     }
 }
+
