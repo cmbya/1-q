@@ -26,9 +26,9 @@ class DiagnosticBlockersContract(unittest.TestCase):
                       'testNewJobCancellationAfterSaveIsWaitNotSave',
                       'testJobGoneErrorAndCooldownCleanupFailurePreserveOriginal',
                       'testPollingGoneCleanupFailureKeepsPollStageWithoutRepost',
-                      'testCooldownSuccessfulCleanupStillCountsAsQueued',
-                      'testCooldownCleanupFailureIsExplicitBatchFailureNotSilentQueue',
-                      'testOuterOrdinaryBackendFailureKeepsInnerStage',
+                      'testRetiredBackendBatchPreservesPendingJobWithoutPolling',
+                      'testRetiredBackendDoesNotEnterCooldownCleanup',
+                      'testRetiredBackendReportsUnsupportedWithoutNetwork',
                       'testSyncStaleMergerIsAssociationNotLease',
                       'acquireTrackingQuery', 'refreshPending()', 'syncKDYZM(']:
             self.assertIn(token, s)
@@ -38,3 +38,4 @@ class DiagnosticBlockersContract(unittest.TestCase):
         self.assertIn('NSLock()', s)
         self.assertIn('failureStage', s)
 if __name__ == '__main__': unittest.main()
+
