@@ -24,7 +24,7 @@ final class MallWebClientTests: XCTestCase {
         for platform in MallPlatform.allCases {
             XCTAssertTrue(platform.allowed(platform.loginURL))
             XCTAssertTrue(platform.allowed(platform.ordersURL))
-            for raw in ["http://trade.m.jd.com", "https://jd.com.evil.test", "https://eviljd.com", "https://user@jd.com", "https://jd.com:444", "file:///orders.html", "https://yangkeduo.com.evil.test"] {
+            for raw in ["http://mobile.yangkeduo.com", "https://yangkeduo.com.evil.test", "https://evilyangkeduo.com", "https://user@yangkeduo.com", "https://yangkeduo.com:444", "file:///orders.html"] {
                 XCTAssertFalse(platform.allowed(URL(string: raw)!))
             }
         }
@@ -36,7 +36,7 @@ final class MallWebClientTests: XCTestCase {
         XCTAssertTrue(MallSession.applies(c, to: URL(string: "https://mobile.yangkeduo.com/order/list")!, platform: p, now: Date(timeIntervalSince1970: 100)))
         XCTAssertFalse(MallSession.applies(c, to: URL(string: "https://mobile.yangkeduo.com/orders")!, platform: p))
         XCTAssertFalse(MallSession.applies(c, to: p.ordersURL, platform: p, now: Date(timeIntervalSince1970: 300)))
-        XCTAssertFalse(MallSession.applies(c, to: URL(string: "https://trade.m.jd.com/order/list")!, platform: .pdd))
+        XCTAssertFalse(MallSession.applies(c, to: URL(string: "https://example.invalid/order/list")!, platform: .pdd))
         let hostOnly = TaobaoTrialCookie(name: "a", value: "b", domain: "yangkeduo.com", path: "/", secure: true, expires: nil)
         XCTAssertFalse(MallSession.applies(hostOnly, to: p.ordersURL, platform: p))
     }
@@ -49,7 +49,7 @@ final class MallWebClientTests: XCTestCase {
         let user = TaobaoTrialCookie(name: "pdd_user_id", value: "fixture", domain: ".yangkeduo.com", path: "/", secure: true, expires: nil)
         try session.save([cookie, user])
         XCTAssertEqual(try session.load().first?.name, "PDDAccessToken")
-        XCTAssertThrowsError(try session.save([TaobaoTrialCookie(name: "foreign", value: "test", domain: ".jd.com", path: "/", secure: true, expires: nil)]))
+        XCTAssertThrowsError(try session.save([TaobaoTrialCookie(name: "foreign", value: "test", domain: ".example.invalid", path: "/", secure: true, expires: nil)]))
         try session.clear()
         XCTAssertNil(keys.value)
         XCTAssertThrowsError(try session.save([]))
@@ -58,82 +58,49 @@ final class MallWebClientTests: XCTestCase {
         XCTAssertThrowsError(try session.clear())
     }
 
-    func testExplicitSaveClearAndUncertainWritesInvalidateOnlyTheirPlatform() throws {
+    func testExplicitSaveClearAndUncertainWritesInvalidateSession() throws {
         let keys = MallMemoryKeys()
-        let session = MallSession(platform: .jd, keys: keys)
-        let cookies = try MallCookieImport.parse("thor=fixture", platform: .jd)
-        let jd = MallSession.generation(for: .jd), pdd = MallSession.generation(for: .pdd)
+        let session = MallSession(platform: .pdd, keys: keys)
+        let cookies = try MallCookieImport.parse("PDDAccessToken=fixture;pdd_user_id=test-user", platform: .pdd)
+        let original = MallSession.generation(for: .pdd)
         try session.save(cookies)
-        XCTAssertNotEqual(jd, MallSession.generation(for: .jd))
-        XCTAssertEqual(pdd, MallSession.generation(for: .pdd))
+        XCTAssertNotEqual(original, MallSession.generation(for: .pdd))
         var committed = false
-        XCTAssertThrowsError(try MallSession.withGeneration(platform: .jd, expected: jd) { committed = true })
+        XCTAssertThrowsError(try MallSession.withGeneration(platform: .pdd, expected: original) { committed = true })
         XCTAssertFalse(committed)
-        let beforeFailure = MallSession.generation(for: .jd)
+        let beforeFailure = MallSession.generation(for: .pdd)
         keys.fail = true
         XCTAssertThrowsError(try session.save(cookies))
-        XCTAssertNotEqual(beforeFailure, MallSession.generation(for: .jd))
-        let beforeClear = MallSession.generation(for: .jd)
+        XCTAssertNotEqual(beforeFailure, MallSession.generation(for: .pdd))
+        let beforeClear = MallSession.generation(for: .pdd)
         XCTAssertThrowsError(try session.clear())
-        XCTAssertNotEqual(beforeClear, MallSession.generation(for: .jd))
+        XCTAssertNotEqual(beforeClear, MallSession.generation(for: .pdd))
     }
     func testChangedThenThrowAndReadbackMismatchStillInvalidate() throws {
         let keys = MallMemoryKeys()
-        let session = MallSession(platform: .jd, keys: keys)
-        let cookies = try MallCookieImport.parse("thor=fixture", platform: .jd)
-        var generation = MallSession.generation(for: .jd)
+        let session = MallSession(platform: .pdd, keys: keys)
+        let cookies = try MallCookieImport.parse("PDDAccessToken=fixture;pdd_user_id=test-user", platform: .pdd)
+        var generation = MallSession.generation(for: .pdd)
         keys.saveThenThrow = true
         XCTAssertThrowsError(try session.save(cookies))
         XCTAssertNotNil(keys.value)
-        XCTAssertNotEqual(generation, MallSession.generation(for: .jd))
+        XCTAssertNotEqual(generation, MallSession.generation(for: .pdd))
         keys.saveThenThrow = false; keys.readbackMismatch = true
-        generation = MallSession.generation(for: .jd)
+        generation = MallSession.generation(for: .pdd)
         XCTAssertThrowsError(try session.save(cookies))
-        XCTAssertNotEqual(generation, MallSession.generation(for: .jd))
+        XCTAssertNotEqual(generation, MallSession.generation(for: .pdd))
     }
-    func testFreshExplicitSaveAndRotationCannotResurrectOldSession() throws {
-        let keys = MallMemoryKeys()
-        let session = MallSession(platform: .jd, keys: keys)
-        let old = try MallCookieImport.parse("thor=old", platform: .jd)
-        let fresh = try MallCookieImport.parse("thor=fresh", platform: .jd)
-        let newer = try MallCookieImport.parse("thor=newer", platform: .jd)
-        try session.save(old)
-        let generation = MallSession.generation(for: .jd)
-        XCTAssertTrue(try session.saveRotated(fresh, replacing: old, expectedGeneration: generation))
-        XCTAssertEqual(generation, MallSession.generation(for: .jd))
-        XCTAssertFalse(try session.saveRotated(newer, replacing: old, expectedGeneration: generation))
-        XCTAssertEqual(try session.load().first?.value, "fresh")
-        try session.save(newer)
-        XCTAssertFalse(try session.saveRotated(old, replacing: fresh, expectedGeneration: generation))
-        XCTAssertEqual(try session.load().first?.value, "newer")
-        try session.clear()
-        XCTAssertFalse(try session.saveRotated(newer, replacing: fresh, expectedGeneration: generation))
-        XCTAssertThrowsError(try session.save(newer, expectedGeneration: generation))
-        XCTAssertNil(keys.value)
-    }
-    func testRotationWriteFailureInvalidatesAndLegacyJSONArrayStillLoads() throws {
-        let keys = MallMemoryKeys()
-        let legacy = MallSession(platform: .jd, keys: keys)
-        let old = try MallCookieImport.parse("thor=old", platform: .jd)
-        let fresh = try MallCookieImport.parse("thor=fresh", platform: .jd)
-        keys.value = String(data: try JSONEncoder().encode(old), encoding: .utf8)
-        XCTAssertEqual(try legacy.load().first?.value, "old")
-        let generation = MallSession.generation(for: .jd)
-        keys.failWrite = true
-        XCTAssertThrowsError(try legacy.saveRotated(fresh, replacing: old, expectedGeneration: generation))
-        XCTAssertNotEqual(generation, MallSession.generation(for: .jd))
-        XCTAssertEqual(try legacy.load().first?.value, "old")
-    }
+
     func testGenerationGuardSerializesConcurrentClearAndBusinessCommit() throws {
         let keys = MallMemoryKeys()
-        let target = MallSession(platform: .jd, keys: keys)
-        try target.save(MallCookieImport.parse("thor=fixture", platform: .jd))
-        let generation = MallSession.generation(for: .jd)
+        let target = MallSession(platform: .pdd, keys: keys)
+        try target.save(MallCookieImport.parse("PDDAccessToken=fixture;pdd_user_id=test-user", platform: .pdd))
+        let generation = MallSession.generation(for: .pdd)
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         let clearStarted = DispatchSemaphore(value: 0), cleared = DispatchSemaphore(value: 0)
         let commitFinished = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            try? MallSession.withGeneration(platform: .jd, expected: generation) {
+            try? MallSession.withGeneration(platform: .pdd, expected: generation) {
                 entered.signal(); _ = release.wait(timeout: .now() + 3)
                 commitFinished.signal()
             }
@@ -147,7 +114,7 @@ final class MallWebClientTests: XCTestCase {
         release.signal()
         XCTAssertEqual(commitFinished.wait(timeout: .now() + 3), .success)
         XCTAssertEqual(cleared.wait(timeout: .now() + 3), .success)
-        XCTAssertThrowsError(try MallSession.withGeneration(platform: .jd, expected: generation) { XCTFail("stale commit") })
+        XCTAssertThrowsError(try MallSession.withGeneration(platform: .pdd, expected: generation) { XCTFail("stale commit") })
         XCTAssertThrowsError(try target.load())
     }
 
@@ -190,7 +157,7 @@ final class MallWebClientTests: XCTestCase {
     func testDatesAndMalformedKnownTraceAreRejected() throws {
         XCTAssertNil(MallWebParser.date("2026-02-30 12:00:00"))
         XCTAssertNotNil(MallWebParser.date(NSNumber(value: 1_790_827_200_000)))
-        XCTAssertFalse(MallWebParser.waybill("JD123456789\n"))
+        XCTAssertFalse(MallWebParser.waybill("YT123456789\n"))
     }
 
 }

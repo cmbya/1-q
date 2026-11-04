@@ -12,7 +12,8 @@ final class MallCookieImportTests: XCTestCase {
         for text in ["", "analytics=a", "PDDAccessToken=a;PDDAccessToken=b;pdd_user_id=c", "PDDAccessToken=a\r\nHeader:x;pdd_user_id=c", "Cookie: PDDAccessToken=a;pdd_user_id=c", "PDDAccessToken=a;broken;pdd_user_id=c"] {
             XCTAssertThrowsError(try MallCookieImport.parse(text, platform: .pdd))
         }
-        XCTAssertThrowsError(try MallCookieImport.parse("pt_key=a;pt_pin=b", platform: .pdd))
+        XCTAssertThrowsError(try MallCookieImport.parse("foreign_token=a;foreign_user=b", platform: .pdd))
         XCTAssertNoThrow(try MallCookieImport.parse("PDDAccessToken=fixture;pdd_user_id=123456", platform: .pdd))
     }
 }
+

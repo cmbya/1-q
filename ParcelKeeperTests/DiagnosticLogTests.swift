@@ -134,6 +134,26 @@ final class DiagnosticLogTests: XCTestCase {
         }
         wait(for: [done], timeout: 5)
     }
+    func testRetiredConnectorEntriesDoNotDisableCurrentDiagnostics() throws {
+        let logger = log()
+        logger.record(.appStarted)
+        _ = logger.snapshotForTesting()
+        let url = root.appendingPathComponent("diagnostics.json")
+        var archive = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        var entries = try XCTUnwrap(archive["entries"] as? [[String: Any]])
+        var retired = entries[0]
+        retired["event"] = "jdOperationFinished"
+        retired["stage"] = "jdOrdersParse"
+        entries.append(retired); archive["entries"] = entries
+        try JSONSerialization.data(withJSONObject: archive).write(to: url)
+        let restored = log()
+        XCTAssertEqual(restored.snapshotForTesting().status, .ready)
+        restored.record(.trackingStarted)
+        let snapshot = restored.snapshotForTesting()
+        XCTAssertTrue(snapshot.text.contains("appStarted"))
+        XCTAssertTrue(snapshot.text.contains("trackingStarted"))
+        XCTAssertFalse(snapshot.text.contains("jdOperationFinished"))
+    }
     func testUnknownPersistedEventIsCorrupt() throws {
         let logger = log()
         logger.record(.appStarted)
@@ -152,3 +172,4 @@ final class DiagnosticLogTests: XCTestCase {
         XCTAssertEqual(log().snapshotForTesting().status, .corrupt)
     }
 }
+

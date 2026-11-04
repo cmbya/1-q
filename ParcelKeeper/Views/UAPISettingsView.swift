@@ -16,7 +16,7 @@ struct UAPISettingsView: View {
                     if value { consent = true }
                     else { run { try settings.setEnabled(false); enabled = false } }
                 }))
-                Text("查询会将快递单号及必要的收件人手机尾号发送至 uapis.cn。官方文档目前标注每次查询40积分，以实际账户计费为准。不会匿名回退或自动重试计费请求。")
+                Text("40积分/次，实际扣费以平台为准。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             Section("API Key") {
@@ -26,7 +26,7 @@ struct UAPISettingsView: View {
                 Button("保存密钥") { run { try settings.saveKey(key); key = ""; hasKey = try settings.hasKey(); message = "密钥已保存。" } }
                     .disabled(key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("删除密钥", role: .destructive) { run { try settings.removeKey(); hasKey = false; enabled = settings.isEnabled(); message = "密钥已删除。" } }
-                Text("密钥不进入JSON备份、日志或快捷指令参数。请勿把密钥提交到公开仓库。")
+                Text("密钥仅保存在本机。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             Section("积分用量") {
@@ -39,7 +39,7 @@ struct UAPISettingsView: View {
                 } else {
                     Text("暂未获取积分信息")
                 }
-                Text("随正常物流查询更新，不额外发送收费请求。显示最近一次服务器返回的信息，并非实时余额。官方将此额度标为资源包积分，不代表免费月额度与现金余额的合计；完整额度请查看控制台。")
+                Text("随物流查询更新，实际余额以控制台为准。")
                     .font(.footnote).foregroundStyle(.secondary)
                 Link("查看 UAPI 用量控制台", destination: URL(string: "https://uapis.cn/console/usage")!)
             }
@@ -59,10 +59,11 @@ struct UAPISettingsView: View {
         .confirmationDialog("允许向 UAPI 发送物流查询信息？", isPresented: $consent, titleVisibility: .visible) {
             Button("同意并启用") { run { try settings.setEnabled(true, privacyConfirmed: true); enabled = true; message = "已启用。" } }
             Button("取消", role: .cancel) {}
-        } message: { Text("每次查询会发送单号及本次提供或本票已保存的手机尾号，并可能消耗账户积分。尾号保存在本机钥匙串，可在快递详情清除，不进入JSON备份。") }
+        } message: { Text("查询会发送运单号和已保存尾号，40积分/次。") }
     }
     private func run(_ action: () throws -> Void) {
         do { try action() } catch { message = error.localizedDescription }
         usage = settings.usageSnapshot()
     }
 }
+

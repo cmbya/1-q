@@ -32,7 +32,7 @@ struct MallCandidateBatchResult {
                         result.failed += 2
                     }
                 } else {
-                    result.candidates.append(MallCandidate(trackingNumber: value.number, carrier: value.carrier, title: order.title, orderID: order.id, sourceURL: order.url.absoluteString))
+                    result.candidates.append(MallCandidate(trackingNumber: value.number, carrier: value.carrier, title: order.title, orderID: order.id))
                 }
             } catch is CancellationError { throw CancellationError() }
             catch {
@@ -43,3 +43,4 @@ struct MallCandidateBatchResult {
         return result
     }
 }
+

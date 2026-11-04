@@ -25,11 +25,11 @@ class PaidCacheContract(unittest.TestCase):
         view = text('ParcelKeeper/Views/ShipmentDetailView.swift')
         for token in ['forceQueryMode', 'ignoreCache', '忽略缓存', '缓存时长', '普通刷新优先使用缓存']:
             self.assertNotIn(token, view)
-        self.assertIn('每次查询都会联网', view)
-        self.assertIn('可能计费', view)
+        self.assertIn('4积分/次', view)
+        self.assertIn('40积分/次', view)
     def test_actual_channel_and_latest_collection_use_shared_resolvers(self):
         view = text('ParcelKeeper/Views/ShipmentDetailView.swift')
-        self.assertIn('LabeledContent("实际默认查询渠道", value: resolvedChannelName(shipment))', view)
+        self.assertIn('Picker("默认渠道", selection: Binding(', view)
         self.assertIn('TrackingRefreshService.resolvedChannel(shipment)', view)
         self.assertIn('TrackingRefreshService.resolvedChannel(current, mode: mode)', view)
         self.assertIn('catch { return "不可用" }', view)
@@ -50,3 +50,4 @@ class PaidCacheContract(unittest.TestCase):
         self.assertIn('历史兼容', source)
 if __name__ == '__main__':
     unittest.main()
+

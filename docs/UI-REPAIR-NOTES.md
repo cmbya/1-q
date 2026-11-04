@@ -2,7 +2,6 @@
 
 ## Scope and causes
 
-- Shipment detail resolved `jd` but omitted its display case, producing “不可用”. Added the 京东 App-in-session label; routing/login/import code is unchanged.
 - Reminder controls were initialized on appearance only. `store.reload()`, foreground reconciliation and backup replacement could update committed dates without updating local controls. State `onChange` handlers also made a programmatic restoration capable of scheduling another reminder.
 - Settings checked notification authorization only on its initial task or explicit request. Returning from Settings.app did not re-read permission.
 - The app had no foreground notification delegate. Pickup widget open actions had no group destination, and pickup code/location text used fixed 9–14 pt sizes.
@@ -43,3 +42,4 @@ The process-lifetime `NotificationManager.shared` implements `UNUserNotification
 2. Toggle notification permission in Settings.app, return to visible app settings, and confirm current status. With previously granted permission, verify foreground delivery produces banner/list/sound subject to iOS/Focus policy.
 3. Verify A–J small/medium/large widgets at default, XXXL and largest accessibility sizes with long codes/locations, VoiceOver and hidden-row counts.
 4. Open each widget group while the app is cold/warm, currently on train/settings, or filtered to completed/search. Delete a bound group and retry. Verify malformed URLs do nothing, root opens all groups, completion never opens/completes another record, and train/shipments links still work.
+

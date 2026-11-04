@@ -27,6 +27,7 @@ class TminiContract(unittest.TestCase):
         self.assertIn('TminiSettingsView()', self.text('ParcelKeeper/Views/SettingsView.swift'))
         self.assertIn('SecureField', self.text('ParcelKeeper/Views/TminiSettingsView.swift'))
         self.assertIn('case .tmini: return .tmini', self.text('ParcelKeeper/Intents/TrackingRefreshIntents.swift'))
-        self.assertIn('Text("Tmini（付费查询）").tag("tmini")', self.text('ParcelKeeper/Views/ShipmentDetailView.swift'))
+        self.assertIn('Text("Tmini").tag("tmini")', self.text('ParcelKeeper/Views/ShipmentDetailView.swift'))
         self.assertTrue((ROOT / 'docs/TMINI-TRACKING.md').is_file())
 if __name__ == '__main__': unittest.main()
+

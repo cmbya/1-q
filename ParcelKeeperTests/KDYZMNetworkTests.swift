@@ -128,7 +128,7 @@ final class KDYZMNetworkTests: XCTestCase {
             service.backendConnection = connection; service.backendClient = client
             let report = try await service.refreshPending(mode: .platformOnly)
             XCTAssertEqual(report.succeeded, 1); XCTAssertEqual(report.failed, 0)
-            XCTAssertEqual(report.backendCount, 1); XCTAssertEqual(report.taobaoCount + report.pddCount + report.jdCount + report.uapiCount + report.tminiCount, 0)
+            XCTAssertEqual(report.backendCount, 1); XCTAssertEqual(report.taobaoCount + report.pddCount + report.uapiCount + report.tminiCount, 0)
             XCTAssertEqual(paid.calls, 0)
             XCTAssertEqual(transport.requests.map { $0.url?.path }, ["/v1/orders/o/refresh", "/v1/snapshot"])
             let after = try XCTUnwrap(store.snapshot().shipments.first)
@@ -191,3 +191,4 @@ final class KDYZMNetworkTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(Shipment.self, from: JSONEncoder().encode(new)), new)
     }
 }
+

@@ -292,25 +292,12 @@ final class ShipmentStore: ObservableObject {
     /// Confirmed mall import only; binding uses the refresh lease before the dataset lock.
     /// Existing user fields and explicit UAPI overrides are never replaced by mall metadata.
     @discardableResult func importMall(_ candidate: MallCandidate, platform: String) throws -> UUID {
-        guard platform == "pdd" || platform == "jd",
+        guard platform == "pdd",
               Shipment.validPlatformOrderID(candidate.orderID, platform: platform) else {
             throw PickupStorageError.stalePreview
         }
-        let sourceURL: String?
-        if platform == "jd", let raw = candidate.sourceURL {
-            guard let safe = Shipment.logisticsEntry(raw, orderID: candidate.orderID) else { throw PickupStorageError.stalePreview }
-            sourceURL = safe
-        } else { sourceURL = nil }
         let number = try ShipmentShortcutParser.number(candidate.trackingNumber)
-        if platform == "jd" {
-            guard number == candidate.trackingNumber else { throw MallWebError.identityMismatch }
-            if let detail = candidate.previewDetail {
-                guard detail.number == number,
-                      detail.acceptsCarrier(name: candidate.carrier, code: CarrierDetector.carrierMentioned(in: candidate.carrier)?.code ?? CarrierDetector.unknown.code) else {
-                    throw MallWebError.identityMismatch
-                }
-            }
-        }
+
         guard let storage else { throw PickupStorageError.appGroupUnavailable }
         let matches = try storage.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }
         guard matches.count <= 1 else { throw ShipmentShortcutError.ambiguous }
@@ -321,9 +308,7 @@ final class ShipmentStore: ObservableObject {
                 let indices = data.shipments.indices.filter { CarrierDetector.sanitize(data.shipments[$0].trackingNumber) == number }
                 guard indices.count == 1, let index = indices.first, data.shipments[index].id == previous.id else { throw PickupStorageError.stalePreview }
                 let current = data.shipments[index]
-                if platform == "jd", let detail = candidate.previewDetail {
-                    guard detail.acceptsCarrier(name: current.carrierName, code: current.carrierCode) else { throw MallWebError.identityMismatch }
-                }
+
                 guard current.originPlatform == nil || current.originPlatform == platform,
                       current.taobaoOrderID == nil,
                       current.platformOrderID == nil || current.platformOrderID == candidate.orderID else {
@@ -331,27 +316,15 @@ final class ShipmentStore: ObservableObject {
                 }
                 data.shipments[index].originPlatform = platform
                 data.shipments[index].platformOrderID = candidate.orderID
-                if let sourceURL { data.shipments[index].platformLogisticsURL = sourceURL }
                 return current.id
             }
         }
         let detection = CarrierDetector.detect(number, context: candidate.carrier)
         let shipment = Shipment(trackingNumber: number, carrierName: detection.carrier.name, carrierCode: detection.carrier.code,
-                                note: candidate.title, originPlatform: platform, platformOrderID: candidate.orderID, platformLogisticsURL: sourceURL)
+                                note: candidate.title, originPlatform: platform, platformOrderID: candidate.orderID)
         try addThrowing(shipment)
         return shipment.id
     }
-    /// Consume this confirmation's in-memory JD preview through the regular safe tracking merge.
-    /// Reuse this store's container, including injected/test storage; never construct a live store here.
-    @discardableResult func applyMallPreview(id: UUID, candidate: MallCandidate, expectedGeneration: UUID) throws -> Bool {
-        guard let storage else { throw PickupStorageError.appGroupUnavailable }
-        let result = try TrackingRefreshService(store: storage, client: UAPITrackingClient()).applyMallPreview(
-            id: id, candidate: candidate, expectedGeneration: expectedGeneration)
-        do { try reload() }
-        catch { lastErrorMessage = "预览物流已保存，但本地列表刷新失败，请返回列表核对。" }
-        return result
-    }
-
     @discardableResult func add(_ shipment: Shipment) -> Bool {
         do { try addThrowing(shipment); return true }
         catch { lastErrorMessage = error.localizedDescription; return false }
@@ -695,4 +668,3 @@ final class ShipmentStore: ObservableObject {
         return false
     }
 }
-

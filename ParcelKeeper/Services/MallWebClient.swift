@@ -1,29 +1,25 @@
 import Foundation
 import WebKit
 
-/// Credential-aware JD entry: PC thor uses direct protocol; mobile login uses foreground WebKit.
-/// Neither type implies authentication until its own order verification succeeds.
+/// Supported direct mall connector. Session presence alone does not prove authentication.
 enum MallPlatform: String, CaseIterable, Identifiable, Codable {
     case pdd
-    case jd
     var id: String { rawValue }
-    var title: String { self == .jd ? "京东" : "拼多多" }
+    var title: String { "拼多多" }
     var loginURL: URL {
-        if self == .jd { return URL(string: "https://plogin.m.jd.com/login/login")! }
         var url = URLComponents(string: "https://mobile.yangkeduo.com/login.html")!
         url.queryItems = [.init(name: "_x_no_login_launch", value: "1"), .init(name: "from", value: ordersURL.absoluteString)]
         return url.url!
     }
     var userAgent: String {
-        if self == .jd { return "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1" }
         return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/17.0 Safari/605.1.15"
     }
-    var ordersURL: URL { URL(string: self == .jd ? "https://trade.m.jd.com/order/orderlist_jdm.shtml" : "https://mobile.yangkeduo.com/orders.html")! }
+    var ordersURL: URL { URL(string: "https://mobile.yangkeduo.com/orders.html")! }
     var sessionService: String { "ParcelKeeper.Mall.Web.\(rawValue)" }
     func allowed(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "https", url.user == nil, url.password == nil,
               url.port == nil || url.port == 443, let host = url.host?.lowercased() else { return false }
-        let domains = self == .jd ? ["jd.com"] : ["yangkeduo.com", "pinduoduo.com"]
+        let domains = ["yangkeduo.com", "pinduoduo.com"]
         return domains.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 }
@@ -36,10 +32,7 @@ enum MallPlatform: String, CaseIterable, Identifiable, Codable {
         stores[platform] = next
         return next
     }
-    static func commitJD(_ store: WKWebsiteDataStore) {
-        // Only publish a fresh login context after order verification and Keychain save.
-        stores[.jd] = store
-    }
+
     static func detach(_ platform: MallPlatform) -> WKWebsiteDataStore {
         stores.removeValue(forKey: platform) ?? WKWebsiteDataStore.nonPersistent()
     }
@@ -58,54 +51,21 @@ struct MallCandidate: Identifiable {
     let carrier: String
     let title: String
     let orderID: String
-    var sourceURL: String? = nil
-    // In-memory result from this preview only; never a persisted cache or a reason to re-query.
-    var previewDetail: MallWebDetail? = nil
     var id: String { trackingNumber }
 
-    func jdPreviewResult() throws -> UAPITrackingResult {
-        guard Shipment.validPlatformOrderID(orderID, platform: "jd"),
-              (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw MallWebError.identityMismatch }
-        if let sourceURL, Shipment.logisticsEntry(sourceURL, orderID: orderID) == nil { throw MallWebError.identityMismatch }
-        guard let detail = previewDetail else { throw MallWebError.noTrace }
-        guard detail.number == trackingNumber,
-              detail.acceptsCarrier(name: carrier, code: CarrierDetector.carrierMentioned(in: carrier)?.code ?? CarrierDetector.unknown.code) else {
-            throw MallWebError.identityMismatch
-        }
-        return try detail.result(expected: trackingNumber, platform: .jd)
-    }
 }
 protocol MallTrackingQuerying {
     func query(platform: String, orderID: String, trackingNumber: String) async throws -> UAPITrackingResult
-    func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult
-}
-extension MallTrackingQuerying {
-    func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
-        try await query(platform: platform, orderID: orderID, trackingNumber: trackingNumber)
-    }
 }
 struct MallTrackingClient: MallTrackingQuerying {
     func query(platform: String, orderID: String, trackingNumber: String) async throws -> UAPITrackingResult {
-        try await query(platform: platform, orderID: orderID, trackingNumber: trackingNumber, sourceURL: nil)
-    }
-    func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
-        let entry: String?
-        if platform == .jd, let sourceURL {
-            guard Shipment.validPlatformOrderID(orderID, platform: "jd"),
-                  let safe = Shipment.logisticsEntry(sourceURL, orderID: orderID) else { throw MallWebError.identityMismatch }
-            entry = safe
-        } else { entry = nil }
         try Task.checkCancellation()
         let generation = MallSession.generation(for: platform)
         let cookies = try MallSession.withGeneration(platform: platform, expected: generation) {
             try MallSession(platform: platform).load()
         }
-        let result: UAPITrackingResult
-        if platform == .jd {
-            result = try await JDInAppClient(cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber, sourceURL: entry)
-        }
-        else { result = try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
+        let result = try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber)
         try Task.checkCancellation()
         return try MallSession.withGeneration(platform: platform, expected: generation) { result }
     }
@@ -180,15 +140,11 @@ struct MallSession {
               let url = URL(string: "https://" + bare), platform.allowed(url) else { return false }
         return true
     }
-    static func hasJDPCSession(_ cookies: [TaobaoTrialCookie]) -> Bool {
-        let api = URL(string: "https://api.m.jd.com/api")!
-        return cookies.contains { $0.name == "thor" && !$0.value.isEmpty && valid($0, platform: .jd) && applies($0, to: api, platform: .jd) }
-    }
+
     static func hasLoginCredentials(_ cookies: [TaobaoTrialCookie], platform: MallPlatform) -> Bool {
         let relevant = cookies.filter { applies($0, to: platform.ordersURL, platform: platform) && !$0.value.isEmpty }
         let names = Set(relevant.map(\.name))
         // Presence is only a preflight; each connector verifies its own actual order response.
-        if platform == .jd { return (names.contains("pt_key") && names.contains("pt_pin")) || hasJDPCSession(cookies) }
         return names.contains("PDDAccessToken") && (names.contains("pdd_user_id") || names.contains("pdduid"))
     }
     func load() throws -> [TaobaoTrialCookie] {
@@ -229,17 +185,6 @@ struct MallSession {
         defer { Self.advanceGeneration(for: platform) }
         do { try write(text) } catch { throw MallWebError.authentication }
     }
-    @discardableResult
-    func saveRotated(_ cookies: [TaobaoTrialCookie], replacing original: [TaobaoTrialCookie], expectedGeneration: UUID) throws -> Bool {
-        let text = try prepared(cookies)
-        Self.sessionLock.lock(); defer { Self.sessionLock.unlock() }
-        guard Self.currentGeneration(for: platform) == expectedGeneration else { return false }
-        guard let active = try? load(), try Self.encoded(active) == Self.encoded(original) else { return false }
-        // Compare-and-save prevents an old request replacing newer rotation/login.
-        if try Self.encoded(cookies) == Self.encoded(original) { return true }
-        do { try write(text); return true }
-        catch { Self.advanceGeneration(for: platform); throw MallWebError.authentication }
-    }
     func clear() throws {
         Self.sessionLock.lock(); defer { Self.sessionLock.unlock() }
         defer { Self.advanceGeneration(for: platform) }
@@ -254,27 +199,9 @@ struct MallWebDetail {
     let number: String
     let carrier: String
     let points: [MallWebPoint]
-    /// A platform preview must never silently rename a different known carrier.
-    /// Empty/unidentified labels supply no contrary identity evidence.
-    func acceptsCarrier(name: String, code: String) -> Bool {
-        let incoming = CarrierDetector.carrierMentioned(in: carrier)
-        let saved = CarrierDetector.allCarriers.first { $0.code == code && $0 != CarrierDetector.unknown }
-            ?? CarrierDetector.carrierMentioned(in: name)
-        if let incoming, let saved { return incoming.code == saved.code }
-        let lhs = carrier.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rhs = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let placeholders = ["", CarrierDetector.unknown.name, "未知", "未知快递", "未知物流"]
-        if placeholders.contains(lhs) || placeholders.contains(rhs) { return true }
-        // Nonempty custom labels are identity too; don't silently rename them.
-        return lhs == rhs
-    }
     func result(expected: String, platform: MallPlatform) throws -> UAPITrackingResult {
         guard number == expected else { throw MallWebError.identityMismatch }
-        // JD preview only: an empty description or non-finite date is not a real trace.
-        // PDD's established parsing/result behavior remains unchanged.
-        let events = platform == .jd ? points.filter {
-            $0.date.timeIntervalSinceReferenceDate.isFinite && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        } : points
+        let events = points
         guard let latest = events.max(by: { $0.date < $1.date }) else { throw MallWebError.noTrace }
         // Only the latest dated event may contribute a conservative status.
         return UAPITrackingResult(trackingNumber: number, carrierName: carrier, carrierCode: "", status: MallDeliveryState.resolve(latest: latest.text),
@@ -285,7 +212,6 @@ struct MallWebDetail {
 
 enum MallWebParser {
     static func identifier(_ value: String, platform: MallPlatform) -> Bool {
-        if platform == .jd { return Shipment.validPlatformOrderID(value, platform: "jd") }
         let pattern = #"^[0-9]{6}-[0-9]{6,32}$"#
         return value.range(of: pattern, options: .regularExpression).map { $0 == (value.startIndex..<value.endIndex) } ?? false
     }
@@ -293,7 +219,6 @@ enum MallWebParser {
         value.range(of: #"^[A-Za-z0-9]{6,40}$"#, options: .regularExpression).map { $0 == (value.startIndex..<value.endIndex) } ?? false
     }
     static func detailURL(platform: MallPlatform, orderID: String) throws -> URL {
-        if platform == .jd { throw MallWebError.unsupported }
         guard identifier(orderID, platform: platform) else { throw MallWebError.identityMismatch }
         var components = URLComponents(string: "https://mobile.yangkeduo.com/order.html")!
         components.queryItems = [URLQueryItem(name: "order_sn", value: orderID)]
@@ -301,7 +226,6 @@ enum MallWebParser {
         return url
     }
     static func orders(_ root: [String: Any], platform: MallPlatform) throws -> [MallWebOrder] {
-        if platform == .jd { throw MallWebError.unsupported }
         let array = root["orders"] as? [[String: Any]] ?? (root["result"] as? [String: Any])?["orders"] as? [[String: Any]]
         guard let array, array.count <= 200 else { throw MallWebError.unsupported }
         var result: [MallWebOrder] = []

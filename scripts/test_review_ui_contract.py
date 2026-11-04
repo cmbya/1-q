@@ -14,5 +14,6 @@ refresh=(r/'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
 assert 'SmartShipmentParser.parseReport(text)' in home and 'report.hasFailures' in home
 assert 'await store.reconcileReminders()' in settings and 'importedShipments' not in settings
 assert 'expectedBinding: binding' in widget
-assert 'sourceURL: before.platformLogisticsURL' in refresh
+assert 'sourceURL: before.platformLogisticsURL' not in refresh
 print('PASS UI source contracts, not SwiftUI/device tests')
+

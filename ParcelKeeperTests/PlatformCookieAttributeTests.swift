@@ -3,7 +3,7 @@ import XCTest
 
 final class PlatformCookieAttributeTests: XCTestCase {
     func testOldSessionWithoutHTTPOnlyStillDecodes() throws {
-        let json = Data(#"{"name":"pt_key","value":"synthetic","domain":".jd.com","path":"/","secure":true}"#.utf8)
+        let json = Data(#"{"name":"session_token","value":"synthetic","domain":".taobao.com","path":"/","secure":true}"#.utf8)
         let stored = try JSONDecoder().decode(TaobaoTrialCookie.self, from: json)
         XCTAssertNil(stored.httpOnly)
         let cookie = try XCTUnwrap(stored.webCookie())
@@ -14,7 +14,7 @@ final class PlatformCookieAttributeTests: XCTestCase {
         // Foundation caps far-future Cookie expiries. Verify exact preservation
         // inside the system-supported window, without subsecond rounding noise.
         let expires = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970) + 86_400)
-        let stored = TaobaoTrialCookie(name: "pt_key", value: "synthetic", domain: ".jd.com", path: "/order", secure: true, expires: expires, httpOnly: true)
+        let stored = TaobaoTrialCookie(name: "session_token", value: "synthetic", domain: ".taobao.com", path: "/order", secure: true, expires: expires, httpOnly: true)
         let roundTrip = try JSONDecoder().decode(TaobaoTrialCookie.self, from: JSONEncoder().encode(stored))
         let cookie = try XCTUnwrap(roundTrip.webCookie())
         XCTAssertTrue(cookie.isHTTPOnly)
@@ -24,3 +24,4 @@ final class PlatformCookieAttributeTests: XCTestCase {
         XCTAssertEqual(cookie.value, "synthetic")
     }
 }
+

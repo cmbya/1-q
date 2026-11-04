@@ -59,7 +59,7 @@ final class MallDirectClientTests: XCTestCase {
         await failure(.noTrace) { _ = try await MallDirectClient(platform: .pdd, cookies: self.cookies(.pdd), network: MallDirectFixtureNetwork([self.html(self.pddList()), self.html(self.pddShip(traces: []))])).query(orderID: "261021-009237962271222", trackingNumber: "77127094235378") }
     }
     func testCookieIsolationAndHeaderInjection() async throws {
-        let foreign = TaobaoTrialCookie(name: "foreign", value: "secret", domain: ".jd.com", path: "/", secure: true, expires: nil)
+        let foreign = TaobaoTrialCookie(name: "foreign", value: "secret", domain: ".example.invalid", path: "/", secure: true, expires: nil)
         let hostOnly = TaobaoTrialCookie(name: "hostOnly", value: "secret", domain: "yangkeduo.com", path: "/", secure: true, expires: nil)
         let scoped = TaobaoTrialCookie(name: "scoped", value: "secret", domain: ".yangkeduo.com", path: "/other", secure: true, expires: nil)
         let expired = TaobaoTrialCookie(name: "expired", value: "secret", domain: ".yangkeduo.com", path: "/", secure: true, expires: .distantPast)
@@ -138,3 +138,4 @@ private final class MallDirectFixtureNetwork: AINetworking {
         return (responses.removeFirst(), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
 }
+

@@ -35,9 +35,9 @@ class KDYZMContract(unittest.TestCase):
         merge = (ROOT/'ParcelKeeper/Services/KDYZMSync.swift').read_text()
         store = (ROOT/'ParcelKeeper/Services/ShipmentStore.swift').read_text()
         refresh = (ROOT/'ParcelKeeper/Services/TrackingRefreshService.swift').read_text()
-        # Backend sync stays platform-agnostic; independent JD import is now explicitly authorized.
+        # Backend sync accepts authorized records independently of direct mall connectors.
         self.assertNotIn('platform == "jd"', merge)
-        self.assertIn('platform == "pdd" || platform == "jd"', store)
+        self.assertIn('guard platform == "pdd",', store)
         self.assertIn('originPlatform: order.platform', merge)
         self.assertIn('local.originPlatform = order.platform', merge)
         self.assertIn('case backend', refresh)
@@ -50,3 +50,4 @@ class KDYZMContract(unittest.TestCase):
         self.assertIn('local.taobaoOrderID == nil', merge)
         self.assertNotIn('后台（京东）', (ROOT/'ParcelKeeper/Intents/TrackingRefreshIntents.swift').read_text())
 if __name__ == '__main__': unittest.main()
+
