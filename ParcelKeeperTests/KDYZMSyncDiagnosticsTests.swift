@@ -23,6 +23,72 @@ final class KDYZMSyncDiagnosticsTests: XCTestCase {
         XCTAssertEqual(try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &data).imported, 0)
         XCTAssertEqual(data.shipments.map(\.id), ids)
     }
+    func testCombinedParcelSharedCodeImportsAndFillsExistingBindings() throws {
+        for fillLater in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+            var snapshot = fixture()
+            if fillLater { try store.transaction { _ = try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) } }
+            for i in snapshot.shipments.indices { snapshot.shipments[i].pickupCode = "42" }
+            let first = try store.transaction { try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) }
+            XCTAssertEqual(fillLater ? first.updated : first.imported, 2)
+            let saved = try store.snapshot()
+            XCTAssertEqual(saved.records.map(\.code), ["42", "42"])
+            XCTAssertTrue(saved.records.allSatisfy { !$0.isCompleted })
+            XCTAssertEqual(Set(saved.shipments.compactMap(\.backendBinding)).count, 2)
+            let repeated = try store.transaction { try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) }
+            XCTAssertEqual(repeated.unchanged, 2)
+            XCTAssertEqual(try store.snapshot(), saved)
+        }
+    }
+    func testSharedCodeNeverCrossesAccountPlatformCarrierOrWaybill() throws {
+        for variant in 0..<4 {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+            let before = try store.exportBackup()
+            var snapshot = fixture()
+            for i in snapshot.shipments.indices { snapshot.shipments[i].pickupCode = "42" }
+            switch variant {
+            case 0: snapshot.orders[1].accountId = "other"; snapshot.shipments[1].accountId = "other"
+            case 1: snapshot.orders[1].platform = "pdd"
+            case 2: snapshot.shipments[1].carrier = "顺丰"
+            default: snapshot.shipments[1].waybillNo = "YT9999999999999"
+            }
+            XCTAssertThrowsError(try store.transaction { try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) })
+            XCTAssertEqual(try store.exportBackup(), before)
+        }
+    }
+    func testEmptyCarrierSnapshotRemainsIdempotentAndExplicitConflictRejects() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        var snapshot = fixture()
+        for i in snapshot.shipments.indices { snapshot.shipments[i].carrier = "" }
+        XCTAssertEqual(try store.transaction { try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) }.imported, 2)
+        let saved = try store.snapshot()
+        XCTAssertTrue(saved.shipments.allSatisfy { $0.carrierCode == "yto" })
+        XCTAssertEqual(try store.transaction { try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) }.unchanged, 2)
+        XCTAssertEqual(try store.snapshot(), saved)
+        snapshot.shipments[1].carrier = "顺丰"
+        XCTAssertThrowsError(try store.transaction { try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) })
+        XCTAssertEqual(try store.snapshot(), saved)
+        XCTAssertFalse(KDYZMMerger.acceptsCarrier("", local: saved.shipments[0], exactBinding: false))
+    }
+    @MainActor func testSharedParcelCodeCanBeReopenedAfterManualCompletion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        var snapshot = fixture()
+        for i in snapshot.shipments.indices { snapshot.shipments[i].pickupCode = "42" }
+        try store.transaction { _ = try KDYZMMerger.apply(snapshot, origin: "https://example.com", to: &$0) }
+        let app = ShipmentStore(storageProvider: { store })
+        let id = try XCTUnwrap(app.pickupRecords.first?.id)
+        try app.setPickupCompleted(id: id, completed: true)
+        try app.setPickupCompleted(id: id, completed: false)
+        XCTAssertTrue(try store.snapshot().records.allSatisfy { !$0.isCompleted })
+    }
     func testDuplicateWithinOrderAndUnauthorizedStillReject() throws {
         var snapshot = fixture()
         snapshot.shipments[1].orderId = "o1"
@@ -56,3 +122,4 @@ final class KDYZMSyncDiagnosticsTests: XCTestCase {
         }
     }
 }
+

@@ -141,6 +141,29 @@ enum KDYZMMerger {
         if CarrierDetector.allCarriers.contains(where: { $0.code == key }) { return key }
         return key
     }
+    // Missing remote metadata is acceptable only after an exact backend binding match.
+    static func acceptsCarrier(_ raw: String, local: Shipment, exactBinding: Bool) -> Bool {
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return exactBinding }
+        return carrierKey(local.carrierName) == carrierKey(raw) || local.carrierCode == carrierKey(raw)
+    }
+    // A combined parcel may have multiple order bindings, but never crosses accounts/platforms.
+    static func sameParcel(_ lhs: Shipment, _ rhs: Shipment) -> Bool {
+        guard let a = lhs.backendBinding, let b = rhs.backendBinding,
+              a.origin == b.origin, a.accountID == b.accountID,
+              let platform = lhs.originPlatform, platform == rhs.originPlatform,
+              !CarrierDetector.sanitize(lhs.trackingNumber).isEmpty,
+              CarrierDetector.sanitize(lhs.trackingNumber) == CarrierDetector.sanitize(rhs.trackingNumber) else { return false }
+        let left = carrierKey(lhs.carrierName), right = carrierKey(rhs.carrierName)
+        return !left.isEmpty && left != CarrierDetector.unknown.name && left == right
+    }
+    private static func conflictingPickup(code: String, groupID: UUID, shipment: Shipment, in data: PickupDataset) -> Bool {
+        data.records.contains { record in
+            guard record.shipmentID != shipment.id, !record.isCompleted, record.groupID == groupID,
+                  record.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+            guard let id = record.shipmentID, let other = data.shipments.first(where: { $0.id == id }) else { return true }
+            return !sameParcel(shipment, other)
+        }
+    }
     static func sameIdentity(_ current: Shipment, _ before: Shipment) -> Bool {
         current.id == before.id && current.backendBinding == before.backendBinding &&
         current.trackingNumber == before.trackingNumber && current.carrierCode == before.carrierCode &&
@@ -238,8 +261,7 @@ enum KDYZMMerger {
                     guard local.originPlatform == order.platform, local.platformOrderID == order.platformOrderId else { throw KDYZMError.stale }
                 }
                 guard CarrierDetector.sanitize(local.trackingNumber) == number,
-                      !remote.carrier.isEmpty,
-                      carrierKey(local.carrierName) == carrierKey(remote.carrier) || local.carrierCode == carrierKey(remote.carrier) else { throw KDYZMError.stale }
+                      acceptsCarrier(remote.carrier, local: local, exactBinding: local.backendBinding == binding) else { throw KDYZMError.stale }
                 local.backendBinding = binding; local.originPlatform = order.platform
                 local.platformOrderID = order.platformOrderId
                 // Only explicit overrides opt out; historical source is not routing.
@@ -251,10 +273,7 @@ enum KDYZMMerger {
                     let linked = data.records.indices.filter { data.records[$0].shipmentID == local.id }
                     guard linked.count == 1, let record = linked.first, data.records[record].code.isEmpty else { throw KDYZMError.invalid }
                     let target = data.records[record]
-                    guard target.isCompleted || !data.records.contains(where: {
-                        $0.id != target.id && !$0.isCompleted && $0.groupID == target.groupID &&
-                        $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines)
-                    }) else { throw KDYZMError.invalid }
+                    guard target.isCompleted || !conflictingPickup(code: code, groupID: target.groupID, shipment: local, in: data) else { throw KDYZMError.invalid }
                     local.pickupCode = code
                     data.records[record].code = code
                 }
@@ -266,11 +285,11 @@ enum KDYZMMerger {
                 let detection = CarrierDetector.detect(number, context: remote.carrier)
                 // Remote metadata seeds new tickets, never implies manual collection.
                 let pickupCode = remote.pickupCode ?? ""
-                guard pickupCode.isEmpty || !data.records.contains(where: { !$0.isCompleted && $0.groupID == group && $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == pickupCode.trimmingCharacters(in: .whitespacesAndNewlines) }) else { throw KDYZMError.invalid }
                 var local = Shipment(trackingNumber: number, carrierName: remote.carrier.isEmpty ? detection.carrier.name : remote.carrier,
                                      carrierCode: detection.carrier.code, note: order.title ?? "", pickupCode: pickupCode,
                                      originPlatform: order.platform, platformOrderID: order.platformOrderId)
                 local.backendBinding = binding
+                guard pickupCode.isEmpty || !conflictingPickup(code: pickupCode, groupID: group, shipment: local, in: data) else { throw KDYZMError.invalid }
                 switch remote.status {
                 case "signed": local.status = .delivered
                 case "arrived": local.status = .readyForPickup
@@ -420,7 +439,7 @@ struct KDYZMRefreshService {
               snapshot.orders.contains(where: { $0.id == binding.orderID && $0.accountId == binding.accountID && $0.platform == before.originPlatform && $0.platformOrderId == before.platformOrderID }),
               !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id), remote.hidden != true, remote.deleted != true,
               CarrierDetector.sanitize(remote.waybillNo) == CarrierDetector.sanitize(before.trackingNumber),
-              KDYZMMerger.carrierKey(remote.carrier) == KDYZMMerger.carrierKey(before.carrierName) || KDYZMMerger.carrierKey(remote.carrier) == before.carrierCode else { throw KDYZMError.stale }
+              KDYZMMerger.acceptsCarrier(remote.carrier, local: before, exactBinding: true) else { throw KDYZMError.stale }
         guard remote.logisticsState == "ok", !(remote.logisticsEvents ?? []).isEmpty else {
             throw KDYZMError.empty
         }
@@ -480,3 +499,4 @@ struct KDYZMRefreshService {
         }
     }
 }
+

@@ -583,8 +583,9 @@ final class SharedPickupStoreTests: XCTestCase {
         }
         let before = try s.snapshot()
         let diskBefore = try Data(contentsOf: dataURL)
-        // Even an exact UUID match must not guess which duplicate to keep or replace.
-        let preview = try s.previewBackup(JSONEncoder().encode([first]))
+        // Without an exact UUID, the same number still cannot select a historical duplicate.
+        var incoming = first; incoming.id = UUID()
+        let preview = try s.previewBackup(JSONEncoder().encode([incoming]))
         XCTAssertTrue(preview.hasConflicts)
         for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
             XCTAssertThrowsError(try s.importBackup(preview, policy: policy)) { error in
@@ -598,6 +599,50 @@ final class SharedPickupStoreTests: XCTestCase {
         }
     }
 
+    func testExactIdentityBackupRoundTripPreservesCombinedShippingBindings() throws {
+        let s = try store()
+        var first = shipment(code: "42")
+        var second = shipment(code: "42")
+        first.backendBinding = .init(origin: "https://example.com", accountID: "a", orderID: "o1", shipmentID: "s1")
+        second.backendBinding = .init(origin: "https://example.com", accountID: "a", orderID: "o2", shipmentID: "s2")
+        try s.transaction { data in
+            for value in [first, second] {
+                data.shipments.append(value)
+                data.records.append(PickupRecord(groupID: data.groups[0].id, code: value.pickupCode, source: value.note, shipmentID: value.id))
+            }
+        }
+        let original = try s.snapshot()
+        let backup = try s.exportBackup()
+        for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
+            XCTAssertEqual(try s.importBackup(s.previewBackup(backup), policy: policy), original)
+        }
+        try s.transaction { data in
+            data.shipments[0].note = "local edit"
+            let record = try XCTUnwrap(data.records.firstIndex { $0.shipmentID == first.id })
+            data.records[record].source = "local edit"
+        }
+        let edited = try s.snapshot()
+        XCTAssertEqual(try s.importBackup(s.previewBackup(backup), policy: .keepExisting), edited)
+        XCTAssertEqual(try s.importBackup(s.previewBackup(backup), policy: .replaceExisting), original)
+    }
+    func testExactUUIDWithChangedNumberCannotOverwriteAnotherIdentity() throws {
+        let s = try store()
+        let first = shipment(code: "first")
+        var second = shipment(code: "second"); second.trackingNumber = "OTHER123"
+        try s.transaction { data in
+            for value in [first, second] {
+                data.shipments.append(value)
+                data.records.append(PickupRecord(groupID: data.groups[0].id, code: value.pickupCode, source: value.note, shipmentID: value.id))
+            }
+        }
+        let before = try s.exportBackup()
+        var changed = first; changed.trackingNumber = second.trackingNumber
+        let preview = try s.previewBackup(JSONEncoder().encode([changed]))
+        for policy in [BackupConflictPolicy.keepExisting, .replaceExisting] {
+            XCTAssertThrowsError(try s.importBackup(preview, policy: policy))
+            XCTAssertEqual(try s.exportBackup(), before)
+        }
+    }
     func testEmptyCodeShipmentAndStandaloneFoodWithSameCode() throws {
         let s = try store()
         let express = shipment(code: "")
@@ -706,3 +751,4 @@ final class SharedPickupStoreTests: XCTestCase {
     }
 
 }
+

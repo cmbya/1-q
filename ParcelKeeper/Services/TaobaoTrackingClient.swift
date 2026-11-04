@@ -132,7 +132,7 @@ enum TaobaoTrackingParser {
         }.joined(separator: "\n")
         let info = "查询来源：淘宝\n快递单号：\(trackingNumber)\n快递公司：\(carrier)\n物流轨迹：\n\(history)"
         guard info.count <= 10000 else { throw TaobaoTrackingError.unsupported }
-        return UAPITrackingResult(trackingNumber: trackingNumber, carrierName: carrier, carrierCode: "", status: status(latest.title),
+        return UAPITrackingResult(trackingNumber: trackingNumber, carrierName: carrier, carrierCode: "", status: MallDeliveryState.resolve(latest: latest.text) ?? status(latest.title),
                                   logisticsInfo: latest.text, logisticsTime: latest.date, queryInfo: info, queriedAt: now)
     }
 
@@ -265,3 +265,4 @@ enum TaobaoTrackingParser {
         throw TaobaoTrackingError.unsupported
     }
 }
+
