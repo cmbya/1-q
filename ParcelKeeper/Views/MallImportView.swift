@@ -8,8 +8,10 @@ struct MallImportSummary {
     var refreshed = 0
     var refreshFailed = 0
     var skipped = 0
+    var previewApplied = 0
+    var noTrace = 0
     var message: String {
-        "导入：新增\(added)票，已有记录补关联\(bound)票，失败\(importFailed)票。\n物流：更新\(refreshed)票，失败\(refreshFailed)票，未请求\(skipped)票。未调用UAPI。"
+        "导入：新增\(added)票，已有记录补关联\(bound)票，失败\(importFailed)票。\n物流：保存本次预览\(previewApplied)票，平台刷新\(refreshed)票，失败\(refreshFailed)票，无有效轨迹\(noTrace)票，保留／未请求\(skipped)票。未调用UAPI或Tmini。"
     }
 }
 
@@ -359,7 +361,9 @@ struct MallImportView: View {
                 }
                 Text("仅展示本次网页能够读取的订单，非全量同步；缺少运单号不会用订单号替代。请核对预览并勾选，确认后才保存。已有票仅补平台关联，不覆盖备注／取件码。")
                     .font(.footnote)
-                Text("确认后先导入／补关联，再按平台尝试刷新物流；整批物流请求预算20秒，登录／验证等错误会停止后续平台请求，但继续保存所选关联。未取得轨迹不代表已核实状态；不会自动调用UAPI。")
+                Text(platform == .jd
+                    ? "确认后导入／补关联，并直接保存本次预览中该运单的有效物流，不再联网重复查询。只有单号而无有效轨迹时仅保存关联、不计物流成功；可之后显式刷新。已有后台绑定或指定刷新渠道时保留原物流，不调用付费接口。"
+                    : "确认后先导入／补关联，再按平台尝试刷新物流；整批物流请求预算20秒，登录／验证等错误会停止后续平台请求，但继续保存所选关联。未取得轨迹不代表已核实状态；不会自动调用UAPI。")
                     .font(.footnote)
             }
             if !candidates.isEmpty {
@@ -372,12 +376,12 @@ struct MallImportView: View {
                                 Text(candidate.title).lineLimit(2)
                                 Text(candidate.carrier + " · " + candidate.trackingNumber).font(.caption)
                                 if store.contains(trackingNumber: candidate.trackingNumber) {
-                                    Text("已存在：仅补关联，随后尝试更新平台物流").font(.caption)
+                                    Text(platform == .jd ? "已存在：补关联，使用本次预览物流；保留用户信息与指定渠道" : "已存在：仅补关联，随后尝试更新平台物流").font(.caption)
                                 }
                             }
                         }.disabled(busy || store.isHistoricalSnapshot)
                     }
-                    Button("确认导入选中单号并尝试平台刷新") { importSelected() }
+                    Button(platform == .jd ? "确认导入选中单号与本次预览物流" : "确认导入选中单号并尝试平台刷新") { importSelected() }
                         .disabled(busy || selected.isEmpty || store.isHistoricalSnapshot)
                 }
             }
@@ -614,6 +618,29 @@ struct MallImportView: View {
                     jdDiagnostics?.fail(error)
                     summary.importFailed += 1
                     details.append(candidate.trackingNumber + "：导入／关联失败，未覆盖原记录。")
+                    continue
+                }
+                // JD confirmation consumes the exact per-waybill preview already read.
+                // No hidden request, no paid fallback, and no retry for number-only candidates.
+                if currentPlatform == .jd {
+                    do {
+                        try MallSession.withGeneration(platform: .jd, expected: generation) {
+                            _ = try store.applyMallPreview(id: ticketID, candidate: candidate, expectedGeneration: generation)
+                        }
+                        summary.previewApplied += 1
+                    } catch is CancellationError { return }
+                    catch MallWebError.noTrace {
+                        summary.noTrace += 1
+                        details.append(candidate.trackingNumber + "：关联已保存，本次无有效轨迹，未核实物流状态、未自动重查；可之后显式刷新。")
+                    } catch PickupStorageError.invalidData(let reason) where reason == "保留既有后台绑定或指定刷新渠道，未覆盖平台物流；未请求付费接口。" {
+                        // Fixed service-owned route protection; other storage failures remain failures.
+                        summary.skipped += 1
+                        details.append(candidate.trackingNumber + "：关联已保存，" + reason)
+                    } catch {
+                        summary.refreshFailed += 1
+                        let reason = (error as? ShipmentShortcutError)?.localizedDescription ?? safeFailure(error)
+                        details.append(candidate.trackingNumber + "：关联已保存，本次预览未覆盖原物流：" + reason)
+                    }
                     continue
                 }
                 let remaining = 20 - (ProcessInfo.processInfo.systemUptime - started)

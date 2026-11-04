@@ -131,6 +131,10 @@ struct ShipmentDetailView: View {
                     }
 
                     Section("状态") {
+                        if shipment.statusDisplayText != shipment.status.rawValue {
+                            Text("物流状态未核实；下方是本地状态，可手动设置，或显式刷新后核实。")
+                                .font(.footnote)
+                        }
                         Picker("物流状态", selection: Binding(
                             get: { shipment.status },
                             set: { value in saveEdit { try store.updateStatusThrowing(id: shipmentID, status: value) } }

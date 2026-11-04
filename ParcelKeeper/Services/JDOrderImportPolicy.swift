@@ -11,12 +11,30 @@ struct JDOrderImportReport {
     var excluded = 0
     var outsideWindow = 0
     var limited = false
+    var detailFailed = 0
+    var stoppedReason: DiagnosticReason? = nil
+    // Ephemeral order-level bookkeeping only; never persisted or logged.
+    private var failedOrders = Set<String>()
+    private var emptyOrders = Set<String>()
+    private var ambiguousNumbers = Set<String>()
+    private var numberOwners: [String: Set<String>] = [:]
+    init() {}
 
+    var numberedOrders: Int { Set(candidates.map(\.orderID)).count }
+    // These are mutually exclusive ORDER outcomes, not a subtraction of parcel counts.
+    var unreadDetails: Int { eligible - numberedOrders - withoutWaybill - detailFailed }
     var message: String {
-        let numberedOrders = Set(candidates.map(\.orderID)).count
-        let unreadDetails = max(0, eligible - numberedOrders - withoutWaybill)
-        var text = "京东近30天购物订单测试（上海日历日，含今天及前29天、所有状态含已签收）：本次去重扫描\(scanned)笔，符合日期及购物筛选\(eligible)笔，找到\(candidates.count)个可选快递运单（\(numberedOrders)笔订单）；\(withoutWaybill)笔暂无真实运单，暂无法生成快递；\(missingDate)笔缺少可信下单日期未纳入；排除明确外卖/秒送/虚拟/服务\(excluded)笔，日期范围外\(outsideWindow)笔。"
-        if unreadDetails > 0 { text += "另有\(unreadDetails)笔符合筛选订单尚未读完详情，不能视为无运单。" }
+        var text = "京东近30天购物订单测试（上海日历日，含今天及前29天、所有状态含已签收）：本次去重扫描\(scanned)笔，符合日期及购物筛选\(eligible)笔，找到\(candidates.count)个可选快递运单（\(numberedOrders)笔订单）；\(withoutWaybill)笔已读取详情但暂无真实运单，暂无法生成快递；\(detailFailed)笔详情读取失败或身份冲突，不能视为无运单；\(missingDate)笔缺少可信下单日期未纳入；排除明确外卖/秒送/虚拟/服务业务\(excluded)笔，日期范围外\(outsideWindow)笔。"
+        if !ambiguousNumbers.isEmpty { text += "跨订单同号运单存在身份冲突，相关有歧义候选已全部隔离，不会任选一笔。" }
+        if unreadDetails > 0 { text += "另有\(unreadDetails)笔符合筛选订单尚未读取详情，不能视为无运单。" }
+        if let stoppedReason {
+            switch stoppedReason {
+            case .authentication: text += "登录会话失效，已停止后续读取；保留此前明确读取的候选。"
+            case .verification: text += "遇到验证或风控，已停止后续读取；保留此前明确读取的候选。"
+            case .timeout: text += "读取超时，已停止后续读取；保留此前明确读取的候选。"
+            default: text += "后续读取已停止；保留此前明确读取的候选。"
+            }
+        }
         if limited { text += "本次未读完订单列表或详情（分页/详情上限、时间预算或手机页范围限制），以上仅为已读取部分。" }
         return text
     }
@@ -30,23 +48,56 @@ struct JDOrderImportReport {
         eligible += 1
         return true
     }
+    mutating func recordDetailFailure(orderID: String) {
+        failedOrders.insert(orderID)
+        reconcileDetailCounts()
+    }
+    private mutating func reconcileDetailCounts() {
+        let numbered = Set(candidates.map(\.orderID))
+        // An order with a separate unambiguous split parcel is still numbered,
+        // not counted twice as both numbered and failed.
+        detailFailed = failedOrders.subtracting(numbered).count
+        withoutWaybill = emptyOrders.subtracting(numbered).subtracting(failedOrders).count
+    }
     mutating func append(_ parcels: [MallWebDetail], orderID: String, title: String, url: String) throws {
-        if parcels.isEmpty { withoutWaybill += 1 }
+        // A later retry may add a safe parcel, but cannot erase a known ambiguous
+        // binding merely by reporting an empty response.
+        if !ambiguousNumbers.contains(where: { numberOwners[$0, default: []].contains(orderID) }) {
+            failedOrders.remove(orderID)
+        }
+        if parcels.isEmpty { emptyOrders.insert(orderID) }
+        else { emptyOrders.remove(orderID) }
         for parcel in parcels {
-            if let existing = candidates.first(where: { $0.trackingNumber == parcel.number }) {
-                guard existing.orderID == orderID else { throw MallWebError.identityMismatch }
+            numberOwners[parcel.number, default: []].insert(orderID)
+            let owners = numberOwners[parcel.number, default: []]
+            if ambiguousNumbers.contains(parcel.number) || owners.count > 1 {
+                ambiguousNumbers.insert(parcel.number)
+                failedOrders.formUnion(owners)
+                candidates.removeAll { $0.trackingNumber == parcel.number }
                 continue
             }
+            if candidates.contains(where: { $0.trackingNumber == parcel.number && $0.orderID == orderID }) { continue }
             candidates.append(MallCandidate(trackingNumber: parcel.number, carrier: parcel.carrier,
-                title: title, orderID: orderID, sourceURL: url))
+                title: title, orderID: orderID, sourceURL: url, previewDetail: parcel))
         }
+        reconcileDetailCounts()
     }
     func logSummary(_ diagnostics: JDDiagnostics) {
         // Per-page events may exhaust the diagnostics anti-flood allowance;
         // write exactly one safe final aggregate without losing it behind that cap.
         diagnostics.log.record(.jdResponseAccepted, operation: diagnostics.operation,
             stage: diagnostics.trace.stage, counts: [.rows: scanned, .accepted: eligible,
-            .rejected: excluded + missingDate + outsideWindow, .candidates: candidates.count])
+            .rejected: excluded + missingDate + outsideWindow, .candidates: candidates.count,
+            .jdMissingDate: missingDate, .jdBusinessExcluded: excluded, .jdOutsideWindow: outsideWindow,
+            .jdDetailFailed: detailFailed, .jdWithoutWaybill: withoutWaybill, .jdLimited: limited ? 1 : 0])
+        if !ambiguousNumbers.isEmpty {
+            diagnostics.log.record(.jdResponseRejected, operation: diagnostics.operation,
+                reason: .identity, stage: diagnostics.trace.stage)
+        }
+        if let stoppedReason {
+            diagnostics.log.record(.jdResponseRejected, operation: diagnostics.operation,
+                reason: stoppedReason, stage: diagnostics.trace.stage)
+        }
     }
 }
 
@@ -67,7 +118,7 @@ struct JDOrderImportPolicy {
 
     static func excluded(orderType: String, allVirtual: Bool, evidence: String) -> Bool {
         ["4", "69"].contains(orderType) || allVirtual ||
-            ["外卖", "秒送", "虚拟", "服务"].contains(where: evidence.contains)
+            ["外卖", "秒送", "虚拟订单", "虚拟业务", "虚拟服务", "服务订单", "生活服务"].contains(where: evidence.contains)
     }
     static func isTimeout(_ error: Error) -> Bool {
         (error as? MallWebError) == .timeout || (error as? URLError)?.code == .timedOut ||

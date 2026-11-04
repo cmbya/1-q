@@ -61,7 +61,7 @@ enum ShipmentRefreshPresentation {
         return oldText + "\n" + details(shipment)
     }
     static func details(_ shipment: Shipment) -> String {
-        var lines = ["\(shipment.carrierName) · \(shipment.trackingNumber)", "状态：\(shipment.status.rawValue)"]
+        var lines = ["\(shipment.carrierName) · \(shipment.trackingNumber)", "状态：\(shipment.statusDisplayText)"]
         let info = shipment.logisticsInfo?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         lines.append(info.isEmpty ? "暂无物流轨迹（状态不代表实时物流）。" : "最新物流：\(info)")
         lines.append("来源：\(source(shipment))")

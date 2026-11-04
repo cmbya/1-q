@@ -94,6 +94,45 @@ final class JDInAppClientTests: XCTestCase {
         XCTAssertEqual(try TrackingRefreshService.resolvedChannel(item, mode: .platformOnly), "kdyzm")
         XCTAssertNotNil(item.backendBinding)
     }
+    func testStructuredMissingDateIsSupplementedBeforePolicyConsider() throws {
+        var raw = row(); raw["submittedAt"] = ""
+        var dom = row(); dom["submittedAt"] = "2026-10-15 12:00:00"
+        dom["dateURL"] = "https://trade.m.jd.com/order/detail.action?orderId=123456789012"
+        let merged = try JDPageParser.supplement(list([raw]), snapshot: list([dom]))
+        let order = try XCTUnwrap(JDPageParser.orders(merged).first)
+        XCTAssertNotNil(order.submittedAt); XCTAssertNotNil(order.dateURL)
+        var report = JDOrderImportReport()
+        XCTAssertTrue(report.consider(submittedAt: order.submittedAt, excluded: order.excluded, policy: JDOrderImportPolicy(now: JDOrderImportPolicy.submittedDate("2026-11-04")!)))
+        XCTAssertEqual(report.missingDate, 0)
+        raw["submittedAt"] = "2026-10-16 12:00:00"
+        XCTAssertThrowsError(try JDPageParser.supplement(list([raw]), snapshot: list([dom])))
+    }
+    func testDateDetailRequiresExactIdentityAndExplicitEnvelope() throws {
+        let page: [String: Any] = ["kind":"orderDate", "recognized":true, "orderID":orderID, "submittedAt":"2026-10-15 12:00:00"]
+        XCTAssertNotNil(try JDPageParser.submission(page, orderID: orderID))
+        XCTAssertThrowsError(try JDPageParser.submission(page, orderID: "987654321000"))
+        XCTAssertThrowsError(try JDPageParser.submission(detail([]), orderID: orderID))
+        XCTAssertNil(JDPageParser.dateURL("https://trade.m.jd.com/order/detail.action?orderId=123456789012&orderId=123456789012", orderID: orderID))
+        XCTAssertNil(JDPageParser.dateURL("https://trade.m.jd.com/order/detail.action?orderId=123456789012&pt_key=SECRET", orderID: orderID))
+        XCTAssertNil(JDPageParser.nextURL(["nextURL":"https://evil.test/order/orderlist_jdm.shtml?page=2"]))
+        XCTAssertNotNil(JDPageParser.nextURL(["nextURL":"https://trade.m.jd.com/order/orderlist_jdm.shtml?page=2"]))
+    }
+    func testOldOrderRefreshUsesSafeEntryWithoutFirstPageMembership() throws {
+        let url = try JDPageParser.refreshURL(orderID: orderID, trackingNumber: "JD123456789", sourceURL: nil)
+        XCTAssertEqual(url.query, "dealId=123456789012")
+        XCTAssertThrowsError(try JDPageParser.refreshURL(orderID: orderID, trackingNumber: "JD123456789", sourceURL: "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=987654321000"))
+        XCTAssertThrowsError(try JDPageParser.refreshURL(orderID: orderID, trackingNumber: "", sourceURL: nil))
+    }
+    func testMobileRotationRequiresOneUnchangedRawPinAndCredentials() {
+        func cookies(_ pin: String, key: String) -> [TaobaoTrialCookie] {
+            [("pt_pin",pin),("pt_key",key)].map { TaobaoTrialCookie(name: $0.0, value: $0.1, domain: ".jd.com", path: "/", secure: true, expires: nil, httpOnly: true) }
+        }
+        let before = cookies("SYNTHETIC_A", key: "OLD")
+        XCTAssertTrue(JDPageParser.sameAccount(before, cookies("SYNTHETIC_A", key: "NEW")))
+        XCTAssertFalse(JDPageParser.sameAccount(before, cookies("SYNTHETIC_B", key: "NEW")))
+        XCTAssertFalse(JDPageParser.sameAccount(before, Array(before.prefix(1))))
+        XCTAssertFalse(JDPageParser.sameAccount([], []))
+    }
     @MainActor func testJDAndPDDWebDataStoresNeverAlias() {
         XCTAssertFalse(MallBrowserContext.store(for: .jd) === MallBrowserContext.store(for: .pdd))
         XCTAssertFalse(MallBrowserContext.store(for: .jd).isPersistent)

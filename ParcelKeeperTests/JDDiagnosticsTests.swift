@@ -3,6 +3,19 @@ import XCTest
 
 final class JDDiagnosticsTests: XCTestCase {
     private func directory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
+    func testJDFilterMetricsStayClosedAndBounded() {
+        let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let log = DiagnosticLog(directory: root)
+        log.record(.jdResponseAccepted, stage: .jdOrdersParse,
+            counts: [.jdMissingDate: 9, .jdBusinessExcluded: 1, .jdOutsideWindow: -1,
+                     .jdDetailFailed: Int.max, .jdWithoutWaybill: 0, .jdLimited: 9])
+        let text = log.snapshotForTesting().text
+        for expected in ["jdMissingDate=9", "jdBusinessExcluded=1", "jdOutsideWindow=0",
+                         "jdDetailFailed=2000000", "jdWithoutWaybill=0", "jdLimited=1"] {
+            XCTAssertTrue(text.contains(expected), expected)
+        }
+        XCTAssertEqual(DiagnosticMetric.jdLimited.bounded(-5), 0)
+    }
     func testNetworkCodesDoNotRetainErrorTextOrFailingURL() {
         let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
         let log = DiagnosticLog(directory: root)

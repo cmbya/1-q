@@ -62,6 +62,8 @@ final class JDPCClientTests: XCTestCase {
         let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
         XCTAssertTrue(report.limited); XCTAssertEqual(report.eligible, 1); XCTAssertEqual(report.withoutWaybill, 0)
         XCTAssertTrue(report.candidates.isEmpty); XCTAssertEqual(network.requests.count, 2)
+        XCTAssertEqual(report.detailFailed, 1); XCTAssertEqual(report.unreadDetails, 0)
+        XCTAssertEqual(report.stoppedReason, .timeout)
     }
     func testVerificationDoesNotRequireOrFilterMissingDate() async throws {
         let network = JDPCFixtureNetwork([page([shopping(order, date: "")], total: 1)])
@@ -150,6 +152,109 @@ final class JDPCClientTests: XCTestCase {
         XCTAssertEqual(values.count, 1)
         XCTAssertEqual(values.first?.number, "JD123456789")
     }
+    func testEmptyOrNumberlessOuterCarriageFallsBackToNestedFieldsAndKeepsPreview() async throws {
+        let outerValues: [[String: Any]] = [[:], ["carrier": ""]]
+        for outer in outerValues {
+            let group: [String: Any] = ["orderCarriageInfo": ["carriageId": "JD123456789", "carrier": "京东快递"],
+                "orderTrackShowList": [["CreationTime": "2026-11-01 10:00:00", "Content": "运输中"]]]
+            let network = JDPCFixtureNetwork([list(), ["multiPackageTrackInfoList": [["carriageInfo": outer, "trackGroupInfo": group]]]])
+            let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+            XCTAssertEqual(report.candidates.first?.trackingNumber, "JD123456789")
+            XCTAssertEqual(report.candidates.first?.carrier, "京东快递")
+            XCTAssertEqual(report.candidates.first?.previewDetail?.points.first?.text, "运输中")
+        }
+    }
+    func testConflictingCarriageIdentitiesNeverChooseFirstAndMissingCarrierFallsBack() throws {
+        let group: [String: Any] = ["orderCarriageInfo": ["carriageId": "JD123456789", "carrier": "京东快递"], "orderTrackShowList": []]
+        let safe: [String: Any] = ["carriageInfo": ["carriageId": "JD123456789"], "trackGroupInfo": group]
+        XCTAssertEqual(try JDPCParser.parcels(["multiPackageTrackInfoList": [safe]], orderID: order).first?.carrier, "京东快递")
+        let conflict: [String: Any] = ["carriageInfo": ["carriageId": "SF123456789"], "trackGroupInfo": group]
+        XCTAssertThrowsError(try JDPCParser.parcels(["multiPackageTrackInfoList": [conflict]], orderID: order)) {
+            XCTAssertEqual($0 as? MallWebError, .identityMismatch)
+        }
+    }
+    func testRecoverableDetailFailureKeepsEarlierAndLaterSuccesses() async throws {
+        let rows = [shopping(order), shopping("123456789013"), shopping("123456789014")]
+        let failures: [Error] = [URLError(.cannotConnectToHost), MallWebError.unsupported, MallWebError.identityMismatch]
+        for failure in failures {
+            let network = JDPCFixtureNetwork([page(rows, total: 3), ["multiPackageTrackInfoList": [parcel("JD123456789")]], ["multiPackageTrackInfoList": [parcel("SF123456789")]]], failures: [2: failure])
+            let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+            XCTAssertEqual(report.candidates.map(\.trackingNumber), ["JD123456789", "SF123456789"])
+            XCTAssertEqual(report.detailFailed, 1); XCTAssertEqual(report.withoutWaybill, 0)
+            XCTAssertEqual(report.unreadDetails, 0); XCTAssertNil(report.stoppedReason)
+            XCTAssertEqual(network.requests.count, 4)
+        }
+    }
+    func testMalformedAndWrongOrderDetailDoNotDiscardOtherOrders() async throws {
+        let brokenValues: [[String: Any]] = [[:], ["orderId": "999999999999", "multiPackageTrackInfoList": []]]
+        for broken in brokenValues {
+            let network = JDPCFixtureNetwork([page([shopping(order), shopping("123456789013")], total: 2), broken, ["multiPackageTrackInfoList": [parcel("SF123456789")]]])
+            let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+            XCTAssertEqual(report.detailFailed, 1); XCTAssertEqual(report.candidates.count, 1)
+            XCTAssertEqual(report.withoutWaybill, 0); XCTAssertEqual(report.unreadDetails, 0)
+        }
+    }
+    func testAuthenticationAndVerificationStopDetailsButKeepEarlierCandidates() async throws {
+        let reasons: [DiagnosticReason] = [.authentication, .verification]
+        for reason in reasons {
+            let network = JDPCFixtureNetwork([page([shopping(order), shopping("123456789013"), shopping("123456789014")], total: 3), ["multiPackageTrackInfoList": [parcel("JD123456789")]]], failures: [2: JDLoggedError(reason: reason, stage: .jdLogisticsPage)])
+            let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+            XCTAssertEqual(report.candidates.count, 1); XCTAssertEqual(report.stoppedReason, reason)
+            XCTAssertEqual(report.detailFailed, 1); XCTAssertEqual(report.unreadDetails, 1)
+            XCTAssertEqual(report.withoutWaybill, 0); XCTAssertTrue(report.limited)
+            XCTAssertEqual(network.requests.count, 3)
+        }
+    }
+    func testLaterListAuthenticationStopsBeforeAnyDetailRequest() async throws {
+        let network = JDPCFixtureNetwork([page([shopping(order)])], failures: [1: MallWebError.authentication])
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertEqual(report.stoppedReason, .authentication); XCTAssertEqual(report.unreadDetails, 1)
+        XCTAssertEqual(report.detailFailed, 0); XCTAssertEqual(report.withoutWaybill, 0)
+        XCTAssertEqual(network.requests.count, 2)
+    }
+    func testMissingDateNeverUsesCreateTimeOrLogisticsTimestamp() throws {
+        var row = shopping(order, date: "")
+        row["createTime"] = "2026-10-15 12:00:00"
+        row["logisticsTime"] = "2026-10-15 12:00:00"
+        XCTAssertNil(try JDPCParser.orders(page([row])).first?.submittedAt)
+    }
+    func testCrossOrderSameWaybillIsQuarantinedButOtherOrdersSurvive() async throws {
+        let rows = (0..<3).map { shopping(String(123456789012 + $0)) }
+        let network = JDPCFixtureNetwork([page(rows, total: 3),
+            ["multiPackageTrackInfoList": [parcel("JD123456789")]],
+            ["multiPackageTrackInfoList": [parcel("JD123456789")]],
+            ["multiPackageTrackInfoList": [parcel("SF123456789")]]])
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertEqual(report.candidates.map(\.trackingNumber), ["SF123456789"])
+        XCTAssertEqual(report.detailFailed, 2); XCTAssertEqual(report.unreadDetails, 0)
+        XCTAssertEqual(report.withoutWaybill, 0); XCTAssertNil(report.stoppedReason)
+        XCTAssertEqual(network.requests.count, 4)
+    }
+    func testRecoverableNetworkErrorNeverLeaksRawTextAndParseFailureIsClassified() async throws {
+        for broken in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let log = DiagnosticLog(directory: root)
+            let raw = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost,
+                userInfo: [NSLocalizedDescriptionKey: "SECRET", NSURLErrorFailingURLStringErrorKey: "https://example.test/SECRET"])
+            let network = broken
+                ? JDPCFixtureNetwork([list(), [:]])
+                : JDPCFixtureNetwork([list()], exhaustedError: raw)
+            let report = try await JDPCClient(cookies: cookies(), network: network, diagnosticLog: log, now: { self.now }).fetchOrderReport()
+            XCTAssertEqual(report.detailFailed, 1); XCTAssertEqual(report.withoutWaybill, 0)
+            let text = log.snapshotForTesting().text
+            XCTAssertTrue(text.contains(broken ? "reason=parse" : "reason=network"))
+            XCTAssertFalse(text.contains("SECRET")); XCTAssertFalse(report.message.contains("SECRET"))
+        }
+    }
+    func testAfterSalesStatusIsEligibleAcrossAllShoppingStates() async throws {
+        let states = ["售后服务中", "待付款", "已取消", "待发货", "已签收"]
+        let rows = states.enumerated().map { shopping(String(123456789100 + $0.offset), status: $0.element) }
+        let network = JDPCFixtureNetwork([page(rows, total: states.count)] + Array(repeating: ["multiPackageTrackInfoList": []], count: states.count))
+        let report = try await JDPCClient(cookies: cookies(), network: network, now: { self.now }).fetchOrderReport()
+        XCTAssertEqual(report.eligible, states.count); XCTAssertEqual(report.excluded, 0)
+        XCTAssertEqual(report.withoutWaybill, states.count)
+    }
     func testRedirectAndOversizeResponsesAreRejected() async throws {
         for network in [JDPCFixtureNetwork([list()], status: 302), JDPCFixtureNetwork([list()], otherURL: URL(string: "https://example.test")), JDPCFixtureNetwork([list()], oversized: true)] {
             do { try await JDPCClient(cookies: cookies(), network: network).verifySession(); XCTFail() }
@@ -167,11 +272,13 @@ private final class JDPCFixtureNetwork: AINetworking {
     let oversized: Bool
     let headers: [String: String]?
     let exhaustedError: Error
-    init(_ responses: [[String: Any]], status: Int = 200, otherURL: URL? = nil, oversized: Bool = false, headers: [String: String]? = nil, exhaustedError: Error = URLError(.badServerResponse)) {
-        self.responses = responses; self.status = status; self.otherURL = otherURL; self.oversized = oversized; self.headers = headers; self.exhaustedError = exhaustedError
+    let failures: [Int: Error]
+    init(_ responses: [[String: Any]], status: Int = 200, otherURL: URL? = nil, oversized: Bool = false, headers: [String: String]? = nil, exhaustedError: Error = URLError(.badServerResponse), failures: [Int: Error] = [:]) {
+        self.responses = responses; self.status = status; self.otherURL = otherURL; self.oversized = oversized; self.headers = headers; self.exhaustedError = exhaustedError; self.failures = failures
     }
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         requests.append(request)
+        if let failure = failures[requests.count - 1] { throw failure }
         guard !responses.isEmpty else { throw exhaustedError }
         let body = responses.removeFirst()
         let data: Data

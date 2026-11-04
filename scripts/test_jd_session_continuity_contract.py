@@ -10,5 +10,9 @@ class JDSessionContinuity(unittest.TestCase):
   self.assertTrue('view.configuration.websiteDataStore.httpCookieStore.setCookie(native)' in s)
  def test_navigation_errors_are_fixed_not_raw_webkit_errors(self):
   s=(ROOT/'ParcelKeeper/Services/JDInAppClient.swift').read_text()
-  self.assertFalse('failed = error }' in s)
+  # Parser failures are closed MallWebError values; inspect WebKit callbacks only.
+  navigation=s.split('private func navigationFailure(',1)[1].split('enum JDPageScript',1)[0]
+  self.assertNotIn('failed = error', navigation)
+  self.assertIn('failed = navigationFailure(error)', navigation)
+  self.assertNotIn('localizedDescription', navigation)
 if __name__=='__main__':unittest.main()

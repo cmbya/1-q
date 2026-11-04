@@ -9,7 +9,7 @@ struct ShipmentRow: View {
                 Text(shipment.carrierName)
                     .font(.headline)
                 Spacer()
-                StatusBadge(status: shipment.status)
+                StatusBadge(status: shipment.status, displayText: shipment.statusDisplayText)
             }
 
             Text(shipment.trackingNumber)

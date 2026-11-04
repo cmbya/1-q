@@ -38,7 +38,10 @@ struct JDPCClient {
                 do { response = try await session.orders(page: page) }
                 catch {
                     try Task.checkCancellation()
-                    guard page > 1, JDOrderImportPolicy.isTimeout(error) else { throw error }
+                    guard page > 1 else { throw error }
+                    let reason = Self.failureReason(error, diagnostics: session.diagnostics)
+                    session.diagnostics.event(.jdResponseRejected, reason: reason)
+                    if reason == .authentication || reason == .verification { report.stoppedReason = reason }
                     report.limited = true; break
                 }
                 if response.orders.isEmpty {
@@ -59,14 +62,23 @@ struct JDPCClient {
             }
             for (index, order) in eligibleOrders.enumerated() {
                 try Task.checkCancellation()
+                guard report.stoppedReason == nil else { break }
                 guard index < JDOrderImportPolicy.maxDetails,
                       ProcessInfo.processInfo.systemUptime < session.deadline else { report.limited = true; break }
                 let parcels: [MallWebDetail]
                 do { parcels = try await session.parcels(orderID: order.id) }
                 catch {
                     try Task.checkCancellation()
-                    guard JDOrderImportPolicy.isTimeout(error) else { throw error }
-                    report.limited = true; break
+                    let reason = Self.failureReason(error, diagnostics: session.diagnostics)
+                    session.diagnostics.event(.jdResponseRejected, reason: reason)
+                    report.recordDetailFailure(orderID: order.id)
+                    if reason == .authentication || reason == .verification || JDOrderImportPolicy.isTimeout(error) {
+                        report.stoppedReason = reason
+                        report.limited = true; break
+                    }
+                    // A single malformed, unavailable or mismatched order must
+                    // not discard earlier candidates or prevent later safe orders.
+                    continue
                 }
                 try report.append(parcels, orderID: order.id, title: order.title,
                     url: "https://trade.m.jd.com/order/deal_wuliu_jdm.shtml?dealId=\(order.id)")
@@ -84,6 +96,11 @@ struct JDPCClient {
             guard matches.count == 1, let parcel = matches.first else { throw MallWebError.identityMismatch }
             return try parcel.result(expected: trackingNumber, platform: .jd)
         }
+    }
+    private static func failureReason(_ error: Error, diagnostics: JDDiagnostics) -> DiagnosticReason {
+        if (error as? MallWebError) == .unsupported,
+           (diagnostics.trace.stage == .jdOrdersParse || diagnostics.trace.stage == .jdLogisticsParse) { return .parse }
+        return JDDiagnostics.reason(error)
     }
     private func perform<T>(_ stage: DiagnosticStage, seconds: TimeInterval,
                             operation: (JDPCSession) async throws -> T) async throws -> T {
@@ -196,7 +213,7 @@ private final class JDPCSession {
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
             var counts: [DiagnosticMetric: Int] = [:]
             if let code = JDDiagnostics.safeNetworkCode(error) { counts[.errorCode] = code }
-            let reason: DiagnosticReason = ((error as? MallWebError) == .timeout || (error as? URLError)?.code == .timedOut) ? .timeout : .network
+            let reason: DiagnosticReason = JDOrderImportPolicy.isTimeout(error) ? .timeout : JDDiagnostics.reason(error)
             diagnostics.event(.jdNavigationFailed, reason: reason, counts: counts)
             throw JDLoggedError(reason: reason, stage: diagnostics.trace.stage ?? .request)
         }
@@ -275,14 +292,24 @@ enum JDPCParser {
         var parcels: [[String: Any]] = []
         for row in rows {
             let group = row["trackGroupInfo"] as? [String: Any] ?? [:]
-            let carriage = row["carriageInfo"] as? [String: Any] ?? group["orderCarriageInfo"] as? [String: Any] ?? [:]
-            let number = text(carriage["carriageId"])
+            let outerCarriage = row["carriageInfo"] as? [String: Any] ?? [:]
+            let nestedCarriage = group["orderCarriageInfo"] as? [String: Any] ?? [:]
+            let outerNumber = text(outerCarriage["carriageId"])
+            let nestedNumber = text(nestedCarriage["carriageId"])
+            // Fall back per meaningful field, not per dictionary existence.
+            // Two non-empty conflicting identities are never resolved by precedence.
+            if !outerNumber.isEmpty && !nestedNumber.isEmpty && outerNumber != nestedNumber {
+                throw MallWebError.identityMismatch
+            }
+            let number = outerNumber.isEmpty ? nestedNumber : outerNumber
+            let outerCarrier = text(outerCarriage["carrier"])
+            let carrier = outerCarrier.isEmpty ? text(nestedCarriage["carrier"]) : outerCarrier
             if number.isEmpty { continue } // No real waybill means no importable parcel, never use the order ID.
             guard let steps = group["orderTrackShowList"] as? [[String: Any]], steps.count <= 300 else { throw MallWebError.unsupported }
             let points: [[String: Any]] = steps.map { step in
                 ["time": step["CreationTime"] ?? "", "text": [text(step["StatusName"]), text(step["Content"])].filter { !$0.isEmpty }.joined(separator: "：")]
             }
-            parcels.append(["number": number, "carrier": text(carriage["carrier"]), "points": points])
+            parcels.append(["number": number, "carrier": carrier, "points": points])
         }
         return try JDPageParser.parcels(["kind": "logistics", "recognized": true, "orderID": orderID, "parcels": parcels], orderID: orderID)
     }

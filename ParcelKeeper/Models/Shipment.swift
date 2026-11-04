@@ -64,6 +64,13 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var backendRefreshGeneration: UUID?
     var backendPreviousHistory: String?
 
+    /// No schema change: an unqueried JD number-only import is not evidence of movement.
+    var statusDisplayText: String {
+        let hasTrace = !(logisticsInfo?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        return originPlatform == "jd" && status == .inTransit && lastQueriedAt == nil && !hasTrace
+            ? "物流状态未核实" : status.rawValue
+    }
+
     /// Store only public logistics parameters, never arbitrary platform tokens.
     static func logisticsEntry(_ raw: String, orderID: String) -> String? {
         guard raw.utf8.count <= 8192, let c = URLComponents(string: raw), c.scheme == "https",

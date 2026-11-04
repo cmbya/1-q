@@ -59,7 +59,21 @@ struct MallCandidate: Identifiable {
     let title: String
     let orderID: String
     var sourceURL: String? = nil
+    // In-memory result from this preview only; never a persisted cache or a reason to re-query.
+    var previewDetail: MallWebDetail? = nil
     var id: String { trackingNumber }
+
+    func jdPreviewResult() throws -> UAPITrackingResult {
+        guard Shipment.validPlatformOrderID(orderID, platform: "jd"),
+              (try? ShipmentShortcutParser.number(trackingNumber)) == trackingNumber else { throw MallWebError.identityMismatch }
+        if let sourceURL, Shipment.logisticsEntry(sourceURL, orderID: orderID) == nil { throw MallWebError.identityMismatch }
+        guard let detail = previewDetail else { throw MallWebError.noTrace }
+        guard detail.number == trackingNumber,
+              detail.acceptsCarrier(name: carrier, code: CarrierDetector.carrierMentioned(in: carrier)?.code ?? CarrierDetector.unknown.code) else {
+            throw MallWebError.identityMismatch
+        }
+        return try detail.result(expected: trackingNumber, platform: .jd)
+    }
 }
 protocol MallTrackingQuerying {
     func query(platform: String, orderID: String, trackingNumber: String) async throws -> UAPITrackingResult
@@ -76,13 +90,21 @@ struct MallTrackingClient: MallTrackingQuerying {
     }
     func query(platform: String, orderID: String, trackingNumber: String, sourceURL: String?) async throws -> UAPITrackingResult {
         guard let platform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
+        let entry: String?
+        if platform == .jd, let sourceURL {
+            guard Shipment.validPlatformOrderID(orderID, platform: "jd"),
+                  let safe = Shipment.logisticsEntry(sourceURL, orderID: orderID) else { throw MallWebError.identityMismatch }
+            entry = safe
+        } else { entry = nil }
         try Task.checkCancellation()
         let generation = MallSession.generation(for: platform)
         let cookies = try MallSession.withGeneration(platform: platform, expected: generation) {
             try MallSession(platform: platform).load()
         }
         let result: UAPITrackingResult
-        if platform == .jd { result = try await JDInAppClient(cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
+        if platform == .jd {
+            result = try await JDInAppClient(cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber, sourceURL: entry)
+        }
         else { result = try await MallDirectClient(platform: platform, cookies: cookies).query(orderID: orderID, trackingNumber: trackingNumber) }
         try Task.checkCancellation()
         return try MallSession.withGeneration(platform: platform, expected: generation) { result }
@@ -232,13 +254,32 @@ struct MallWebDetail {
     let number: String
     let carrier: String
     let points: [MallWebPoint]
+    /// A platform preview must never silently rename a different known carrier.
+    /// Empty/unidentified labels supply no contrary identity evidence.
+    func acceptsCarrier(name: String, code: String) -> Bool {
+        let incoming = CarrierDetector.carrierMentioned(in: carrier)
+        let saved = CarrierDetector.allCarriers.first { $0.code == code && $0 != CarrierDetector.unknown }
+            ?? CarrierDetector.carrierMentioned(in: name)
+        if let incoming, let saved { return incoming.code == saved.code }
+        let lhs = carrier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rhs = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let placeholders = ["", CarrierDetector.unknown.name, "未知", "未知快递", "未知物流"]
+        if placeholders.contains(lhs) || placeholders.contains(rhs) { return true }
+        // Nonempty custom labels are identity too; don't silently rename them.
+        return lhs == rhs
+    }
     func result(expected: String, platform: MallPlatform) throws -> UAPITrackingResult {
         guard number == expected else { throw MallWebError.identityMismatch }
-        guard let latest = points.max(by: { $0.date < $1.date }) else { throw MallWebError.noTrace }
+        // JD preview only: an empty description or non-finite date is not a real trace.
+        // PDD's established parsing/result behavior remains unchanged.
+        let events = platform == .jd ? points.filter {
+            $0.date.timeIntervalSinceReferenceDate.isFinite && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } : points
+        guard let latest = events.max(by: { $0.date < $1.date }) else { throw MallWebError.noTrace }
         // Only the latest dated event may contribute a conservative status.
         return UAPITrackingResult(trackingNumber: number, carrierName: carrier, carrierCode: "", status: MallDeliveryState.resolve(latest: latest.text),
             logisticsInfo: String(latest.text.prefix(1000)), logisticsTime: latest.date,
-            queryInfo: (["\(platform.title)网页物流（非UAPI）"] + points.sorted { $0.date > $1.date }.map { ShipmentDateDisplay.string($0.date) + " " + $0.text }).joined(separator: "\n"), queriedAt: Date())
+            queryInfo: (["\(platform.title)网页物流（非UAPI）"] + events.sorted { $0.date > $1.date }.map { ShipmentDateDisplay.string($0.date) + " " + $0.text }).joined(separator: "\n"), queriedAt: Date())
     }
 }
 

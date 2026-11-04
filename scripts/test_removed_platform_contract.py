@@ -15,7 +15,8 @@ class RemovedPlatformContract(unittest.TestCase):
         text = '\n'.join(p.read_text() for p in files)
         for token in ['BaiduShortcut', 'baiduShortcut', 'JDWebScripts', 'JDOrderSelection',
                       'collectJDOrders', 'jdPackages', 'jdDOM', 'jdDetail']:
-            self.assertNotIn(token, text, token)
+            # Match removed identifiers, not prefixes of new safe metrics (jdDetailFailed).
+            self.assertIsNone(re.search(r'\b' + re.escape(token) + r'\b', text), token)
         self.assertNotIn('name: "mallResponse"', text)  # old broad bridge remains removed
         self.assertTrue((ROOT / 'ParcelKeeper/Services/JDInAppClient.swift').exists())
         self.assertIn('platform: .jd', source('ParcelKeeper/Views/SettingsView.swift'))

@@ -295,6 +295,62 @@ struct TrackingRefreshService {
     static func isPending(_ shipment: Shipment) -> Bool {
         shipment.status != .delivered && shipment.status != .archived
     }
+    /// Apply only this confirmation's JD preview. No network, fallback or persistent query cache.
+    @discardableResult
+    func applyMallPreview(id: UUID, candidate: MallCandidate, expectedGeneration: UUID) throws -> Bool {
+        let diagnostics = JDDiagnostics(.localRead, log: diagnosticLog)
+        do {
+            try Task.checkCancellation()
+            let result = try candidate.jdPreviewResult()
+            diagnostics.begin(.lease)
+            let lease = try store.acquireTrackingQuery(id: id)
+            defer { lease.release() }
+            let delivered = try MallSession.withGeneration(platform: .jd, expected: expectedGeneration) {
+                try Task.checkCancellation()
+                diagnostics.begin(.merge)
+                return try store.transaction { data -> Bool in
+                    guard let index = data.shipments.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
+                    var current = data.shipments[index]
+                    guard current.originPlatform == "jd", current.taobaoOrderID == nil,
+                          current.platformOrderID == candidate.orderID,
+                          current.trackingNumber == candidate.trackingNumber,
+                          let detail = candidate.previewDetail,
+                          detail.acceptsCarrier(name: current.carrierName, code: current.carrierCode) else { throw MallWebError.identityMismatch }
+                    if let entry = current.platformLogisticsURL, Shipment.logisticsEntry(entry, orderID: candidate.orderID) == nil { throw MallWebError.identityMismatch }
+                    guard current.backendBinding == nil, current.refreshChannel == nil else {
+                        throw PickupStorageError.invalidData("保留既有后台绑定或指定刷新渠道，未覆盖平台物流；未请求付费接口。")
+                    }
+                    guard current.status != .archived else { throw ShipmentShortcutError.statusConflict }
+                    if current.status == .delivered, let state = result.status, state != .delivered { throw ShipmentShortcutError.statusConflict }
+                    let linkedIndices = data.records.indices.filter { data.records[$0].shipmentID == id }
+                    guard linkedIndices.count == 1, let linked = linkedIndices.first else { throw PickupStorageError.invalidData("运单关联记录缺失或已改变") }
+                    let oldStatus = current.status
+                    current.logisticsInfo = result.logisticsInfo
+                    current.logisticsTime = result.logisticsTime
+                    current.queryInfo = TrackingQueryHistory.merged(result.queryInfo, current.queryInfo, current.backendPreviousHistory)
+                    current.lastQueriedAt = result.queriedAt
+                    if !result.carrierName.isEmpty { current.carrierName = result.carrierName }
+                    current.logisticsSource = "jd"
+                    current.lastRefreshError = nil
+                    if let state = result.status { current.status = state }
+                    current.updatedAt = Date()
+                    if current.status != oldStatus, current.status == .delivered {
+                        data.records[linked].isCompleted = true
+                    }
+                    data.records[linked].updatedAt = current.updatedAt
+                    data.shipments[index] = current
+                    diagnostics.begin(.save)
+                    return oldStatus != .delivered && current.status == .delivered
+                }
+            }
+            reloadWidgets()
+            diagnostics.finish()
+            return delivered
+        } catch {
+            diagnostics.fail(error)
+            throw error
+        }
+    }
     func refresh(trackingNumber: String, phone: String? = nil, mode: TrackingRefreshMode = .automatic) async throws -> Bool {
         let number = try ShipmentShortcutParser.number(trackingNumber)
         let matches = try store.snapshot().shipments.filter { CarrierDetector.sanitize($0.trackingNumber) == number }

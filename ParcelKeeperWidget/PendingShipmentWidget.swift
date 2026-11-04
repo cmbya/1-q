@@ -89,7 +89,7 @@ struct PendingShipmentWidgetView: View {
                 HStack {
                     Text(shipment.carrierName).font(.subheadline.bold()).lineLimit(1)
                     Spacer()
-                    Label(shipment.status.rawValue, systemImage: shipment.status.systemImage).font(.caption)
+                    Label(shipment.statusDisplayText, systemImage: shipment.status.systemImage).font(.caption)
                 }
                 Text(shipment.trackingNumber).font(.caption.monospaced()).lineLimit(1).minimumScaleFactor(0.7).privacySensitive()
                 if !shipment.note.isEmpty {
