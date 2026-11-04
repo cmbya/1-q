@@ -36,11 +36,11 @@ await capture({success:false,data:{orderList:[]}});assert.equal(messages.length,
 await capture({multiPackageTrackInfoList:[{carriageInfo:{carriageId:'JD12345678',carrier:'京东快递'},trackGroupInfo:{orderTrackShowList:[{CreationTime:'2026-11-01 10:00:00',Content:'运输中'}]}},{carriageInfo:{carriageId:'SF12345678',carrier:'顺丰'},trackGroupInfo:{orderTrackShowList:[{CreationTime:'2026-11-01 11:00:00',Content:'本人签收'}]}}]},'https://api.m.jd.com/api?functionId=pcdetail_traceMultiPackage&body='+encodeURIComponent(JSON.stringify({orderId:'123456789'})));
 assert.equal(messages.at(-1).parcels.length,2);assert.notEqual(messages.at(-1).parcels[0].points[0].text,messages.at(-1).parcels[1].points[0].text);
 assert.ok(diagnostics.some(x=>x.diagnostic==='networkResponse' && x.httpStatus===200));
-assert.ok(diagnostics.some(x=>x.diagnostic==='schema'));
+assert.ok(diagnostics.some(x=>x.diagnostic==='responseSchema'));
 assert.ok(diagnostics.some(x=>x.diagnostic==='business'));
 xhr.errorListener();assert.equal(diagnostics.at(-1).diagnostic,'network');
 for (const x of diagnostics) {
-  assert.ok(['schema','json','business','network','networkResponse'].includes(x.diagnostic));
+  assert.ok(['schema','json','jsonDecode','responseSchema','processing','business','network','networkResponse'].includes(x.diagnostic));
   assert.ok(Object.keys(x).every(k=>['kind','diagnostic','httpStatus'].includes(k)));
 }
 assert.doesNotMatch(JSON.stringify(diagnostics),/SECRET|pt_key|trackingNo|https:|123456789/);

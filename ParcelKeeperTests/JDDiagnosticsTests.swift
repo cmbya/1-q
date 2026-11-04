@@ -3,6 +3,22 @@ import XCTest
 
 final class JDDiagnosticsTests: XCTestCase {
     private func directory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
+    func testResponseFailureReasonsRemainDistinctAndContainNoRawPayload() throws {
+        let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let log = DiagnosticLog(directory: root)
+        for reason in [DiagnosticReason.responseDecode, .responseSchema, .scriptProcessing] {
+            let operation = JDDiagnostics(.jdOrdersParse, log: log)
+            operation.fail(JDLoggedError(reason: reason, stage: .jdOrdersParse))
+            let encoded = try JSONEncoder().encode(reason)
+            XCTAssertEqual(try JSONDecoder().decode(DiagnosticReason.self, from: encoded), reason)
+        }
+        let text = log.snapshotForTesting().text
+        for value in ["reason=responseDecode", "reason=responseSchema", "reason=scriptProcessing"] {
+            XCTAssertTrue(text.contains(value))
+        }
+        XCTAssertFalse(text.contains("reason=unsupported"))
+        XCTAssertFalse(text.contains("https:"))
+    }
     func testJDFilterMetricsStayClosedAndBounded() {
         let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
         let log = DiagnosticLog(directory: root)

@@ -289,6 +289,7 @@ enum JDPageParser {
     private var expectedOrder: String?
     private var dateOnly = false
     private var loggedDOM = false
+    private var responseFailure: DiagnosticReason?
     private let diagnostics: JDDiagnostics
     private let browserStore: WKWebsiteDataStore?
     init(cookies: [TaobaoTrialCookie], diagnostics: JDDiagnostics, browserStore: WKWebsiteDataStore? = nil) {
@@ -360,9 +361,16 @@ enum JDPageParser {
                 // capture window for later split parcels and still-running requests.
                 if let captured {
                     try JDPageParser.failure(captured)
-                    if dateOnly {
-                        guard let orderID, let current = view.url,
-                              JDPageParser.dateURL(current.absoluteString, orderID: orderID) != nil else { throw MallWebError.identityMismatch }
+                    if dateOnly || (orderID == nil && maxOrderPages <= 1) {
+                        guard let current = view.url else { throw MallWebError.identityMismatch }
+                        if dateOnly {
+                            guard let orderID, JDPageParser.dateURL(current.absoluteString, orderID: orderID) != nil else { throw MallWebError.identityMismatch }
+                        } else {
+                            guard current.host == "trade.m.jd.com", current.path == MallPlatform.jd.ordersURL.path else { throw MallWebError.identityMismatch }
+                            _ = try JDPageParser.orders(captured)
+                        }
+                        // Parcly consumes a captured list before attempting a DOM fallback.
+                        // Verification never depends on pagination or a guessed card selector.
                         try await validateLiveAccount(view)
                         return captured
                     }
@@ -384,6 +392,7 @@ enum JDPageParser {
                     }
                     if scriptFailed {
                         diagnostics.event(.jdScriptFailed, reason: .parse)
+                        if captured != nil && orderID == nil { listUnsettled = true; break }
                         throw JDLoggedError(reason: .parse, stage: .jdPageDOM)
                     }
                     if let snapshot = value as? [String: Any] {
@@ -457,6 +466,7 @@ enum JDPageParser {
             if orderID == nil, let lastSnapshot, lastSnapshot["recognized"] as? Bool == true { return lastSnapshot }
             if finished, !dateOnly, let emptyCapture { return emptyCapture }
             if let operationDeadline, ProcessInfo.processInfo.systemUptime >= operationDeadline { throw MallWebError.timeout }
+            if let responseFailure { throw JDLoggedError(reason: responseFailure, stage: orderID == nil ? .jdOrdersParse : .jdLogisticsParse) }
             throw finished ? MallWebError.unsupported : MallWebError.timeout
         }, onCancel: { [weak self] in
             Task { @MainActor [weak self] in self?.web?.stopLoading() }
@@ -492,6 +502,10 @@ enum JDPageParser {
             let code = body["diagnostic"] as? String
             if code == "networkResponse", let status = body["httpStatus"] as? Int, (100...599).contains(status) {
                 diagnostics.event(.jdNetworkResponse, counts: [.httpStatus: status])
+            } else if code == "jsonDecode" || code == "responseSchema" || code == "processing" {
+                let reason: DiagnosticReason = code == "jsonDecode" ? .responseDecode : (code == "responseSchema" ? .responseSchema : .scriptProcessing)
+                responseFailure = reason
+                diagnostics.event(.jdResponseRejected, reason: reason)
             } else if code == "schema" || code == "json" || code == "business" {
                 diagnostics.event(.jdResponseRejected, reason: code == "business" ? .interface : .parse)
             } else if code == "network" {
@@ -645,11 +659,14 @@ const listOrders=new Map();
 function observeList(orders, raw, requestBody, total) {
   let request;
   try { const u=new URL(raw,location.href), p=new URLSearchParams(typeof requestBody==='string'?requestBody:''); request=JSON.parse(u.searchParams.get('body')||p.get('body')||'{}'); } catch (_) { return listPages ? null : {kind:'orders',recognized:true,orders}; }
+  if (!request || typeof request!=='object' || Array.isArray(request)) return listPages ? null : {kind:'orders',recognized:true,orders,listCanAdvance:false};
   const page=request.page, size=request.pageSize;
   if (!Number.isInteger(page) || !Number.isInteger(size) || size<1 || size>200 || page<1 || page>10) return listPages ? null : {kind:'orders',recognized:true,orders};
   // Retain a closed business context only in memory; never forward request bodies or credentials.
   const context=JSON.stringify(['curTab','orderListTag','bizType','source','tenantCode'].map(k=>[k,request[k]===undefined?null:request[k]]));
-  if (!listPages && page!==1) return null;
+  // Parcly recognizes the returned list independently of request-page metadata.
+  // A resumed page is valid current-page evidence, not proof earlier pages were read.
+  if (!listPages && page!==1) return {kind:'orders',recognized:true,orders,listCanAdvance:false};
   if (listPages && (context!==listContext || page!==listPages+1)) return null;
   if (new Set(orders.map(o=>o.id)).size!==orders.length || orders.some(o=>!id(o.id))) { emit({error:'identity'}); return null; }
   const added=orders.filter(o=>!listOrders.has(o.id)).length;
@@ -685,7 +702,7 @@ window.__parcelJDNextPage=function(){
 };
 function emit(value) { try { if (JSON.stringify(value).length <= MAX) window.webkit.messageHandlers.jdCapture.postMessage(value); } catch (_) {} }
 function diagnostic(label, status) {
-  if (!['schema','json','business','network','networkResponse'].includes(label)) return;
+  if (!['schema','json','jsonDecode','responseSchema','processing','business','network','networkResponse'].includes(label)) return;
   const value = {kind:'diagnostic',diagnostic:label};
   if (Number.isInteger(status) && status >= 100 && status <= 599) value.httpStatus = status;
   emit(value);
@@ -737,13 +754,22 @@ function capture(raw, requestURL, requestBody, responseURL) {
   try {
     const u = new URL(requestURL, location.href);
     const fn = u.searchParams.get('functionId') || new URLSearchParams(typeof requestBody === 'string' ? requestBody : '').get('functionId');
-    if (!['order_list_m','order_detail_m','get_logistics_list_by_order_m','pcorder_center_list','pcdetail_traceMultiPackage'].includes(fn)) return;
-    const root = JSON.parse(raw);
+    const known = ['order_list_m','order_detail_m','get_logistics_list_by_order_m','pcorder_center_list','pcdetail_traceMultiPackage'].includes(fn);
+    // Match Parcly's response-first capture without forwarding raw account responses.
+    if (!known && !/orderList|tracePointVOList|carriageId/.test(raw)) return;
+    let root;
+    try {
+      root = JSON.parse(raw);
+      if (typeof root === 'string') root = JSON.parse(root);
+    } catch (_) { diagnostic('jsonDecode'); return; }
+    if (!root || typeof root !== 'object' || Array.isArray(root)) { diagnostic('responseSchema'); return; }
     if (root.code === 3 || root.code === '3') { emit({error:'authentication'}); return; }
     if (root.code === 403 || root.code === '403' || root.code === 429 || root.code === '429') { emit({error:'verification'}); return; }
     if (root.code !== undefined && ![0,'0',200,'200'].includes(root.code)) { diagnostic('business'); return; }
     if (root.success === false) { diagnostic('business'); return; }
     const b = root.body || root.data || root;
+    if (!b || typeof b !== 'object' || Array.isArray(b)) { diagnostic('responseSchema'); return; }
+    const hasOrders = Array.isArray(b.orderList);
     if (fn === 'order_detail_m') {
       // Public JD OrderInfo consumes body.orderCommonVo.orderId and summaryList
       // title/content. Values remain server-owned: only an explicit submission label qualifies.
@@ -759,9 +785,12 @@ function capture(raw, requestURL, requestBody, responseURL) {
       if (!submittedAt) { diagnostic('schema'); return; }
       emit({kind:'orderDate',recognized:true,orderID:requestID,submittedAt}); return;
     }
-    if (fn === 'order_list_m' || fn === 'pcorder_center_list') {
-      if (!Array.isArray(b.orderList) || b.orderList.length > 200) { diagnostic('schema'); return; }
-      const orders = b.orderList.map(o => {
+    if (hasOrders || fn === 'order_list_m' || fn === 'pcorder_center_list') {
+      if (!hasOrders || b.orderList.length > 200) { diagnostic('responseSchema'); return; }
+      // Parcly ignores non-map entries; they must not erase independent valid rows.
+      const rows = b.orderList.filter(o => o && typeof o==='object' && !Array.isArray(o));
+      if (b.orderList.length && !rows.length) { diagnostic('responseSchema'); return; }
+      const orders = rows.map(o => {
         const status = o.orderStatusInfo || o.statusInfo || {};
         const goods = (o.wareInfoList || o.wareList || [])[0] || {};
         const order = text(o.orderId);
@@ -770,7 +799,14 @@ function capture(raw, requestURL, requestBody, responseURL) {
         const excluded = [4,69].includes(Number(o.orderType)) || (Array.isArray(allGoods) && allGoods.length > 0 && allGoods.every(w => Number(w.wareType) === 1)) || /外卖|秒送|虚拟订单|虚拟业务|虚拟服务|服务订单|生活服务/.test(statusName + ' ' + text(o.orderTypeName));
         // Only dateSubmit is evidenced as an order submission field. Do not guess
         // createTime/orderTime/deliveryTime or use an event's date to qualify an order.
-        return {id:order, title:text(goods.wareName || goods.name,200), status:statusName, excluded, submittedAt:text(o.dateSubmit,80), url:safeLink(o.progressInfo && o.progressInfo.progressLink,order), dateURL:evidenceURL(o.orderDetailLink && o.orderDetailLink.url,order)};
+        let logistics = o.progressInfo && o.progressInfo.progressLink;
+        let url = safeLink(logistics,order);
+        if (!logistics && text(status.originOrderStatus)) {
+          const entry = new URL('https://trade.m.jd.com/order/deal_wuliu_jdm.shtml');
+          for (const [key,value] of Object.entries({from:'orderdetail',dealState:text(status.originOrderStatus),dealId:order,orderType:text(o.orderType),skuid:text(goods.skuId),shopid:text(o.shopInfo && o.shopInfo.shopId),source:'m_inner_orderList.track_orderTrack'})) entry.searchParams.set(key,value);
+          url = safeLink(entry.href,order);
+        }
+        return {id:order, title:text(goods.wareName || goods.name,200), status:statusName, excluded, submittedAt:text(o.dateSubmit,80), url, dateURL:evidenceURL(o.orderDetailLink && o.orderDetailLink.url,order)};
       });
       const page=fn==='order_list_m' ? observeList(orders,requestURL,requestBody,b.totalNum) : {kind:'orders',recognized:true,orders};
       if(page) emit(page); return;
@@ -800,7 +836,7 @@ function capture(raw, requestURL, requestBody, responseURL) {
     const merged = mergeParcels(orderID,parcels);
     if (!merged) { diagnostic('schema'); return; }
     emit({kind:'logistics',recognized:true,orderID,parcels:merged});
-  } catch (_) { diagnostic('json'); }
+  } catch (_) { diagnostic('processing'); }
 }
 const originalFetch = window.fetch;
 if (typeof originalFetch === 'function') window.fetch = function(input, init) {

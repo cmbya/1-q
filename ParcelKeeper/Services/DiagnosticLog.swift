@@ -26,6 +26,7 @@ enum DiagnosticReason: String, Codable, CaseIterable {
     case queued, olderEvent, statusConflict, configurationChanged, terminalResult
     case quota, rateLimited, parse, accounting, configuration
     case olderQuery, association, validation, busy, unavailable, jobGone
+    case responseDecode, responseSchema, scriptProcessing
 }
 
 enum DiagnosticStage: String, Codable, CaseIterable {
