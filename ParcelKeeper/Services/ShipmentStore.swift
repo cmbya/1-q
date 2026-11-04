@@ -240,9 +240,14 @@ final class ShipmentStore: ObservableObject {
         guard !record.isCompleted, !code.isEmpty else { return }
         if let previous, !previous.isCompleted, previous.groupID == record.groupID,
            previous.code.trimmingCharacters(in: .whitespacesAndNewlines) == code { return }
-        guard !data.records.contains(where: {
-            $0.id != record.id && $0.groupID == record.groupID && !$0.isCompleted &&
-            $0.code.trimmingCharacters(in: .whitespacesAndNewlines) == code
+        guard !data.records.contains(where: { other in
+            guard other.id != record.id, other.groupID == record.groupID, !other.isCompleted,
+                  other.code.trimmingCharacters(in: .whitespacesAndNewlines) == code else { return false }
+            if let id = record.shipmentID, let otherID = other.shipmentID,
+               let shipment = data.shipments.first(where: { $0.id == id }),
+               let peer = data.shipments.first(where: { $0.id == otherID }),
+               KDYZMMerger.sameParcel(shipment, peer) { return false }
+            return true
         }) else { throw PickupStorageError.invalidData("此分组已有未完成的相同取码。") }
     }
 
@@ -690,3 +695,4 @@ final class ShipmentStore: ObservableObject {
         return false
     }
 }
+

@@ -438,7 +438,12 @@ final class SharedPickupStore {
             var matches: [UUID: UUID] = [:]
             var claimed = Set<UUID>()
             for shipment in incoming.shipments {
-                let candidates = current.shipments.filter {
+                let exact = current.shipments.filter { $0.id == shipment.id }
+                // Exact identity disambiguates legal combined-shipping duplicates only
+                // when the waybill is unchanged. A changed identity still needs conflict checks.
+                let candidates = exact.first.map({
+                    CarrierDetector.sanitize($0.trackingNumber) == CarrierDetector.sanitize(shipment.trackingNumber)
+                }) == true ? exact : current.shipments.filter {
                     $0.id == shipment.id || CarrierDetector.sanitize($0.trackingNumber) == CarrierDetector.sanitize(shipment.trackingNumber)
                 }
                 guard candidates.count <= 1 else { throw PickupStorageError.invalidData("运单 ID 与运单号发生多重冲突，无法安全合并") }
@@ -511,3 +516,4 @@ final class SharedPickupStore {
         }
     }
 }
+

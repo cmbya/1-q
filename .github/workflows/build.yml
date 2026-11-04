@@ -1,6 +1,15 @@
 name: Build Unsigned IPA
 
 on:
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - "ParcelKeeper/**"
+      - "ParcelKeeperWidget/**"
+      - "ParcelKeeperTests/**"
+      - "scripts/**"
+      - "project.yml"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
     inputs:
       build_only:
@@ -175,3 +184,4 @@ jobs:
           NOTES="自动构建预发布版；来源提交 ${GITHUB_SHA}。测试、Release 编译及 IPA 图标/组件配置校验均成功。无签名 IPA，最低 iOS 17，需自行签名；主 App 和组件必须获得相同 App Group 授权。编译通过不等于真机/重签/CPA 验收通过。安装前请备份数据。构建：https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           gh release create "$TAG" build/ParcelKeeper-unsigned.ipa build/SHA256SUMS.txt --target "$GITHUB_SHA" --title "快递管家 ${VERSION} · Build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}（无签名）" --prerelease --notes "$NOTES"
           gh release view "$TAG" --json url,targetCommitish,assets
+

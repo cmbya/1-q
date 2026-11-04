@@ -82,6 +82,34 @@ final class TaobaoTrackingTests: XCTestCase {
         value["multiStage"] = [["subtitle": "01-02 10:00", "title": "未知阶段", "status": "done", "type": "doing", "text": "节点"]]
         XCTAssertNil(try parse(value).status)
     }
+    func testSignedStationDescriptionKeepsPickupPendingThroughRefresh() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        let shipment = Shipment(trackingNumber: number, carrierName: "顺丰", carrierCode: "sf", pickupCode: "42", originPlatform: "taobao", taobaoOrderID: "123456789012")
+        try store.transaction { data in
+            data.shipments.append(shipment)
+            data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42", shipmentID: shipment.id))
+        }
+        let network = Network()
+        network.bytes = try html(fields([node("2026-01-02 10:00", "已签收", "菜鸟驿站代收，请凭码取件")]))
+        let paid = TrackingRefreshTests.Client()
+        var service = TrackingRefreshService(store: store, client: paid, reloadWidgets: {})
+        service.taobaoClient = try client(network)
+        let delivered = try await service.refresh(id: shipment.id)
+        XCTAssertFalse(delivered)
+        let saved = try store.snapshot()
+        XCTAssertEqual(saved.shipments[0].status, .readyForPickup)
+        XCTAssertFalse(saved.records[0].isCompleted)
+        XCTAssertEqual(saved.records[0].code, "42")
+        XCTAssertEqual(paid.calls, 0)
+    }
+    func testStationAndRecipientEvidenceOverrideCoarseTaobaoTitle() throws {
+        for text in ["菜鸟驿站代收，请凭码取件", "已放入快递柜", "驿站已签收，请凭取件码领取"] {
+            XCTAssertEqual(try parse(fields([node("01-02 10:00", "已签收", text)])).status, .readyForPickup)
+        }
+        XCTAssertEqual(try parse(fields([node("01-02 10:00", "待取件", "收件人已取件")])).status, .delivered)
+    }
     func testExplicitStatusMapping() throws {
         let cases: [(String, ShipmentStatus)] = [("运输中", .inTransit), ("已揽收", .inTransit), ("派送中", .outForDelivery), ("待领取", .readyForPickup), ("已签收", .delivered), ("物流异常", .exception)]
         for (title, expected) in cases { XCTAssertEqual(try parse(fields([node("01-02 10:00", title)])).status, expected) }
@@ -213,3 +241,4 @@ final class TaobaoTrackingTests: XCTestCase {
         XCTAssertEqual(bound.id, old.id)
     }
 }
+
