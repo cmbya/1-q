@@ -37,12 +37,13 @@ final class JDDiagnostics {
     func fail(_ error: Error) {
         lock.lock(); defer { lock.unlock() }
         guard !ended else { return }; ended = true
-        let stage = trace.stage ?? .preflight
+        let stage = (error as? JDLoggedError)?.stage ?? trace.stage ?? .preflight
         let reason: DiagnosticReason
         if stage == .jdSessionSave, (error as? MallWebError) == .authentication { reason = .storage }
         else if stage == .jdOrdersParse || stage == .jdLogisticsParse,
                 (error as? MallWebError) == .unsupported { reason = .parse }
         else { reason = Self.reason(error) }
+        if trace.stage != stage { trace.begin(stage) }
         trace.fail(JDLoggedError(reason: reason, stage: stage))
         var counts: [DiagnosticMetric: Int] = [:]
         if let code = Self.safeNetworkCode(error) { counts[.errorCode] = code }
@@ -51,6 +52,16 @@ final class JDDiagnostics {
     static func reason(_ error: Error) -> DiagnosticReason {
         if let safe = error as? JDLoggedError { return safe.reason }
         return TrackingRefreshService.diagnosticReason(error)
+    }
+    static func responseCounts(_ payload: [String: Any]) -> [DiagnosticMetric: Int] {
+        guard let metrics = payload["metrics"] as? [String: Any] else { return [:] }
+        var counts: [DiagnosticMetric: Int] = [:]
+        for metric in [DiagnosticMetric.jdRequestKind, .jdRootType, .jdBodyType, .jdListType, .jdSchemaStep, .jdBusinessSource] {
+            if let value = metrics[metric.rawValue] as? Int, value == metric.bounded(value) {
+                counts[metric] = value
+            }
+        }
+        return counts
     }
     static func safeNetworkCode(_ error: Error) -> Int? {
         let value = error as NSError
@@ -68,6 +79,14 @@ final class JDDiagnostics {
 struct JDLoggedError: LocalizedError {
     let reason: DiagnosticReason
     let stage: DiagnosticStage
-    var errorDescription: String? { "京东操作失败（阶段：\(stage.rawValue)，原因：\(reason.rawValue)），请在设置中导出诊断日志。" }
+    var errorDescription: String? {
+        let explanation: String
+        switch reason {
+        case .interface: explanation = "京东接口返回业务错误，本次未取得可用结果。"
+        case .responseSchema: explanation = "京东返回内容未包含可识别的订单或物流结构，不代表没有订单。"
+        default: explanation = "京东操作失败。"
+        }
+        return explanation + "（阶段：\(stage.rawValue)，原因：\(reason.rawValue)），请在设置中导出诊断日志。"
+    }
     var stopsBatch: Bool { reason == .authentication || reason == .verification }
 }

@@ -80,11 +80,15 @@ enum DiagnosticMetric: String, Codable, CaseIterable {
     case hasProgress, hasType, hasLink, hasDate, accepted, rejected
     case hasBackendBinding, explicitPaidChannel, forcedPaidMode
     case jdMissingDate, jdBusinessExcluded, jdOutsideWindow, jdDetailFailed, jdWithoutWaybill, jdLimited
+    case jdRequestKind, jdRootType, jdBodyType, jdListType, jdSchemaStep, jdBusinessSource
 
     // Numeric fields are measurements only, never identifiers. Even accidental
     // large numbers cannot preserve phone/order/tracking identifiers verbatim.
     func bounded(_ value: Int) -> Int {
         switch self {
+        case .jdRequestKind: return min(5, max(0, value))
+        case .jdRootType, .jdBodyType, .jdListType, .jdSchemaStep: return min(6, max(0, value))
+        case .jdBusinessSource: return min(4, max(0, value))
         case .hasBackendBinding, .explicitPaidChannel, .forcedPaidMode, .jdLimited: return min(1, max(0, value))
         case .hasProgress, .hasType, .hasLink, .hasDate: return min(200, max(0, value))
         case .httpStatus: return min(599, max(0, value))

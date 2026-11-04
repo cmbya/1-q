@@ -3,6 +3,35 @@ import XCTest
 
 final class JDDiagnosticsTests: XCTestCase {
     private func directory() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString) }
+    func testResponseShapeMetricsRejectUnknownKeysAndOutOfRangeValues() throws {
+        let payload: [String: Any] = ["metrics": [
+            "jdRequestKind": 1, "jdRootType": 6, "jdBodyType": 6, "jdListType": 0,
+            "jdSchemaStep": 3, "jdBusinessSource": 4, "private": "synthetic-secret",
+            "rows": 123456789
+        ]]
+        let counts = JDDiagnostics.responseCounts(payload)
+        XCTAssertEqual(counts.count, 6)
+        XCTAssertEqual(counts[.jdSchemaStep], 3)
+        XCTAssertNil(counts[.rows])
+        XCTAssertTrue(JDDiagnostics.responseCounts(["metrics": ["jdSchemaStep": -1, "jdBusinessSource": 999, "jdRootType": "synthetic-secret"]]).isEmpty)
+        for metric in counts.keys {
+            let encoded = try JSONEncoder().encode(metric)
+            XCTAssertEqual(try JSONDecoder().decode(DiagnosticMetric.self, from: encoded), metric)
+            XCTAssertLessThanOrEqual(metric.bounded(Int.max), 6)
+        }
+    }
+    func testResponseFailurePreservesOriginalStageAcrossDOMAndFetchCallers() {
+        let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let log = DiagnosticLog(directory: root)
+        for current in [DiagnosticStage.jdPageDOM, .jdFetch] {
+            let operation = JDDiagnostics(current, log: log)
+            operation.fail(JDLoggedError(reason: .interface, stage: .jdOrdersParse))
+            XCTAssertEqual(operation.trace.failureStage, .jdOrdersParse)
+        }
+        let failures = log.snapshotForTesting().text.components(separatedBy: "\n").filter { $0.contains("jdOperationFailed") }
+        XCTAssertEqual(failures.count, 2)
+        XCTAssertTrue(failures.allSatisfy { $0.contains("reason=interface stage=jdOrdersParse") })
+    }
     func testResponseFailureReasonsRemainDistinctAndContainNoRawPayload() throws {
         let root = directory(); defer { try? FileManager.default.removeItem(at: root) }
         let log = DiagnosticLog(directory: root)

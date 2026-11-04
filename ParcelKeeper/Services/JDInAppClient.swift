@@ -500,21 +500,25 @@ enum JDPageParser {
         if body["kind"] as? String == "diagnostic" {
             // Only exact labels and bounded counts from known page request classes.
             let code = body["diagnostic"] as? String
+            let counts = JDDiagnostics.responseCounts(body)
             if code == "networkResponse", let status = body["httpStatus"] as? Int, (100...599).contains(status) {
                 diagnostics.event(.jdNetworkResponse, counts: [.httpStatus: status])
             } else if code == "jsonDecode" || code == "responseSchema" || code == "processing" {
                 let reason: DiagnosticReason = code == "jsonDecode" ? .responseDecode : (code == "responseSchema" ? .responseSchema : .scriptProcessing)
                 responseFailure = reason
-                diagnostics.event(.jdResponseRejected, reason: reason)
-            } else if code == "schema" || code == "json" || code == "business" {
-                diagnostics.event(.jdResponseRejected, reason: code == "business" ? .interface : .parse)
+                diagnostics.event(.jdResponseRejected, reason: reason, counts: counts)
+            } else if code == "business" {
+                responseFailure = .interface
+                diagnostics.event(.jdResponseRejected, reason: .interface, counts: counts)
+            } else if code == "schema" || code == "json" {
+                diagnostics.event(.jdResponseRejected, reason: .parse)
             } else if code == "network" {
                 diagnostics.event(.jdResponseRejected, reason: .network)
             }
             return
         }
         if body["error"] != nil {
-            diagnostics.event(.jdResponseRejected, reason: (body["error"] as? String) == "identity" ? .identity : ((body["error"] as? String) == "authentication" ? .authentication : .verification))
+            diagnostics.event(.jdResponseRejected, reason: (body["error"] as? String) == "identity" ? .identity : ((body["error"] as? String) == "authentication" ? .authentication : .verification), counts: JDDiagnostics.responseCounts(body))
             do { try JDPageParser.failure(body) } catch { failed = error }
             return
         }
@@ -701,11 +705,20 @@ window.__parcelJDNextPage=function(){
   return true;
 };
 function emit(value) { try { if (JSON.stringify(value).length <= MAX) window.webkit.messageHandlers.jdCapture.postMessage(value); } catch (_) {} }
-function diagnostic(label, status) {
+function diagnostic(label, status, metrics) {
   if (!['schema','json','jsonDecode','responseSchema','processing','business','network','networkResponse'].includes(label)) return;
   const value = {kind:'diagnostic',diagnostic:label};
   if (Number.isInteger(status) && status >= 100 && status <= 599) value.httpStatus = status;
+  if (metrics) value.metrics = metrics;
   emit(value);
+}
+function responseType(value) {
+  if (value === undefined) return 0;
+  if (value === null) return 1;
+  if (typeof value === 'boolean') return 2;
+  if (typeof value === 'number') return 3;
+  if (typeof value === 'string') return 4;
+  return Array.isArray(value) ? 5 : 6;
 }
 function knownRequest(raw, body) {
   try {
@@ -762,13 +775,25 @@ function capture(raw, requestURL, requestBody, responseURL) {
       root = JSON.parse(raw);
       if (typeof root === 'string') root = JSON.parse(root);
     } catch (_) { diagnostic('jsonDecode'); return; }
-    if (!root || typeof root !== 'object' || Array.isArray(root)) { diagnostic('responseSchema'); return; }
-    if (root.code === 3 || root.code === '3') { emit({error:'authentication'}); return; }
-    if (root.code === 403 || root.code === '403' || root.code === 429 || root.code === '429') { emit({error:'verification'}); return; }
-    if (root.code !== undefined && ![0,'0',200,'200'].includes(root.code)) { diagnostic('business'); return; }
-    if (root.success === false) { diagnostic('business'); return; }
-    const b = root.body || root.data || root;
-    if (!b || typeof b !== 'object' || Array.isArray(b)) { diagnostic('responseSchema'); return; }
+    const metrics = {jdRequestKind:['order_list_m','pcorder_center_list','order_detail_m','get_logistics_list_by_order_m','pcdetail_traceMultiPackage'].indexOf(fn)+1,
+      jdRootType:responseType(root),jdBodyType:0,jdListType:0};
+    const rejectSchema = step => diagnostic('responseSchema',undefined,{...metrics,jdSchemaStep:step});
+    const rejectBusiness = source => { if (known) diagnostic('business',undefined,{...metrics,jdBusinessSource:source}); };
+    if (!root || typeof root !== 'object' || Array.isArray(root)) { rejectSchema(1); return; }
+    const b = Object.prototype.hasOwnProperty.call(root,'body') ? root.body : (Object.prototype.hasOwnProperty.call(root,'data') ? root.data : root);
+    metrics.jdBodyType=responseType(b);
+    metrics.jdListType=responseType(b && typeof b==='object' ? b.orderList : undefined);
+    if (root.code === 3 || root.code === '3') { if (known) emit({error:'authentication',metrics:{...metrics,jdBusinessSource:1}}); return; }
+    if (root.code === 403 || root.code === '403' || root.code === 429 || root.code === '429') { if (known) emit({error:'verification',metrics:{...metrics,jdBusinessSource:1}}); return; }
+    if (root.code !== undefined && ![0,'0',200,'200'].includes(root.code)) { rejectBusiness(1); return; }
+    if (![undefined,null,0,'0',''].includes(root.retcode)) { rejectBusiness(2); return; }
+    if (root.success === false) { rejectBusiness(3); return; }
+    if (!b || typeof b !== 'object' || Array.isArray(b)) { rejectSchema(2); return; }
+    if (Object.prototype.hasOwnProperty.call(b,'errorCode')) {
+      if (b.errorCode===302 || b.errorCode==='302') { if (known) emit({error:'authentication',metrics:{...metrics,jdBusinessSource:4}}); }
+      else rejectBusiness(4);
+      return;
+    }
     const hasOrders = Array.isArray(b.orderList);
     if (fn === 'order_detail_m') {
       // Public JD OrderInfo consumes body.orderCommonVo.orderId and summaryList
@@ -786,10 +811,12 @@ function capture(raw, requestURL, requestBody, responseURL) {
       emit({kind:'orderDate',recognized:true,orderID:requestID,submittedAt}); return;
     }
     if (hasOrders || fn === 'order_list_m' || fn === 'pcorder_center_list') {
-      if (!hasOrders || b.orderList.length > 200) { diagnostic('responseSchema'); return; }
+      if (!Object.prototype.hasOwnProperty.call(b,'orderList')) { rejectSchema(3); return; }
+      if (!hasOrders) { rejectSchema(4); return; }
+      if (b.orderList.length > 200) { rejectSchema(5); return; }
       // Parcly ignores non-map entries; they must not erase independent valid rows.
       const rows = b.orderList.filter(o => o && typeof o==='object' && !Array.isArray(o));
-      if (b.orderList.length && !rows.length) { diagnostic('responseSchema'); return; }
+      if (b.orderList.length && !rows.length) { rejectSchema(6); return; }
       const orders = rows.map(o => {
         const status = o.orderStatusInfo || o.statusInfo || {};
         const goods = (o.wareInfoList || o.wareList || [])[0] || {};

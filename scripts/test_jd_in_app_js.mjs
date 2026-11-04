@@ -41,7 +41,12 @@ assert.ok(diagnostics.some(x=>x.diagnostic==='business'));
 xhr.errorListener();assert.equal(diagnostics.at(-1).diagnostic,'network');
 for (const x of diagnostics) {
   assert.ok(['schema','json','jsonDecode','responseSchema','processing','business','network','networkResponse'].includes(x.diagnostic));
-  assert.ok(Object.keys(x).every(k=>['kind','diagnostic','httpStatus'].includes(k)));
+  assert.ok(Object.keys(x).every(k=>['kind','diagnostic','httpStatus','metrics'].includes(k)));
+  const limits = {jdRequestKind:5,jdRootType:6,jdBodyType:6,jdListType:6,jdSchemaStep:6,jdBusinessSource:4};
+  for (const [key,value] of Object.entries(x.metrics || {})) {
+    assert.ok(Object.hasOwn(limits,key));
+    assert.ok(Number.isInteger(value) && value>=0 && value<=limits[key]);
+  }
 }
 assert.doesNotMatch(JSON.stringify(diagnostics),/SECRET|pt_key|trackingNo|https:|123456789/);
 console.log('JD JS synthetic checks passed: fetch/XHR, empty/unknown schema, split/DOM identity, host and secret filtering, safe diagnostic codes');
