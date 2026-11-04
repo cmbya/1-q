@@ -118,7 +118,7 @@ enum TaobaoTrackingParser {
             let detail = try description(node)
             let text = [title, detail].filter { !$0.isEmpty }.joined(separator: " ")
             guard !text.isEmpty, text.count <= 2000, title.count <= 100 else { throw TaobaoTrackingError.unsupported }
-            stages.append(Stage(index: index, date: time.date, rawTime: rawTime, inferredYear: time.inferredYear, title: title, text: text))
+            stages.append(Stage(index: index, date: time.date, rawTime: rawTime, inferredYear: time.inferredYear, title: title, text: text, detail: detail))
         }
         guard !stages.isEmpty else { throw TaobaoTrackingError.noTrace }
         stages.sort { $0.date == $1.date ? $0.index < $1.index : $0.date > $1.date }
@@ -132,7 +132,7 @@ enum TaobaoTrackingParser {
         }.joined(separator: "\n")
         let info = "查询来源：淘宝\n快递单号：\(trackingNumber)\n快递公司：\(carrier)\n物流轨迹：\n\(history)"
         guard info.count <= 10000 else { throw TaobaoTrackingError.unsupported }
-        return UAPITrackingResult(trackingNumber: trackingNumber, carrierName: carrier, carrierCode: "", status: MallDeliveryState.resolve(latest: latest.text) ?? status(latest.title),
+        return UAPITrackingResult(trackingNumber: trackingNumber, carrierName: carrier, carrierCode: "", status: MallDeliveryState.resolve(latest: latest.detail) ?? MallDeliveryState.resolve(latest: latest.text) ?? status(latest.title),
                                   logisticsInfo: latest.text, logisticsTime: latest.date, queryInfo: info, queriedAt: now)
     }
 
@@ -143,6 +143,7 @@ enum TaobaoTrackingParser {
         let inferredYear: Bool
         let title: String
         let text: String
+        let detail: String
     }
 
     private static func description(_ node: [String: Any]) throws -> String {
