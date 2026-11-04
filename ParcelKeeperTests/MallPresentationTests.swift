@@ -24,8 +24,8 @@ final class MallPresentationTests: XCTestCase {
     }
 
     func testImportAndRefreshCountsAreReportedSeparately() {
-        let report = MallImportSummary(added: 2, bound: 1, importFailed: 1, refreshed: 1, refreshFailed: 1, skipped: 1)
-        XCTAssertEqual(report.message, "导入：新增2票，已有记录补关联1票，失败1票。\n物流：更新1票，失败1票，未请求1票。未调用UAPI。")
+        let report = MallImportSummary(added: 2, bound: 1, importFailed: 1, refreshed: 1, refreshFailed: 1, skipped: 1, previewApplied: 2, noTrace: 3)
+        XCTAssertEqual(report.message, "导入：新增2票，已有记录补关联1票，失败1票。\n物流：保存本次预览2票，平台刷新1票，失败1票，无有效轨迹3票，保留／未请求1票。未调用UAPI或Tmini。")
     }
 
     func testSavedShortcutDefaultAndChannelsRemainUnchanged() {
