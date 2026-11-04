@@ -218,11 +218,13 @@ final class JDPreviewImportTests: XCTestCase {
         }
     }
 
-    func testSavedSourceURLEntersExplicitOldOrderRefreshWithoutPaidFallback() async throws {
+    func testSavedSourceURLCannotReactivateRetiredJDOrPaidFallback() async throws {
         let (root, shared, app) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let old = try add(app), paid = TrackingRefreshTests.Client(), mall = Mall()
-        _ = try await service(shared, paid: paid, mall: mall).refresh(id: old.id)
-        XCTAssertEqual(mall.sourceURL, entry)
-        XCTAssertEqual(mall.calls, 1); XCTAssertEqual(paid.calls, 0)
+        do { _ = try await service(shared, paid: paid, mall: mall).refresh(id: old.id); XCTFail() }
+        catch { XCTAssertEqual(error as? RetiredTrackingChannel, .jd) }
+        XCTAssertNil(mall.sourceURL)
+        XCTAssertEqual(mall.calls, 0); XCTAssertEqual(paid.calls, 0)
     }
 }
+
