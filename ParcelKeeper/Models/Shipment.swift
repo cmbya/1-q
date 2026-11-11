@@ -64,8 +64,20 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var backendRefreshGeneration: UUID?
     var backendPreviousHistory: String?
 
+    // Separate delivery from recipient receipt; nil keeps old JSON compatible.
+    var homeDelivery: Bool?
+    var receiptConfirmed: Bool?
+    var receiptConfirmedAt: Date?
+    var backendRecipientCollected: Bool?
+    var needsReceiptConfirmation: Bool {
+        homeDelivery == true && status != .archived &&
+            !(receiptConfirmed ?? backendRecipientCollected ?? false)
+    }
+    var isPickupCodeActive: Bool { homeDelivery != true }
+
     /// An imported number without a successful query does not prove movement.
     var statusDisplayText: String {
+        if needsReceiptConfirmation { return "已送达 · 待确认收到" }
         let hasTrace = !(logisticsInfo?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         return originPlatform != nil && status == .inTransit && lastQueriedAt == nil && !hasTrace
             ? "物流状态未核实" : status.rawValue

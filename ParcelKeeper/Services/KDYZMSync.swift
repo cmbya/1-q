@@ -15,6 +15,22 @@ struct KDYZMOrder: Decodable {
     var platformOrderId: String
     var familyId: String? = nil
     var title: String? = nil
+    var tradeStatus: String? = nil
+    var orderStatus: String? = nil
+    var fulfillmentType: String? = nil
+    var hidden: Bool? = nil
+    var deleted: Bool? = nil
+    var archived: Bool? = nil
+
+    var awaitingShipment: Bool {
+        let status = (tradeStatus ?? "") + " " + (orderStatus ?? "")
+        return ["WAIT_SELLER_SEND_GOODS", "待发货", "等待发货", "等待卖家发货", "待卖家发货", "等待出库", "正在出库"].contains(where: status.contains)
+    }
+    var canDisplayWithoutWaybill: Bool {
+        let status = ((tradeStatus ?? "") + " " + (orderStatus ?? "")).uppercased()
+        return !platformOrderId.isEmpty && hidden != true && deleted != true && archived != true && fulfillmentType != "local_delivery" &&
+            !["TRADE_CLOSED", "TRADE_FINISHED", "WAIT_BUYER_PAY", "交易关闭", "交易成功", "交易完成", "已完成", "已取消", "已签收", "待付款", "未付款", "退款成功", "虚拟"].contains(where: status.contains)
+    }
 }
 struct KDYZMRemoteShipment: Decodable {
     var id: String
@@ -80,6 +96,11 @@ struct KDYZMSnapshot: Decodable {
         }
         for order in orders {
             _ = try KDYZMClient.segment(order.accountId)
+            guard order.platformOrderId.count <= 200,
+                  (order.title ?? "").count <= 500,
+                  [order.platformOrderId, order.title ?? "", order.tradeStatus ?? "", order.orderStatus ?? "", order.fulfillmentType ?? ""].allSatisfy({
+                      $0.count <= 500 && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+                  }) else { throw KDYZMError.invalid }
             guard !order.platform.isEmpty,
                   !order.platform.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw KDYZMError.invalid }
             guard authorized(account: order.accountId, family: order.familyId),
@@ -167,7 +188,7 @@ enum KDYZMMerger {
     }
     private static func conflictingPickup(code: String, groupID: UUID, shipment: Shipment, in data: PickupDataset) -> Bool {
         data.records.contains { record in
-            guard record.shipmentID != shipment.id, !record.isCompleted, record.groupID == groupID,
+            guard data.pickupCodeActive(record), record.shipmentID != shipment.id, !record.isCompleted, record.groupID == groupID,
                   record.code.trimmingCharacters(in: .whitespacesAndNewlines) == code.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
             guard let id = record.shipmentID, let other = data.shipments.first(where: { $0.id == id }) else { return true }
             return !sameParcel(shipment, other)
@@ -202,10 +223,18 @@ enum KDYZMMerger {
     /// Never clear a user's completion, or overwrite an explicit local reopen.
     @discardableResult
     static func completePickup(_ remote: KDYZMRemoteShipment, shipmentID: UUID, in data: inout PickupDataset) throws -> Bool {
-        guard recipientCollected(remote) else { return false }
+        guard let shipmentIndex = data.shipments.firstIndex(where: { $0.id == shipmentID }) else { throw KDYZMError.invalid }
         let linked = data.records.indices.filter { data.records[$0].shipmentID == shipmentID }
         guard linked.count == 1, let index = linked.first else { throw KDYZMError.invalid }
-        guard !data.records[index].isCompleted, data.records[index].completionOverride != false else { return false }
+        var changed = false
+        if data.shipments[shipmentIndex].homeDelivery == true,
+           data.shipments[shipmentIndex].receiptConfirmed == nil,
+           let override = data.records[index].completionOverride {
+            data.shipments[shipmentIndex].receiptConfirmed = override
+            changed = true
+        }
+        guard recipientCollected(remote) || data.shipments[shipmentIndex].receiptConfirmed == true else { return changed }
+        guard !data.records[index].isCompleted, data.records[index].completionOverride != false else { return changed }
         data.records[index].isCompleted = true
         data.records[index].updatedAt = Date()
         return true
@@ -215,7 +244,10 @@ enum KDYZMMerger {
         let original = local
         defer { if local != original { local.updatedAt = Date() } }
         // A saved server collection decision remains usable without cached events.
-        if recipientCollected(remote) { local.status = .delivered }
+        if recipientCollected(remote) {
+            local.status = .delivered
+            local.backendRecipientCollected = true
+        }
         // Failed/empty cache responses never clear history, and never count as a successful refresh.
         guard remote.logisticsState == "ok", let incoming = remote.logisticsEvents, !incoming.isEmpty,
               let successTime = try KDYZMTime.date(remote.logisticsUpdatedAt ?? 0) else { return false }
@@ -241,6 +273,16 @@ enum KDYZMMerger {
             return [time, $0.description, $0.location].filter { !$0.isEmpty }.joined(separator: " · ")
         }.joined(separator: "\n") + (remote.logisticsTruncated == true ? "\n【后台轨迹已截断，非完整历史；本地已有节点保留】" : "")
         local.queryInfo = TrackingQueryHistory.merged(local.queryInfo, priorHistory)
+        let newest = incoming.filter { (try? KDYZMTime.date($0.time)) == latest && $0.time > 0 && $0.time <= Date().timeIntervalSince1970 * 1000 }.map(\.description)
+        let collected = recipientCollected(remote)
+        local.backendRecipientCollected = collected ? true : nil
+        if !collected && local.receiptConfirmed == nil && (latest ?? .distantPast) >= (original.logisticsTime ?? .distantPast) {
+            let home = MallDeliveryState.homeDelivered(events: newest, status: remote.status,
+                station: remote.station ?? "", hasPickupCode: !(remote.pickupCode ?? "").isEmpty)
+            local.homeDelivery = home ? true : nil
+            if original.homeDelivery == true && !home { local.status = .inTransit }
+        }
+        if local.homeDelivery == true { local.status = .delivered }
         // Generic signed can describe a station deposit; only collection evidence
         // completes the linked pickup record in completePickup.
         if local.status != .archived && local.status != .delivered {
@@ -264,9 +306,25 @@ enum KDYZMMerger {
         let remoteNumbers = Dictionary(grouping: snapshot.shipments.filter { !CarrierDetector.sanitize($0.waybillNo).isEmpty }, by: { CarrierDetector.sanitize($0.waybillNo) })
         let existingBindings = data.shipments.compactMap(\.backendBinding)
         guard Set(existingBindings).count == existingBindings.count else { throw KDYZMError.invalid }
-        result.noWaybill = snapshot.orders.filter { order in
-            !snapshot.shipments.contains { $0.orderId == order.id && !CarrierDetector.sanitize($0.waybillNo).isEmpty }
-        }.count
+        var pending = data.backendPendingOrders ?? []
+        for order in snapshot.orders {
+            let row = BackendPendingOrder(origin: origin, accountID: order.accountId, orderID: order.id,
+                platform: order.platform, platformOrderID: order.platformOrderId, title: order.title ?? "",
+                awaitingShipment: order.awaitingShipment)
+            let ships = snapshot.shipments.filter { $0.orderId == order.id }
+            let hasWaybill = ships.contains { !CarrierDetector.sanitize($0.waybillNo).isEmpty } || data.shipments.contains {
+                $0.backendBinding.map { $0.origin == origin && $0.accountID == order.accountId && $0.orderID == order.id } == true
+            }
+            let visible = !snapshot.hiddenIds.contains(order.id) && !snapshot.deletedIds.contains(order.id) &&
+                !ships.contains { $0.hidden == true || $0.deleted == true || snapshot.hiddenIds.contains($0.id) || snapshot.deletedIds.contains($0.id) }
+            pending.removeAll { $0.id == row.id }
+            if order.canDisplayWithoutWaybill && !hasWaybill && visible {
+                pending.append(row); result.noWaybill += 1
+            }
+        }
+        // Absence from a partial snapshot is not deletion; explicit tombstones are.
+        pending.removeAll { $0.origin == origin && (snapshot.hiddenIds.contains($0.orderID) || snapshot.deletedIds.contains($0.orderID)) }
+        if !pending.isEmpty || data.backendPendingOrders != nil { data.backendPendingOrders = pending.sorted { $0.id < $1.id } }
         for remote in snapshot.shipments {
             guard let order = orders[remote.orderId],
                   !snapshot.hiddenIds.contains(remote.id), !snapshot.deletedIds.contains(remote.id),
@@ -306,14 +364,16 @@ enum KDYZMMerger {
                 var recordChanged = false
                 if local.refreshChannel == nil {
                     _ = try update(remote, local: &local, operation: operation)
+                    data.shipments[index] = local
                     recordChanged = try completePickup(remote, shipmentID: local.id, in: &data)
+                    local = data.shipments[index]
                 }
                 let code = remote.pickupCode ?? ""
                 if local.pickupCode.isEmpty, !code.isEmpty {
                     let linked = data.records.indices.filter { data.records[$0].shipmentID == local.id }
                     guard linked.count == 1, let record = linked.first, data.records[record].code.isEmpty else { throw KDYZMError.invalid }
                     let target = data.records[record]
-                    guard target.isCompleted || !conflictingPickup(code: code, groupID: target.groupID, shipment: local, in: data) else { throw KDYZMError.invalid }
+                    guard !local.isPickupCodeActive || target.isCompleted || !conflictingPickup(code: code, groupID: target.groupID, shipment: local, in: data) else { throw KDYZMError.invalid }
                     local.pickupCode = code
                     data.records[record].code = code
                 }
@@ -330,13 +390,13 @@ enum KDYZMMerger {
                                      carrierCode: detection.carrier.code, note: order.title ?? "", pickupCode: pickupCode,
                                      originPlatform: order.platform, platformOrderID: order.platformOrderId)
                 local.backendBinding = binding
-                guard completed || pickupCode.isEmpty || !conflictingPickup(code: pickupCode, groupID: group, shipment: local, in: data) else { throw KDYZMError.invalid }
                 switch remote.status {
                 case "signed": local.status = .delivered
                 case "arrived": local.status = .readyForPickup
                 default: break
                 }
                 _ = try update(remote, local: &local, operation: operation)
+                guard !local.isPickupCodeActive || completed || pickupCode.isEmpty || !conflictingPickup(code: pickupCode, groupID: group, shipment: local, in: data) else { throw KDYZMError.invalid }
                 data.shipments.append(local)
                 data.records.append(PickupRecord(groupID: group, code: local.pickupCode, location: remote.station ?? "", source: local.note, isCompleted: completed, shipmentID: local.id))
                 result.imported += 1

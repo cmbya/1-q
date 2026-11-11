@@ -18,7 +18,7 @@ enum PendingShipmentSelection {
         if !isBrowsing(in: data) { data.pendingShipmentBrowsingID = nil }
     }
     static func eligible(_ shipments: [Shipment]) -> [Shipment] {
-        shipments.filter { $0.status != .delivered && $0.status != .archived }.sorted {
+        shipments.filter { ($0.status != .delivered || $0.needsReceiptConfirmation) && $0.status != .archived }.sorted {
             $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
         }
     }

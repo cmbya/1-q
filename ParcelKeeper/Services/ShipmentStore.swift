@@ -5,6 +5,7 @@ import WidgetKit
 final class ShipmentStore: ObservableObject {
     @Published private(set) var shipments: [Shipment] = []
     @Published private(set) var groups: [PickupGroup] = []
+    @Published private(set) var backendPendingOrders: [BackendPendingOrder] = []
     @Published private(set) var pickupRecords: [PickupRecord] = []
     @Published private(set) var trainTickets: [TrainTicket] = []
     @Published private(set) var trainWidgetBindings: [TrainWidgetBinding] = []
@@ -126,6 +127,11 @@ final class ShipmentStore: ObservableObject {
         }
         groups = data.groups.sorted { $0.sortOrder < $1.sortOrder }
         pickupRecords = data.records
+        backendPendingOrders = (data.backendPendingOrders ?? []).filter { order in
+            !data.shipments.contains { $0.backendBinding.map {
+                $0.origin == order.origin && $0.accountID == order.accountID && $0.orderID == order.orderID
+            } == true }
+        }
         trainTickets = data.trainTickets ?? []
         trainWidgetBindings = data.trainWidgetBindings ?? []
     }
@@ -237,11 +243,11 @@ final class ShipmentStore: ObservableObject {
     // Existing history/backup duplicates must not block unrelated edits.
     private func checkPendingDuplicate(_ record: PickupRecord, previous: PickupRecord? = nil, in data: PickupDataset) throws {
         let code = record.code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !record.isCompleted, !code.isEmpty else { return }
+        guard data.pickupCodeActive(record), !record.isCompleted, !code.isEmpty else { return }
         if let previous, !previous.isCompleted, previous.groupID == record.groupID,
            previous.code.trimmingCharacters(in: .whitespacesAndNewlines) == code { return }
         guard !data.records.contains(where: { other in
-            guard other.id != record.id, other.groupID == record.groupID, !other.isCompleted,
+            guard data.pickupCodeActive(other), other.id != record.id, other.groupID == record.groupID, !other.isCompleted,
                   other.code.trimmingCharacters(in: .whitespacesAndNewlines) == code else { return false }
             if let id = record.shipmentID, let otherID = other.shipmentID,
                let shipment = data.shipments.first(where: { $0.id == id }),
@@ -391,8 +397,28 @@ final class ShipmentStore: ObservableObject {
     private func reportWriteError(_ action: () throws -> Void) {
         do { try action() } catch { lastErrorMessage = error.localizedDescription }
     }
+    /// Local acknowledgement only; never confirms on a shopping platform.
+    func setReceiptConfirmed(id: UUID, confirmed: Bool) throws {
+        try change { data in
+            guard let index = data.shipments.firstIndex(where: { $0.id == id }),
+                  data.shipments[index].homeDelivery == true, data.shipments[index].status != .archived,
+                  let record = data.records.firstIndex(where: { $0.shipmentID == id }) else { throw PickupStorageError.notFound }
+            let now = Date()
+            data.shipments[index].receiptConfirmed = confirmed
+            data.shipments[index].receiptConfirmedAt = confirmed ? now : nil
+            data.shipments[index].updatedAt = now
+            data.records[record].isCompleted = confirmed
+            data.records[record].completionOverride = confirmed
+            data.records[record].updatedAt = now
+        }
+    }
     func updateStatusThrowing(id: UUID, status: ShipmentStatus) throws {
-        try updateThrowing(id: id) { $0.status = status; $0.updatedAt = Date() }
+        try updateThrowing(id: id) {
+            if status != .delivered && status != .archived {
+                $0.homeDelivery = nil; $0.receiptConfirmed = nil; $0.receiptConfirmedAt = nil
+            }
+            $0.status = status; $0.updatedAt = Date()
+        }
     }
     func updateStatus(id: UUID, status: ShipmentStatus) {
         reportWriteError { try updateStatusThrowing(id: id, status: status) }
@@ -524,9 +550,18 @@ final class ShipmentStore: ObservableObject {
         if let expected, !(previous == expected) { throw PickupStorageError.staleCompletion }
         d.records[i].isCompleted = completed; d.records[i].updatedAt = Date()
         d.records[i].completionOverride = completed
+        if let id = previous.shipmentID, let j = d.shipments.firstIndex(where: { $0.id == id }), d.shipments[j].homeDelivery == true {
+            d.shipments[j].receiptConfirmed = completed
+            d.shipments[j].receiptConfirmedAt = completed ? Date() : nil
+            d.shipments[j].updatedAt = Date()
+        }
         try checkPendingDuplicate(d.records[i], previous: previous, in: d)
     } }
-    func pendingPickupRecords(groupID: UUID) -> [PickupRecord] { pickupRecords.filter { $0.groupID == groupID && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
+    func pickupCodeActive(_ record: PickupRecord) -> Bool {
+        guard let id = record.shipmentID else { return true }
+        return shipments.first(where: { $0.id == id })?.isPickupCodeActive ?? true
+    }
+    func pendingPickupRecords(groupID: UUID) -> [PickupRecord] { pickupRecords.filter { pickupCodeActive($0) && $0.groupID == groupID && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
 
     // All ticket comparisons and duplicate checks use the latest dataset under flock.
     @discardableResult

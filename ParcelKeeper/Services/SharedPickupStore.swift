@@ -180,6 +180,12 @@ final class SharedPickupStore {
               Set(data.records.compactMap(\.shipmentID)).count == data.records.compactMap(\.shipmentID).count else {
             throw PickupStorageError.invalidData("重复 ID、空字段或无效关联")
         }
+        let pending = data.backendPendingOrders ?? []
+        guard Set(pending.map(\.id)).count == pending.count,
+              pending.allSatisfy({ !$0.origin.isEmpty && !$0.accountID.isEmpty && !$0.orderID.isEmpty &&
+                  !$0.platformOrderID.isEmpty && $0.title.count <= 500 }) else {
+            throw PickupStorageError.invalidData("无运单订单重复或字段无效")
+        }
         let tickets = data.trainTickets ?? []
         let bindings = data.trainWidgetBindings ?? []
         guard Set(tickets.map(\.id)).count == tickets.count,
@@ -311,7 +317,7 @@ final class SharedPickupStore {
                 throw PickupStorageError.notFound
             }
             let current = data.records[index]
-            guard !current.isCompleted, current.code == expectedCode,
+            guard data.pickupCodeActive(current), !current.isCompleted, current.code == expectedCode,
                   current.updatedAt.timeIntervalSinceReferenceDate == version else {
                 throw PickupStorageError.staleCompletion
             }
@@ -394,6 +400,9 @@ final class SharedPickupStore {
                 conflictingRecordIDs: incoming.records.filter { r in current.records.contains { ($0.id == r.id && $0 != r) || (r.shipmentID != nil && $0.shipmentID == r.shipmentID && $0.id != r.id) } || current.groups.contains { $0.id == r.id } || current.shipments.contains { $0.id == r.id && r.shipmentID != $0.id } || (current.trainTickets ?? []).contains { $0.id == r.id } }.map(\.id),
                 conflictingShipmentIDs: incoming.shipments.filter { s in current.shipments.contains { $0.id == s.id && $0 != s } || current.groups.contains { $0.id == s.id } || current.records.contains { $0.id == s.id && $0.shipmentID != s.id } || (current.trainTickets ?? []).contains { $0.id == s.id } }.map(\.id),
                 conflictingTrackingNumbers: conflicts,
+                conflictingPendingOrderIDs: (incoming.backendPendingOrders ?? []).filter { row in
+                    (current.backendPendingOrders ?? []).contains { $0.id == row.id && $0 != row }
+                }.map(\.id),
                 conflictingTrainTicketIDs: (incoming.trainTickets ?? []).filter { ticket in
                     (current.trainTickets ?? []).contains { $0.id == ticket.id && $0 != ticket }
                         || current.groups.contains { $0.id == ticket.id }
@@ -461,6 +470,15 @@ final class SharedPickupStore {
                    collision.shipmentID != matches[shipment.id] {
                     throw PickupStorageError.invalidData("取码记录 ID 与其他记录冲突，无法安全合并")
                 }
+            }
+            if let incomingPending = incoming.backendPendingOrders {
+                var pending = current.backendPendingOrders ?? []
+                for row in incomingPending {
+                    if let index = pending.firstIndex(where: { $0.id == row.id }) {
+                        if policy == .replaceExisting { pending[index] = row }
+                    } else { pending.append(row) }
+                }
+                current.backendPendingOrders = pending.sorted { $0.id < $1.id }
             }
             merge(&current.groups, incoming.groups)
             // Absence in an old backup never clears newly introduced train data.

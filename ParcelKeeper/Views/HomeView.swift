@@ -20,11 +20,11 @@ struct HomeView: View {
             let matchesFilter: Bool
             switch selectedFilter {
             case .active:
-                matchesFilter = shipment.status != .delivered && shipment.status != .archived
+                matchesFilter = (shipment.status != .delivered || shipment.needsReceiptConfirmation) && shipment.status != .archived
             case .pickup:
                 matchesFilter = shipment.status == .readyForPickup
             case .delivered:
-                matchesFilter = shipment.status == .delivered
+                matchesFilter = shipment.status == .delivered && !shipment.needsReceiptConfirmation
             case .all:
                 matchesFilter = true
             }
@@ -61,6 +61,7 @@ struct HomeView: View {
                         pasteCard
                         summaryGrid
                         filterBar
+                        pendingOrderList
                         shipmentList
                     }
                     .padding(.horizontal, 16)
@@ -199,7 +200,7 @@ struct HomeView: View {
         HStack(spacing: 10) {
             summaryItem(title: "运输中", count: store.shipments.filter { $0.status == .inTransit || $0.status == .outForDelivery }.count, icon: "truck.box")
             summaryItem(title: "待取件", count: store.shipments.filter { $0.status == .readyForPickup }.count, icon: "shippingbox")
-            summaryItem(title: "已签收", count: store.shipments.filter { $0.status == .delivered }.count, icon: "checkmark.seal")
+            summaryItem(title: "已签收", count: store.shipments.filter { $0.status == .delivered && !$0.needsReceiptConfirmation }.count, icon: "checkmark.seal")
         }
     }
 
@@ -227,9 +228,37 @@ struct HomeView: View {
         .pickerStyle(.segmented)
     }
 
+    private var filteredPendingOrders: [BackendPendingOrder] {
+        guard selectedFilter == .active || selectedFilter == .all else { return [] }
+        return store.backendPendingOrders.filter { order in
+            searchText.isEmpty || [order.title, order.platform, order.platformOrderID, order.statusText].contains {
+                $0.localizedCaseInsensitiveContains(searchText)
+            }
+        }
+    }
+    @ViewBuilder
+    private var pendingOrderList: some View {
+        if !filteredPendingOrders.isEmpty {
+            Text("待发货 / 无运单订单 · \(filteredPendingOrders.count)")
+                .font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(filteredPendingOrders) { order in
+                GlassCard {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(order.title.isEmpty ? "未提供商品名称" : order.title).font(.headline)
+                        Text(order.statusText).foregroundStyle(.orange)
+                        Text("\((order.platform == "taobao" ? "淘宝" : order.platform == "pdd" ? "拼多多" : order.platform == "jd" ? "京东" : order.platform)) · 订单号：\(order.platformOrderID)")
+                            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                        Text("后台提供运单号后，再次同步快照将转入快递列表。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
     @ViewBuilder
     private var shipmentList: some View {
-        if filteredShipments.isEmpty {
+        if filteredShipments.isEmpty && filteredPendingOrders.isEmpty {
             GlassCard {
                 ContentUnavailableView(
                     searchText.isEmpty ? "还没有快递" : "没有搜索结果",

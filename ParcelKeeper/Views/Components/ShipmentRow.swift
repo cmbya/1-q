@@ -29,7 +29,7 @@ struct ShipmentRow: View {
                         Label(shipment.note, systemImage: "tag")
                             .lineLimit(1)
                     }
-                    if !shipment.pickupCode.isEmpty {
+                    if !shipment.pickupCode.isEmpty && shipment.isPickupCodeActive {
                         Label(shipment.pickupCode, systemImage: "number")
                             .lineLimit(1)
                     }

@@ -22,7 +22,7 @@ struct SlotProvider: TimelineProvider {
                 return placeholderEntry("绑定分组已删除，请到 App 重新选择")
             }
             let records = data.records.filter {
-                $0.groupID == selected && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                $0.groupID == selected && data.pickupCodeActive($0) && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }.sorted {
                 $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
             }

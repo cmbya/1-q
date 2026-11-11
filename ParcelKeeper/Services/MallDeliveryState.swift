@@ -34,6 +34,18 @@ enum MallDeliveryState {
             !["尚未", "未签收", "未实际签收", "未取件", "未妥投", "未完成", "没有签收", "没有取件", "未能", "请确认"].contains(where: clause.contains)
         }
     }
+    /// Latest successful, dated response only. Station deposits beat door wording.
+    static func homeDelivered(events: [String], status: String, station: String, hasPickupCode: Bool) -> Bool {
+        guard !events.isEmpty else { return false }
+        let text = events.joined(separator: "；")
+        let pickupPoints = ["驿站", "代收点", "自提点", "自提柜", "快递柜", "丰巢", "菜鸟", "门卫", "前台", "保安", "便利店", "快递超市"]
+        guard !pickupPoints.contains(where: text.contains),
+              !["预计", "即将", "将于", "尚未", "未送", "没有送", "未妥投", "未签收", "失败", "退回", "退货", "拒收", "异常", "是否", "如果", "待取件", "请凭", "请将", "请放", "预约", "疑似", "未能"].contains(where: text.contains) else { return false }
+        let atDoor = events.contains { $0.range(of: #"已(?:经)?(?:成功)?(?:送(?:到|至|达)|派送(?:到|至)|放(?:在|到|至)?|投递(?:到|至)).{0,16}(?:门口|门前|家中|家里|住处)"#, options: .regularExpression) != nil }
+        if atDoor { return true }
+        guard !hasPickupCode, !pickupPoints.contains(where: station.contains) else { return false }
+        return status == "signed" || text.contains("已妥投") || text.contains("已签收")
+    }
     static func resolve(latest: String) -> ShipmentStatus? {
         // Forecast/conditional scope may span commas; don't detach a positive clause from it.
         guard !isConditional(latest) else { return nil }

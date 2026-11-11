@@ -53,9 +53,22 @@ struct ShipmentDetailView: View {
                         }
                     }
 
+                    if shipment.homeDelivery == true && shipment.status != .archived {
+                        Section("送达确认") {
+                            Text(shipment.needsReceiptConfirmation ? "包裹已送达，请确认是否已收到。" : "已确认收到包裹。")
+                            if let date = shipment.receiptConfirmedAt {
+                                LabeledContent("确认时间", value: ShipmentDateDisplay.string(date))
+                            }
+                            Button(shipment.needsReceiptConfirmation ? "确认收到" : "撤销确认，恢复待确认") {
+                                saveEdit { try store.setReceiptConfirmed(id: shipmentID, confirmed: shipment.needsReceiptConfirmation) }
+                            }.disabled(querying || store.isHistoricalSnapshot)
+                            Text("只更新本机记录，不会操作淘宝、拼多多等平台的确认收货。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Section("状态") {
                         if shipment.statusDisplayText != shipment.status.rawValue {
-                            Text("本地状态，待刷新核实")
+                            Text(shipment.statusDisplayText)
                                 .font(.footnote)
                         }
                         Picker("物流状态", selection: Binding(

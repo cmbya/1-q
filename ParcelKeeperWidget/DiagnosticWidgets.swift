@@ -118,7 +118,7 @@ private struct OriginalViewDiagnosticProvider: TimelineProvider {
             guard let selected = data.groups.sorted(by: { $0.sortOrder < $1.sortOrder }).first else {
                 return PickupEntry(date: Date(), groupID: nil, title: "D4", records: [], message: "没有分组", error: nil)
             }
-            let records = data.records.filter { $0.groupID == selected.id && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            let records = data.records.filter { $0.groupID == selected.id && data.pickupCodeActive($0) && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             return PickupEntry(date: Date(), groupID: selected.id, title: "D4 · \(selected.name)", records: records,
                                message: records.isEmpty ? "暂无待取件码" : nil, error: nil)
         } catch {

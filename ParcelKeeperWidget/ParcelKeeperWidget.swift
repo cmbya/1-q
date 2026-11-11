@@ -155,7 +155,7 @@ struct PickupProvider: AppIntentTimelineProvider {
             guard let group = data.groups.first(where: { $0.id == selectedID }) else {
                 return PickupEntry(date: Date(), groupID: selectedID, title: "取件码", records: [], message: "分组已失效，请重新配置", error: priorError)
             }
-            let records = data.records.filter { $0.groupID == group.id && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.sorted {
+            let records = data.records.filter { $0.groupID == group.id && data.pickupCodeActive($0) && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.sorted {
                 $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
             }
             return PickupEntry(date: Date(), groupID: group.id, title: group.name, records: records,
