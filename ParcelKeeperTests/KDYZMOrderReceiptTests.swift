@@ -172,6 +172,10 @@ final class KDYZMOrderReceiptTests: XCTestCase {
         old.shipments[0].logisticsEvents?[0].time = 100_000
         _ = try KDYZMMerger.apply(old, origin: origin, to: &local)
         XCTAssertTrue(local.shipments[0].needsReceiptConfirmation)
+        // Repeating the older snapshot must not use its rewound display time as evidence.
+        _ = try KDYZMMerger.apply(old, origin: origin, to: &local)
+        XCTAssertTrue(local.shipments[0].needsReceiptConfirmation)
+        XCTAssertEqual(local.shipments[0].homeDeliveryEvidenceAt, Date(timeIntervalSince1970: 300))
     }
     func testManualPickupCompletionIsRespectedWhenHomeDeliveryIsDiscovered() throws {
         var local = data()
@@ -181,5 +185,75 @@ final class KDYZMOrderReceiptTests: XCTestCase {
         _ = try KDYZMMerger.apply(snapshot(text: "包裹已送到家门口"), origin: origin, to: &local)
         XCTAssertFalse(local.shipments[0].needsReceiptConfirmation)
         XCTAssertEqual(local.shipments[0].receiptConfirmed, true)
+    }
+    func testCoarseSignedCannotOverrideNegativeOrTransitText() {
+        for text in ["包裹还未收到", "没有签收", "未实际签收", "如果已签收请忽略", "包裹运输中", "准备送货上门", "没有送达", "未妥投", "已签收，实际没收到", "包裹未放在门口", "包裹没有放在家门口"] {
+            XCTAssertFalse(MallDeliveryState.homeDelivered(events: [text], status: "signed", station: "", hasPickupCode: false), text)
+        }
+    }
+    func testUndatedResetBlocksHomeInferenceFromOlderDatedEvent() throws {
+        var remote = snapshot(text: "包裹已送到家门口")
+        remote.shipments[0].logisticsEvents?.append(.init(time: 0, timeText: "", description: "重新派送，等待取件", location: ""))
+        var local = data()
+        _ = try KDYZMMerger.apply(remote, origin: origin, to: &local)
+        XCTAssertFalse(local.shipments[0].needsReceiptConfirmation)
+    }
+    func testPendingReceiptParticipatesInRefreshButConfirmedDoesNot() throws {
+        var local = data()
+        _ = try KDYZMMerger.apply(snapshot(text: "包裹已送到家门口"), origin: origin, to: &local)
+        XCTAssertTrue(TrackingRefreshService.isPending(local.shipments[0]))
+        local.shipments[0].receiptConfirmed = true
+        XCTAssertFalse(TrackingRefreshService.isPending(local.shipments[0]))
+    }
+    func testCompletedHistoryDoesNotReappearAsPendingReceipt() throws {
+        var local = data()
+        _ = try KDYZMMerger.apply(snapshot(text: "本人已签收"), origin: origin, to: &local)
+        XCTAssertTrue(local.records[0].isCompleted)
+        _ = try KDYZMMerger.apply(snapshot(text: "包裹已送到家门口"), origin: origin, to: &local)
+        XCTAssertFalse(local.shipments[0].needsReceiptConfirmation)
+        XCTAssertTrue(local.records[0].isCompleted)
+    }
+    func testServerRestoreWithoutCachePreservesCompletedLocalHistory() throws {
+        var local = data()
+        let home = snapshot(text: "包裹已送到家门口")
+        _ = try KDYZMMerger.apply(home, origin: origin, to: &local)
+        var collected = home
+        collected.shipments[0].pickupCompletion = .init(version: 1, autoPicked: true, manualOverride: "")
+        _ = try KDYZMMerger.apply(collected, origin: origin, to: &local)
+        XCTAssertFalse(local.shipments[0].needsReceiptConfirmation)
+        var restored = home
+        restored.shipments[0].pickupCompletion = .init(version: 1, autoPicked: false, manualOverride: "pending")
+        restored.shipments[0].logisticsState = "empty"
+        restored.shipments[0].logisticsEvents = []
+        _ = try KDYZMMerger.apply(restored, origin: origin, to: &local)
+        // Completed local records remain complete under the established no-reopen policy.
+        XCTAssertTrue(local.records[0].isCompleted)
+        XCTAssertFalse(local.shipments[0].needsReceiptConfirmation)
+    }
+    @MainActor
+    func testStatusPickerConfirmationUpdatesReceiptAndPickupTogether() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        try storage.transaction { local in _ = try KDYZMMerger.apply(snapshot(text: "包裹已送到家门口"), origin: origin, to: &local) }
+        let store = ShipmentStore(storageProvider: { storage })
+        let id = try XCTUnwrap(store.shipments.first?.id)
+        try store.updateStatusThrowing(id: id, status: .delivered)
+        XCTAssertTrue(store.pickupRecords[0].isCompleted)
+        XCTAssertEqual(store.shipments[0].receiptConfirmed, true)
+        try store.setReceiptConfirmed(id: id, confirmed: false)
+        XCTAssertFalse(store.pickupRecords[0].isCompleted)
+        XCTAssertTrue(store.shipments[0].needsReceiptConfirmation)
+    }
+    func testNewerStationArrivalReplacesUnconfirmedHomeDelivery() throws {
+        var local = data()
+        _ = try KDYZMMerger.apply(snapshot(text: "包裹已送到家门口"), origin: origin, to: &local)
+        var remote = snapshot(text: "已送达菜鸟驿站，请凭码取件", status: "arrived")
+        remote.shipments[0].logisticsEvents?[0].time = 350_000
+        _ = try KDYZMMerger.apply(remote, origin: origin, to: &local)
+        XCTAssertFalse(local.shipments[0].needsReceiptConfirmation)
+        XCTAssertEqual(local.shipments[0].status, .readyForPickup)
+        XCTAssertTrue(local.shipments[0].isPickupCodeActive)
+        XCTAssertFalse(local.records[0].isCompleted)
     }
 }

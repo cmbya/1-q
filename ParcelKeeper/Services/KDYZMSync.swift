@@ -229,8 +229,8 @@ enum KDYZMMerger {
         var changed = false
         if data.shipments[shipmentIndex].homeDelivery == true,
            data.shipments[shipmentIndex].receiptConfirmed == nil,
-           let override = data.records[index].completionOverride {
-            data.shipments[shipmentIndex].receiptConfirmed = override
+           data.records[index].completionOverride != nil || data.records[index].isCompleted {
+            data.shipments[shipmentIndex].receiptConfirmed = data.records[index].completionOverride ?? true
             changed = true
         }
         guard recipientCollected(remote) || data.shipments[shipmentIndex].receiptConfirmed == true else { return changed }
@@ -247,6 +247,9 @@ enum KDYZMMerger {
         if recipientCollected(remote) {
             local.status = .delivered
             local.backendRecipientCollected = true
+        } else if let completion = remote.pickupCompletion, completion.isValid {
+            // A versioned server restore remains authoritative even without cached events.
+            local.backendRecipientCollected = nil
         }
         // Failed/empty cache responses never clear history, and never count as a successful refresh.
         guard remote.logisticsState == "ok", let incoming = remote.logisticsEvents, !incoming.isEmpty,
@@ -275,8 +278,14 @@ enum KDYZMMerger {
         local.queryInfo = TrackingQueryHistory.merged(local.queryInfo, priorHistory)
         let newest = incoming.filter { (try? KDYZMTime.date($0.time)) == latest && $0.time > 0 && $0.time <= Date().timeIntervalSince1970 * 1000 }.map(\.description)
         let collected = recipientCollected(remote)
-        local.backendRecipientCollected = collected ? true : nil
-        if !collected && local.receiptConfirmed == nil && (latest ?? .distantPast) >= (original.logisticsTime ?? .distantPast) {
+        let evidenceFloor = original.homeDeliveryEvidenceAt ?? (original.homeDelivery == true ? original.logisticsTime : nil) ?? .distantPast
+        // Undated nodes may reset a pickup cycle or correct an older delivery node.
+        let allDated = incoming.allSatisfy { $0.time > 0 && $0.time <= Date().timeIntervalSince1970 * 1000 }
+        if allDated, let latest, latest >= evidenceFloor {
+            local.backendRecipientCollected = collected ? true : nil
+            local.homeDeliveryEvidenceAt = latest
+        }
+        if !collected && allDated && local.receiptConfirmed == nil && (latest ?? .distantPast) >= evidenceFloor {
             let home = MallDeliveryState.homeDelivered(events: newest, status: remote.status,
                 station: remote.station ?? "", hasPickupCode: !(remote.pickupCode ?? "").isEmpty)
             local.homeDelivery = home ? true : nil
@@ -554,11 +563,11 @@ struct KDYZMRefreshService {
                       data.shipments[index].backendRefreshGeneration == credential.generation,
                       data.records.contains(where: { $0.shipmentID == before.id }),
                       data.shipments[index].status != .archived else { throw KDYZMError.stale }
-                let wasDelivered = data.shipments[index].status == .delivered
+                let wasDelivered = data.shipments[index].status == .delivered && !data.shipments[index].needsReceiptConfirmation
                 trace.begin(.merge)
                 guard try KDYZMMerger.update(remote, local: &data.shipments[index], refresh: true, operation: trace.operation) else { throw KDYZMError.empty }
                 try KDYZMMerger.completePickup(remote, shipmentID: before.id, in: &data)
-                newlyDelivered = !wasDelivered && data.shipments[index].status == .delivered
+                newlyDelivered = !wasDelivered && data.shipments[index].status == .delivered && !data.shipments[index].needsReceiptConfirmation
                 data.shipments[index].backendRefreshJobID = nil
                 data.shipments[index].backendRefreshGeneration = nil
                 trace.begin(.save)

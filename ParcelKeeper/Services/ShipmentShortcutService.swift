@@ -317,7 +317,9 @@ struct ShipmentShortcutService {
             data.shipments[index] = shipment
             if let linked = data.records.firstIndex(where: { $0.shipmentID == shipment.id }) {
                 if shipment.status != previousStatus,
-                   shipment.status == .delivered || shipment.status == .archived {
+                   shipment.status == .delivered || shipment.status == .archived,
+                   !shipment.needsReceiptConfirmation,
+                   data.records[linked].completionOverride != false {
                     // A logistics change cannot reopen a manually completed pickup.
                     data.records[linked].isCompleted = true
                 }

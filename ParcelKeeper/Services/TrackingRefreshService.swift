@@ -306,7 +306,7 @@ struct TrackingRefreshService {
         TrackingRefreshService(store: try SharedPickupStore(appGroupID: nil, accessMode: .existingSharedData), client: UAPITrackingClient(), tminiClient: TminiTrackingClient())
     }
     static func isPending(_ shipment: Shipment) -> Bool {
-        shipment.status != .delivered && shipment.status != .archived
+        (shipment.status != .delivered || shipment.needsReceiptConfirmation) && shipment.status != .archived
     }
     func refresh(trackingNumber: String, phone: String? = nil, mode: TrackingRefreshMode = .automatic) async throws -> Bool {
         let number = try ShipmentShortcutParser.number(trackingNumber)
@@ -484,13 +484,14 @@ struct TrackingRefreshService {
             current.updatedAt = Date()
             // Logistics may complete a pending record, never undo manual collection.
             // Reopening remains an explicit user action through setPickupCompleted.
-            if current.status != oldStatus, current.status == .delivered {
+            if current.status != oldStatus, current.status == .delivered, !current.needsReceiptConfirmation,
+               data.records[linked].completionOverride != false {
                 data.records[linked].isCompleted = true
             }
             data.records[linked].updatedAt = current.updatedAt
             data.shipments[index] = current
             trace.begin(.save)
-            return oldStatus != .delivered && current.status == .delivered
+            return oldStatus != .delivered && current.status == .delivered && !current.needsReceiptConfirmation
         }
         }
         reloadWidgets()

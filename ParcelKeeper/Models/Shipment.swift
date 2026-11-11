@@ -69,6 +69,8 @@ struct Shipment: Identifiable, Codable, Equatable, Hashable {
     var receiptConfirmed: Bool?
     var receiptConfirmedAt: Date?
     var backendRecipientCollected: Bool?
+    // Independent high-water mark: displaying older cache must not rewind receipt evidence.
+    var homeDeliveryEvidenceAt: Date?
     var needsReceiptConfirmation: Bool {
         homeDelivery == true && status != .archived &&
             !(receiptConfirmed ?? backendRecipientCollected ?? false)

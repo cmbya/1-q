@@ -53,6 +53,14 @@ final class ShipmentShortcutTests: XCTestCase {
         XCTAssertNil(try store.snapshot().shipments[0].uapiCarrierCode)
         XCTAssertEqual(try store.snapshot().shipments[0].carrierCode, "sf")
     }
+    func testShortcutLogisticsDoesNotOverwriteExplicitPickupRestore() throws {
+        let service = ShipmentShortcutService(store: store, reloadWidgets: {})
+        _ = try service.upsert(input("运输中"))
+        try store.transaction { data in data.records[0].completionOverride = false }
+        _ = try service.upsert(input("本人签收"))
+        XCTAssertFalse(try store.snapshot().records[0].isCompleted)
+        XCTAssertEqual(try store.snapshot().records[0].completionOverride, false)
+    }
     func testUnknownCarrierRenameInvalidatesProviderCodeWithoutLosingExistingData() throws {
         let service = ShipmentShortcutService(store: store, reloadWidgets: {})
         var update = input()

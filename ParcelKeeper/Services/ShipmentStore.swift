@@ -372,6 +372,7 @@ final class ShipmentStore: ObservableObject {
         try change { data in
             guard let index = data.shipments.firstIndex(where: { $0.id == id }) else { throw PickupStorageError.notFound }
             let previousStatus = data.shipments[index].status
+            let previousReceipt = data.shipments[index].receiptConfirmed
             mutation(&data.shipments[index])
             let shipment = data.shipments[index]
             if let recordIndex = data.records.firstIndex(where: { $0.shipmentID == id }) {
@@ -380,7 +381,7 @@ final class ShipmentStore: ObservableObject {
                 data.records[recordIndex].source = shipment.note
                 // Only an actual logistics status change synchronizes completion.
                 // Editing a note/reminder must preserve an explicit pickup restore.
-                if previousStatus != shipment.status {
+                if previousStatus != shipment.status || previousReceipt != shipment.receiptConfirmed {
                     data.records[recordIndex].isCompleted = shipment.status == .delivered || shipment.status == .archived
                     data.records[recordIndex].completionOverride = data.records[recordIndex].isCompleted
                 }
@@ -414,8 +415,12 @@ final class ShipmentStore: ObservableObject {
     }
     func updateStatusThrowing(id: UUID, status: ShipmentStatus) throws {
         try updateThrowing(id: id) {
+            if status == .delivered && $0.homeDelivery == true {
+                $0.receiptConfirmed = true; $0.receiptConfirmedAt = Date()
+            }
             if status != .delivered && status != .archived {
                 $0.homeDelivery = nil; $0.receiptConfirmed = nil; $0.receiptConfirmedAt = nil
+                $0.homeDeliveryEvidenceAt = nil; $0.backendRecipientCollected = nil
             }
             $0.status = status; $0.updatedAt = Date()
         }

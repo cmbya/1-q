@@ -40,11 +40,12 @@ enum MallDeliveryState {
         let text = events.joined(separator: "；")
         let pickupPoints = ["驿站", "代收点", "自提点", "自提柜", "快递柜", "丰巢", "菜鸟", "门卫", "前台", "保安", "便利店", "快递超市"]
         guard !pickupPoints.contains(where: text.contains),
-              !["预计", "即将", "将于", "尚未", "未送", "没有送", "未妥投", "未签收", "失败", "退回", "退货", "拒收", "异常", "是否", "如果", "待取件", "请凭", "请将", "请放", "预约", "疑似", "未能"].contains(where: text.contains) else { return false }
+              !["预计", "预估", "即将", "将于", "尚未", "未送", "未实际送达", "没有送", "未妥投", "未签收", "没有签收", "未实际签收", "未收到", "没有收到", "没收到", "未收货", "未放", "没有放", "并非", "失败", "退回", "退货", "拒收", "异常", "是否", "如果", "若", "如已", "待取件", "请凭", "请将", "请放", "预约", "疑似", "未能", "计划", "准备"].contains(where: text.contains) else { return false }
         let atDoor = events.contains { $0.range(of: #"已(?:经)?(?:成功)?(?:送(?:到|至|达)|派送(?:到|至)|放(?:在|到|至)?|投递(?:到|至)).{0,16}(?:门口|门前|家中|家里|住处)"#, options: .regularExpression) != nil }
         if atDoor { return true }
         guard !hasPickupCode, !pickupPoints.contains(where: station.contains) else { return false }
-        return status == "signed" || text.contains("已妥投") || text.contains("已签收")
+        // Coarse signed status alone cannot turn a transit/request node into delivery evidence.
+        return ["已妥投", "已签收", "已送达"].contains(where: text.contains)
     }
     static func resolve(latest: String) -> ShipmentStatus? {
         // Forecast/conditional scope may span commas; don't detach a positive clause from it.

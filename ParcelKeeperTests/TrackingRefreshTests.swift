@@ -47,6 +47,14 @@ final class TrackingRefreshTests: XCTestCase {
         XCTAssertEqual(after.shipments[0].queryInfo, "完整查询信息")
         XCTAssertTrue(after.records[0].isCompleted)
     }
+    func testPaidRefreshDoesNotOverwriteExplicitPickupRestore() async throws {
+        try storage.transaction { data in data.records[0].completionOverride = false }
+        let service = TrackingRefreshService(store: storage, client: Client(), reloadWidgets: {})
+        _ = try await service.refresh(id: shipment.id)
+        let after = try storage.snapshot()
+        XCTAssertFalse(after.records[0].isCompleted)
+        XCTAssertEqual(after.records[0].completionOverride, false)
+    }
     func testDeletedRecordIsNotRecreatedAfterNetworkReturns() async throws {
         let client = Client()
         client.onQuery = { try self.storage.transaction { $0.shipments.removeAll(); $0.records.removeAll() } }
