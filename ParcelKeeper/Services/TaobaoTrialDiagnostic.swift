@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import Foundation
 
 /// Only fixed schema labels, fixed return codes and HTTP integers; never raw values.
@@ -59,3 +61,4 @@ extension TaobaoTrialPolicy {
         return "\(scheme)://\(host)"
     }
 }
+#endif

@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import SwiftUI
 import WebKit
 
@@ -509,3 +511,4 @@ struct MallImportView: View {
         }
     }
 }
+#endif

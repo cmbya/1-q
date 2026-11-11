@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 import CryptoKit
 @testable import ParcelKeeper
@@ -49,3 +51,4 @@ final class TaobaoRequestRepairTests: XCTestCase {
         XCTAssertTrue(message.contains("运单字段=是"))
     }
 }
+#endif

@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import Foundation
 
 /// Import only a Cookie header value, never a curl command, URL or arbitrary headers.
@@ -22,4 +24,4 @@ enum MallCookieImport {
         return result
     }
 }
-
+#endif

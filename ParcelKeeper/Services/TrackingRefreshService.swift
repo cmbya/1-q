@@ -1,6 +1,16 @@
 import Foundation
 import WidgetKit
 
+enum TrackingChannelError: LocalizedError, Equatable {
+    case unsupported, directImportDisabled
+    var errorDescription: String? {
+        switch self {
+        case .unsupported: return "此运单不支持当前查询渠道，请检查来源或手动选择 UAPI／Tmini。"
+        case .directImportDisabled: return "当前版本已停用淘宝／拼多多直连导入和刷新。历史记录已保留，可绑定取件助手后台或手动选择 UAPI／Tmini。"
+        }
+    }
+}
+
 enum TrackingRefreshMode: String, Codable, CaseIterable {
     case automatic, platformOnly, uapi, tmini
 }
@@ -48,9 +58,11 @@ struct TrackingRefreshService {
     var reloadWidgets: () -> Void = { WidgetCenter.shared.reloadAllTimelines() }
     var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     var phones = ShipmentPhoneStore()
+#if ENABLE_DIRECT_MALL_IMPORT
     var taobaoClient: any TaobaoTrackingQuerying = TaobaoTrackingClient()
 
     var mallClient: any MallTrackingQuerying = MallTrackingClient()
+#endif
     var backendConnection: KDYZMConnection = .shared
     var backendClient = KDYZMClient()
     var diagnosticLog: DiagnosticLog = .shared
@@ -70,7 +82,7 @@ struct TrackingRefreshService {
     private static func platformRoute(_ shipment: Shipment) throws -> Route {
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
-        throw TaobaoTrackingError.unsupported
+        throw TrackingChannelError.unsupported
     }
     private static func isTaobao(_ shipment: Shipment) -> Bool {
         shipment.originPlatform == "taobao" || shipment.taobaoOrderID != nil
@@ -82,12 +94,12 @@ struct TrackingRefreshService {
         if mode == .platformOnly { return try platformRoute(shipment) }
         if shipment.refreshChannel == "uapi" { return .uapi }
         if shipment.refreshChannel == "tmini" { return .tmini }
-        guard shipment.refreshChannel == nil else { throw TaobaoTrackingError.unsupported }
+        guard shipment.refreshChannel == nil else { throw TrackingChannelError.unsupported }
         if shipment.originPlatform == "pdd" { return .mall("pdd") }
         if isTaobao(shipment) { return .taobao }
         // Missing origin is the legacy/manual UAPI path, not a platform fallback.
         guard shipment.originPlatform == nil || shipment.originPlatform == "manual" || shipment.originPlatform == "uapi" else {
-            throw TaobaoTrackingError.unsupported
+            throw TrackingChannelError.unsupported
         }
         return .uapi
     }
@@ -110,6 +122,7 @@ struct TrackingRefreshService {
     }
     static func diagnosticReason(_ error: Error) -> DiagnosticReason {
         if error is CancellationError { return .cancelled }
+        if error is TrackingChannelError { return .unsupported }
         if let failure = error as? KDYZMTerminalResultError { return failure.originalReason }
         if let failure = error as? TrackingTimeRejection { return failure.reason }
         if let failure = error as? KDYZMSyncFailure {
@@ -121,6 +134,7 @@ struct TrackingRefreshService {
             }
         }
         if error is PaidTrackingCacheError { return .storage }
+#if ENABLE_DIRECT_MALL_IMPORT
         if let failure = error as? MallDirectError { return diagnosticReason(failure.reason) }
         if let failure = error as? MallWebError {
             switch failure {
@@ -141,6 +155,7 @@ struct TrackingRefreshService {
             case .unsupported: return .unsupported
             }
         }
+#endif
         if let failure = error as? ShipmentShortcutError {
             switch failure {
             case .olderUpdate: return .olderEvent
@@ -207,7 +222,7 @@ struct TrackingRefreshService {
         return .unknown
     }
     func setRefreshChannel(id: UUID, channel: String?) throws {
-        guard channel == nil || channel == "uapi" || channel == "tmini" else { throw TaobaoTrackingError.unsupported }
+        guard channel == nil || channel == "uapi" || channel == "tmini" else { throw TrackingChannelError.unsupported }
         let lease = try store.acquireTrackingQuery(id: id)
         defer { lease.release() }
         try store.transaction { data in
@@ -218,11 +233,13 @@ struct TrackingRefreshService {
     }
 
     private static func safeReason(_ error: Error, platform: String? = nil) -> String {
+        if let failure = error as? TrackingChannelError { return failure.localizedDescription }
         if let failure = error as? TrackingTimeRejection { return failure.localizedDescription }
         if let failure = error as? PaidTrackingCacheError { return failure.localizedDescription }
         if let failure = error as? TminiError { return failure.localizedDescription }
         if let terminal = error as? KDYZMTerminalResultError { return terminal.localizedDescription }
         if let backend = error as? KDYZMError { return backend.localizedDescription }
+#if ENABLE_DIRECT_MALL_IMPORT
         if let direct = error as? MallDirectError { return direct.localizedDescription }
         if let platform, platform == "pdd" {
             let name = "拼多多"
@@ -249,6 +266,7 @@ struct TrackingRefreshService {
             case .verification: return "淘宝需要验证，请在 App 完成验证。"
             }
         }
+#endif
         if let failure = error as? UAPIError { return failure.localizedDescription }
         if let failure = error as? ShipmentShortcutError { return failure.localizedDescription }
         if let failure = error as? PickupStorageError {
@@ -368,13 +386,17 @@ struct TrackingRefreshService {
         let number = try ShipmentShortcutParser.number(before.trackingNumber)
         if let expectedTrackingNumber, number != expectedTrackingNumber { throw PickupStorageError.stalePreview }
         let linkedID = snapshot.records.first(where: { $0.shipmentID == id })?.id
+#if ENABLE_DIRECT_MALL_IMPORT
         var mallGeneration: (platform: MallPlatform, expected: UUID)?
+#endif
         var uapiConfiguration: UAPIConfiguration?
         // Generation guard outside dataset transaction, never across await.
         func commitResult<T>(_ operation: () throws -> T) throws -> T {
+#if ENABLE_DIRECT_MALL_IMPORT
             if let mallGeneration {
                 return try MallSession.withGeneration(platform: mallGeneration.platform, expected: mallGeneration.expected, operation: operation)
             }
+#endif
             if let uapiConfiguration {
                 return try client.withConfiguration(uapiConfiguration, operation: operation)
             }
@@ -390,6 +412,7 @@ struct TrackingRefreshService {
         case .backend:
             // Backend dispatch must happen before acquiring the legacy lease.
             throw KDYZMError.stale
+#if ENABLE_DIRECT_MALL_IMPORT
         case .taobao:
             guard let orderID = before.taobaoOrderID, !orderID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw TaobaoTrackingError.missingBinding
@@ -401,6 +424,10 @@ struct TrackingRefreshService {
                   let mallPlatform = MallPlatform(rawValue: platform) else { throw MallWebError.unsupported }
             mallGeneration = (mallPlatform, MallSession.generation(for: mallPlatform))
             result = try await mallClient.query(platform: platform, orderID: orderID, trackingNumber: number)
+#else
+        case .taobao, .mall:
+            throw TrackingChannelError.directImportDisabled
+#endif
         case .tmini:
             tminiConfiguration = try tminiClient.configurationToken()
             result = try await tminiClient.query(trackingNumber: number)
@@ -424,8 +451,10 @@ struct TrackingRefreshService {
         cacheFeedback(result.isCached)
         try Task.checkCancellation()
         guard result.trackingNumber == number else {
+#if ENABLE_DIRECT_MALL_IMPORT
             if route == .taobao { throw TaobaoTrackingError.identityMismatch }
             if case .mall = route { throw MallWebError.identityMismatch }
+#endif
             if route == .tmini { throw TminiError.invalidResponse }
             throw UAPIError.invalidResponse
         }
@@ -547,6 +576,7 @@ struct TrackingRefreshService {
                     blockedPlatforms.insert("tmini")
                     report.stoppedReason = reason
                 }
+#if ENABLE_DIRECT_MALL_IMPORT
                 if let failure = error as? TaobaoTrackingError, failure.stopsBatch {
                     blockedPlatforms.insert("taobao")
                     report.stoppedReason = reason
@@ -559,6 +589,7 @@ struct TrackingRefreshService {
                     blockedPlatforms.insert(platform)
                     report.stoppedReason = reason
                 }
+#endif
 
                 let number = (try? ShipmentShortcutParser.number(latest.trackingNumber)) ?? "无效运单号"
                 report.failures.append(.init(trackingNumber: number, reason: reason))

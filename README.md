@@ -61,7 +61,11 @@ IPA 是无签名版本，需要用自己的 Apple 签名方式重新签名后安
 
 ## 商城查询与兼容
 
-设置中的“淘宝导入（试验）”和“拼多多导入（试验）”入口已暂时注释，编译后的 App 不显示这两个入口；页面、服务和测试源码仍保留，恢复时取消 `SettingsView.swift` 中两行导航入口的注释即可。已有运单的查询、取件助手后台和 UAPI／Tmini 继续保留。拼多多登录与 Cookie 导入的原实现说明见 [商城说明](docs/MALL-DIRECT-COOKIE.md)。
+淘宝、拼多多直连导入已用 `#if ENABLE_DIRECT_MALL_IMPORT` 隔离。默认 Debug、Release 和 GitHub Actions 均不定义此条件：两个入口不显示，对应页面、网页登录、Cookie 导入、直连请求和解析服务不参与类型检查或生成可执行代码。源码和专用测试完整保留，恢复时无需找回文件。
+
+历史运单、关联字段和备份继续保留。旧直连运单刷新会提示功能已停用，不发起商城请求，也不会自动改用付费查询；已绑定取件助手后台的运单仍走后台，明确选择 UAPI／Tmini 的查询继续可用。后台、UAPI 和 Tmini 共用的 `MallDeliveryState.swift` 状态解析仍保留编译。
+
+恢复直连功能：给主 App 和测试目标的 `SWIFT_ACTIVE_COMPILATION_CONDITIONS` 同时添加 `ENABLE_DIRECT_MALL_IMPORT`（保留原有的 DEBUG 等条件），重新编译即可恢复页面、服务及专用测试。GitHub Actions 在 xcodebuild 命令中覆盖了该设置，若要在那里恢复，需同步调整测试和 Release 构建命令。不要只取消导航注释。原实现说明见 [商城说明](docs/MALL-DIRECT-COOKIE.md)。
 
 京东商城的网页登录、PC 直连、观察脚本、导入页面和专用测试已删除。旧运单、关联字段、物流历史、备注及备份保留；未绑定后台且来源不受支持的运单不会自动转付费查询，可明确选择 UAPI 或 Tmini。[取件助手后台](docs/KDYZM-INTEGRATION.md)的绑定、同步和刷新功能保留，支持后台实际返回的授权平台记录。京东物流作为快递公司仍可识别和查询。
 

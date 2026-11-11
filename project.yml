@@ -15,7 +15,8 @@ targets:
     type: application
     platform: iOS
     sources:
-      # Directory membership automatically follows removed legacy sources and retained PDD code.
+      # Direct Taobao/PDD implementations are guarded by ENABLE_DIRECT_MALL_IMPORT.
+      # Leave this compilation condition unset in both Debug and Release.
       - path: ParcelKeeper
         excludes:
           - ParcelKeeper.entitlements

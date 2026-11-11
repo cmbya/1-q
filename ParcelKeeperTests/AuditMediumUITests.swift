@@ -3,6 +3,7 @@ import WebKit
 @testable import ParcelKeeper
 
 final class AuditMediumUITests: XCTestCase {
+#if ENABLE_DIRECT_MALL_IMPORT
     private final class Keys: AIKeyStore {
         var value: String?
         func read() throws -> String? { value }
@@ -46,6 +47,7 @@ final class AuditMediumUITests: XCTestCase {
             XCTAssertThrowsError(try session.load())
         }
     }
+#endif
     func testOrderDateOwnsOnlyItsTimestampContinuation() throws {
         let journey = "出发日期：2027-01-01\n车次：G123\n出发站：北京南\n发车时间：09:00\n到达站：上海虹桥"
         for label in ["下单时间", "订单日期", "支付时间", "出票日期", "购票时间"] {
@@ -66,6 +68,7 @@ final class AuditMediumUITests: XCTestCase {
         }
         XCTAssertEqual(TrainTicketRecognition.travelEvidence("2027-01-01\n08:12"), "2027-01-01\n08:12")
     }
+#if ENABLE_DIRECT_MALL_IMPORT
     @MainActor func testStopBeforeCookieInitializationPreventsLoad() async {
         let browser = TaobaoTrialBrowser(cookies: [cookie("cookie2", domain: ".taobao.com")])
         browser.stop()
@@ -74,6 +77,7 @@ final class AuditMediumUITests: XCTestCase {
         XCTAssertFalse(browser.web.isLoading)
         browser.stop() // idempotent teardown
     }
+#endif
     @MainActor func testReconnectAwaitsReconciliationAndReturnsFailures() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 @testable import ParcelKeeper
 
@@ -16,4 +18,4 @@ final class MallCookieImportTests: XCTestCase {
         XCTAssertNoThrow(try MallCookieImport.parse("PDDAccessToken=fixture;pdd_user_id=123456", platform: .pdd))
     }
 }
-
+#endif

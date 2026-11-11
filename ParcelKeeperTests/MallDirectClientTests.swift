@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 @testable import ParcelKeeper
 
@@ -138,4 +140,4 @@ private final class MallDirectFixtureNetwork: AINetworking {
         return (responses.removeFirst(), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
 }
-
+#endif

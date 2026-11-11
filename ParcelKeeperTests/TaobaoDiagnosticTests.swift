@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 @testable import ParcelKeeper
 
@@ -71,3 +73,4 @@ final class TaobaoDiagnosticTests: XCTestCase {
         XCTAssertEqual(TaobaoTrialPolicy.blockedDestination(URL(string: "taobao://private/path?token=secret")!), "taobao://（外部App）")
     }
 }
+#endif

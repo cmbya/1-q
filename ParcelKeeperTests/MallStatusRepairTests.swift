@@ -26,10 +26,12 @@ final class MallStatusRepairTests: XCTestCase {
         XCTAssertEqual(MallDeliveryState.resolve(latest: "快件已到达转运中心"), .inTransit)
         XCTAssertEqual(MallDeliveryState.resolve(latest: "正在派送，尚未签收"), .outForDelivery)
     }
+#if ENABLE_DIRECT_MALL_IMPORT
     func testPDDShortCodeThreeRemainsVisibleWithoutRawBody() {
         let error = MallDirectError(reason: .unsupported, stage: "pdd-list", http: 200, bytes: 15, code: "3")
         XCTAssertTrue(error.localizedDescription.contains("代码=3"))
         XCTAssertFalse(error.localizedDescription.contains("前台重试"))
         XCTAssertFalse(MallDirectError(reason: .unsupported, stage: "pdd-list", code: "secret-cookie").localizedDescription.contains("secret-cookie"))
     }
+#endif
 }

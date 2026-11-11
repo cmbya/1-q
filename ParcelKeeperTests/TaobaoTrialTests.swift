@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 @testable import ParcelKeeper
 
@@ -75,3 +77,4 @@ final class TaobaoTrialTests: XCTestCase {
         XCTAssertFalse(cookie.applies(to: URL(string: "https://evil.test/h5/test")!))
     }
 }
+#endif

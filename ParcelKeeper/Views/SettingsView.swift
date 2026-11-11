@@ -35,9 +35,11 @@ struct SettingsView: View {
                     NavigationLink("取件助手后台") { KDYZMSettingsView() }
                     NavigationLink("UAPI物流查询") { UAPISettingsView() }
                     NavigationLink("Tmini物流查询") { TminiSettingsView() }
-                    // 暂停商城导入入口；保留页面和服务代码，恢复时取消下面两行注释。
-                    // NavigationLink("淘宝导入（试验）") { TaobaoTrialView() }
-                    // NavigationLink("拼多多导入（试验）") { MallImportView(platform: .pdd) }
+                    // 默认不编译直连导入；恢复方式见 README。
+#if ENABLE_DIRECT_MALL_IMPORT
+                    NavigationLink("淘宝导入（试验）") { TaobaoTrialView() }
+                    NavigationLink("拼多多导入（试验）") { MallImportView(platform: .pdd) }
+#endif
                 }
 
                 Section("AI") {

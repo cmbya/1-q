@@ -30,6 +30,7 @@ final class RefreshRepairTests: XCTestCase {
     }
 
 
+#if ENABLE_DIRECT_MALL_IMPORT
     func testMallClearOrReplacementWhileQueryRunsRejectsAllLateWrites() async throws {
         let keys = UAPITrackingClientTests.Keys()
         for platform in [MallPlatform.pdd] {
@@ -71,6 +72,7 @@ final class RefreshRepairTests: XCTestCase {
             XCTAssertEqual(try store.exportBackup(), before)
         }
     }
+#endif
     func testUAPIConfigChangedAfterClientReturnBeforeCommitCannotWrite() async throws {
         for replace in [false, true] {
             try store.transaction { $0.shipments.removeAll(); $0.records.removeAll() }
@@ -95,6 +97,7 @@ final class RefreshRepairTests: XCTestCase {
             XCTAssertEqual(network.requests.count, 1)
         }
     }
+#if ENABLE_DIRECT_MALL_IMPORT
     func testPreflightFailureCountsRouteAttemptsWithoutClaimingNetworkOrBilling() async throws {
         let item = try add("pdd")
         try store.transaction { $0.shipments[0].platformOrderID = nil }
@@ -106,6 +109,7 @@ final class RefreshRepairTests: XCTestCase {
         XCTAssertTrue(report.message.contains("不代表实际网络请求或收费次数"))
         XCTAssertEqual(try store.snapshot().shipments.first?.id, item.id)
     }
+#endif
     func testBackendPaidBackendHistoryKeepsEveryLineOnceWithoutRecursiveGrowth() async throws {
         let item = try add()
         let record = try XCTUnwrap(store.snapshot().records.first)

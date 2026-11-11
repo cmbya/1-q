@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import Foundation
 import CoreFoundation
 
@@ -288,3 +290,4 @@ struct MallDirectClient {
         return UAPITrackingResult(trackingNumber: number, carrierName: bounded(ship["shippingName"], 100), carrierCode: "", status: status, logisticsInfo: latest.text, logisticsTime: latest.date, queryInfo: summary, queriedAt: Date())
     }
 }
+#endif

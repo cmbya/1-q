@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 import WebKit
 @testable import ParcelKeeper
@@ -179,3 +181,4 @@ private final class MallMemoryKeys: AIKeyStore {
     }
     func delete() throws { if fail { throw MallWebError.authentication }; value = nil }
 }
+#endif

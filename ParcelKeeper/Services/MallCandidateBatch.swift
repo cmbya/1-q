@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import Foundation
 
 struct MallCandidateBatchResult {
@@ -43,4 +45,4 @@ struct MallCandidateBatchResult {
         return result
     }
 }
-
+#endif

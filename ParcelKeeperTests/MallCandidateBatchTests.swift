@@ -1,3 +1,5 @@
+// Legacy direct marketplace import is opt-in; source is retained for restoration.
+#if ENABLE_DIRECT_MALL_IMPORT
 import XCTest
 @testable import ParcelKeeper
 
@@ -51,3 +53,4 @@ final class MallCandidateBatchTests: XCTestCase {
         XCTAssertEqual(result.failed, 2)
     }
 }
+#endif

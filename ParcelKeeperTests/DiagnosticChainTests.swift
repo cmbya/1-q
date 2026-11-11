@@ -160,16 +160,19 @@ final class DiagnosticChainTests: XCTestCase {
     }
 
     func testFixedErrorClassification() {
-        let cases: [(Error, DiagnosticReason)] = [
+        var cases: [(Error, DiagnosticReason)] = [
             (UAPIError.quota, .quota), (UAPIError.rateLimited(nil), .rateLimited),
             (UAPIError.cancelled, .cancelled), (UAPIError.noData, .noTrace),
             (TminiError.accounting, .accounting), (TminiError.configurationChanged, .configurationChanged),
             (KDYZMError.network, .network), (KDYZMError.rateLimited, .rateLimited),
             (KDYZMSyncFailure.decoding, .parse), (KDYZMSyncFailure.association, .association),
-            (TaobaoTrackingError.authentication, .authentication), (MallWebError.verification, .verification),
+            (TrackingChannelError.directImportDisabled, .unsupported),
             (TrackingTimeRejection(reason: .olderQuery), .olderQuery),
             (ShipmentShortcutError.olderUpdate, .olderEvent), (PickupStorageError.queryInProgress, .busy)
         ]
+#if ENABLE_DIRECT_MALL_IMPORT
+        cases += [(TaobaoTrackingError.authentication, .authentication), (MallWebError.verification, .verification)]
+#endif
         for (error, expected) in cases { XCTAssertEqual(TrackingRefreshService.diagnosticReason(error), expected) }
     }
     func testCleanupDoesNotReplaceOriginalReasonOrClaimSuccess() {

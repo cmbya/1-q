@@ -10,6 +10,7 @@ final class ManualTaobaoReviewTests: XCTestCase {
         XCTAssertEqual(try ShipmentShortcutParser.number("123456789012"), "123456789012")
     }
 
+#if ENABLE_DIRECT_MALL_IMPORT
     func testUnknownUppercaseReturnCodesCannotLeakSecrets() {
         let secrets = ["ERROR_SECRET_COOKIE_ABCDEF", "FAIL_SECRET_TOKEN_ABCDEF", "FAIL_BIZ_ORDER_NOT_FOUND_SECRET"]
         for secret in secrets {
@@ -31,4 +32,5 @@ final class ManualTaobaoReviewTests: XCTestCase {
             XCTAssertFalse(diagnostic.localizedDescription.contains("private-waybill"))
         }
     }
+#endif
 }

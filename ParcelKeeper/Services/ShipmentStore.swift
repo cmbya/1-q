@@ -261,6 +261,7 @@ final class ShipmentStore: ObservableObject {
                 data.records.append(record)
             }
     }
+#if ENABLE_DIRECT_MALL_IMPORT
     /// Explicit confirmed import: bind an existing unique ticket without replacing user fields.
     @discardableResult func importTaobao(_ candidate: TaobaoTrialCandidate) throws -> UUID {
         let number = try ShipmentShortcutParser.number(candidate.number)
@@ -325,6 +326,7 @@ final class ShipmentStore: ObservableObject {
         try addThrowing(shipment)
         return shipment.id
     }
+#endif
     @discardableResult func add(_ shipment: Shipment) -> Bool {
         do { try addThrowing(shipment); return true }
         catch { lastErrorMessage = error.localizedDescription; return false }

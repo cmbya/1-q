@@ -36,10 +36,12 @@ final class MallPresentationTests: XCTestCase {
         }
     }
 
+#if ENABLE_DIRECT_MALL_IMPORT
     func testImportAndRefreshCountsAreReportedSeparately() {
         let report = MallImportSummary(added: 2, bound: 1, importFailed: 1, refreshed: 1, refreshFailed: 1, skipped: 1)
         XCTAssertEqual(report.message, "导入：新增2票，已有记录补关联1票，失败1票。\n物流：平台刷新1票，失败1票，保留／未请求1票。未调用UAPI或Tmini。")
     }
+#endif
 
     func testSavedShortcutDefaultAndChannelsRemainUnchanged() {
         XCTAssertEqual((nil as QueryChannelChoice?).resolvedMode, .automatic)
