@@ -27,7 +27,10 @@ final class KDYZMPickupRepairTests: XCTestCase {
             XCTAssertNil(data.shipments[0].refreshChannel)
             XCTAssertEqual(data.shipments[0].note, "私人备注")
             XCTAssertTrue(data.shipments[0].queryInfo?.contains("原历史") == true)
-            XCTAssertEqual(data.records[0], record)
+            var expected = record
+            expected.isCompleted = true
+            expected.updatedAt = data.records[0].updatedAt
+            XCTAssertEqual(data.records[0], expected)
         }
     }
     func testExplicitPaidOverridesPreserveTraceAndStatus() throws {
@@ -111,8 +114,8 @@ final class KDYZMPickupRepairTests: XCTestCase {
         XCTAssertEqual(data.shipments[0].logisticsInfo, "旧付费节点")
         XCTAssertFalse(data.records[0].isCompleted)
     }
-    func testRefreshBoolIsNewShipmentDeliveryNotManualRecordCompletion() async throws {
-        for initial in [ShipmentStatus.inTransit, .delivered] {
+    func testRefreshCompletesPickupButBoolStillMeansNewShipmentDelivery() async throws {
+        for (initial, override) in [(ShipmentStatus.inTransit, Optional<Bool>.none), (.delivered, nil), (.inTransit, false)] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
             let store = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
@@ -122,11 +125,11 @@ final class KDYZMPickupRepairTests: XCTestCase {
             local.backendBinding = .init(origin: credential.baseURL, accountID: "a", orderID: "o", shipmentID: "s")
             try store.transaction { data in
                 data.shipments.append(local)
-                data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42", source: "私人备注", shipmentID: local.id))
+                data.records.append(PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42", source: "私人备注", shipmentID: local.id, completionOverride: override))
             }
             let payload: [String: Any] = ["schemaVersion": 1, "serverRevision": 1, "accounts": [], "familyIds": ["f"], "hiddenIds": [], "deletedIds": [],
                 "orders": [["id": "o", "accountId": "a", "platform": "jd", "platformOrderId": "po", "familyId": "f"]],
-                "shipments": [["id": "s", "orderId": "o", "accountId": "a", "familyId": "f", "waybillNo": local.trackingNumber, "carrier": "京东物流", "status": "transit", "logisticsState": "ok", "logisticsCheckedAt": 400_000, "logisticsUpdatedAt": 400_000, "logisticsEvents": [["time": 300_000, "timeText": "", "description": collected, "location": ""]]]]]
+                "shipments": [["id": "s", "orderId": "o", "accountId": "a", "familyId": "f", "waybillNo": local.trackingNumber, "carrier": "京东物流", "status": "transit", "pickupCompletion": ["version": 1, "autoPicked": true, "manualOverride": ""], "logisticsState": "ok", "logisticsCheckedAt": 400_000, "logisticsUpdatedAt": 400_000, "logisticsEvents": [["time": 300_000, "timeText": "", "description": "平台确认已领取", "location": ""]]]]]
             let transport = KDYZMNetworkTests.Transport()
             transport.responses = [(Data(#"{"accepted":true,"jobs":[{"id":"j","accountId":"a","orderId":"o","state":"completed","logisticsState":"ok","createdAt":900000}]}"#.utf8), 202), (try JSONSerialization.data(withJSONObject: payload), 200)]
             let keys = KDYZMNetworkTests.Keys(); keys.value = credential
@@ -135,9 +138,136 @@ final class KDYZMPickupRepairTests: XCTestCase {
             let newlyDelivered = try await service.refresh(before: local)
             XCTAssertEqual(newlyDelivered, initial != .delivered)
             XCTAssertEqual(try store.snapshot().shipments.first?.status, .delivered)
-            XCTAssertFalse(try XCTUnwrap(store.snapshot().records.first).isCompleted)
+            XCTAssertEqual(try XCTUnwrap(store.snapshot().records.first).isCompleted, override != false)
             XCTAssertNil(try store.snapshot().shipments.first?.backendRefreshJobID)
             XCTAssertEqual(transport.requests.count, 2)
         }
+    }
+    func testBackendCompletionPrecedenceMatchesAndroid() {
+        var remote = snapshot(text: collected).shipments[0]
+        remote.picked = true
+        for (automatic, manual, expected) in [(true, "", true), (false, "picked", true), (true, "pending", false), (false, "", false)] {
+            remote.pickupCompletion = .init(version: 1, autoPicked: automatic, manualOverride: manual)
+            XCTAssertEqual(KDYZMMerger.recipientCollected(remote), expected, manual)
+        }
+        remote.pickupCompletion = nil
+        remote.logisticsEvents = []; remote.logisticsState = "empty"
+        XCTAssertTrue(KDYZMMerger.recipientCollected(remote)) // legacy effective picked
+        remote.picked = false
+        XCTAssertFalse(KDYZMMerger.recipientCollected(remote))
+    }
+    func testCompletedHistoryImportsAndRepairsPreviouslyPendingRecordsWithoutCache() throws {
+        for platform in ["taobao", "pdd"] {
+            var remote = snapshot()
+            remote.orders[0].platform = platform
+            remote.shipments[0].pickupCompletion = .init(version: 1, autoPicked: true, manualOverride: "")
+            remote.shipments[0].logisticsState = "empty"
+            remote.shipments[0].logisticsEvents = []
+            var data = dataset()
+            _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+            XCTAssertEqual(data.shipments[0].status, .delivered)
+            XCTAssertTrue(data.records[0].isCompleted)
+            XCTAssertEqual(data.shipments[0].logisticsInfo, "旧付费节点")
+            XCTAssertNil(data.shipments[0].lastQueriedAt)
+            // Simulate a pre-fix record: the shipment already says delivered.
+            data.records[0].isCompleted = false
+            XCTAssertEqual(try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data).updated, 1)
+            XCTAssertTrue(data.records[0].isCompleted)
+            let saved = data
+            XCTAssertEqual(try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data).unchanged, 1)
+            XCTAssertEqual(data, saved)
+            data.shipments = []; data.records = []
+            _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+            XCTAssertEqual(data.shipments[0].status, .delivered)
+            XCTAssertTrue(data.records[0].isCompleted)
+        }
+    }
+    func testTaobaoCodeReceiptLegacySnapshotCompletesExistingAndNewPickup() throws {
+        let text = "已签收，签收人凭取货码签收。感谢使用DGCY圆通及新港西路214号宿舍大院值班室旁丰巢柜【自提柜】，期待再次为您服务。"
+        var remote = snapshot(text: text)
+        remote.orders[0].platform = "taobao"
+        for existing in [true, false] {
+            var data = dataset()
+            if !existing { data.shipments = []; data.records = [] }
+            _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+            XCTAssertEqual(data.shipments[0].status, .delivered)
+            XCTAssertTrue(data.records[0].isCompleted)
+        }
+    }
+    func testStationDepositAndGenericSignedNeverCompletePickup() throws {
+        for text in ["驿站已签收，请凭取件码取件", "包裹已存入丰巢快递柜，等待取件", "包裹已签收"] {
+            var data = dataset()
+            _ = try KDYZMMerger.apply(snapshot(text: text), origin: "https://example.com", to: &data)
+            XCTAssertFalse(data.records[0].isCompleted, text)
+            XCTAssertEqual(data.shipments[0].status, .readyForPickup, text)
+        }
+    }
+    func testServerPendingWinsOverLegacyPickedAndCompletionText() throws {
+        var remote = snapshot(text: collected)
+        remote.shipments[0].picked = true
+        remote.shipments[0].pickupCompletion = .init(version: 1, autoPicked: true, manualOverride: "pending")
+        var data = dataset()
+        _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+        XCTAssertFalse(data.records[0].isCompleted)
+        XCTAssertEqual(data.shipments[0].status, .readyForPickup)
+        data.records[0].isCompleted = true
+        let completed = data.records[0]
+        _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+        XCTAssertEqual(data.records[0], completed) // server cannot reopen local completion
+    }
+    func testCompletedHistoryCanReusePendingCodeWithoutBlockingSnapshot() throws {
+        var remote = snapshot()
+        remote.shipments[0].pickupCode = "42"
+        remote.shipments[0].picked = true
+        var data = dataset()
+        data.shipments = []; data.records = [PickupRecord(groupID: try XCTUnwrap(data.expressGroupID), code: "42")]
+        _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &data)
+        XCTAssertEqual(data.records.filter { !$0.isCompleted }.count, 1)
+        XCTAssertEqual(data.records.filter { $0.isCompleted }.count, 1)
+    }
+    @MainActor func testManualReopenPersistsAcrossSnapshotAndBackupRoundTrip() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = try SharedPickupStore(appGroupID: nil, legacyURL: root.appendingPathComponent("missing"), containerURL: root)
+        let remote = snapshot(text: collected)
+        try storage.transaction { _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &$0) }
+        let app = ShipmentStore(storageProvider: { storage })
+        let id = try XCTUnwrap(app.pickupRecords.first?.id)
+        try app.setPickupCompleted(id: id, completed: false)
+        let before = try storage.snapshot().records[0]
+        XCTAssertEqual(before.completionOverride, false)
+        try storage.transaction { _ = try KDYZMMerger.apply(remote, origin: "https://example.com", to: &$0) }
+        XCTAssertEqual(try storage.snapshot().records[0], before)
+        let decoded = try JSONDecoder().decode(PickupDataset.self, from: JSONEncoder().encode(storage.snapshot()))
+        XCTAssertEqual(decoded.records[0].completionOverride, false)
+        try app.setPickupCompleted(id: id, completed: true)
+        XCTAssertEqual(try storage.snapshot().records[0].completionOverride, true)
+    }
+    func testCodeReceiptRejectsCorrectionsInstructionsAndForecasts() {
+        for code in ["取货", "取件"] {
+            XCTAssertTrue(MallDeliveryState.recipientCollected(latest: "已签收，签收人凭\(code)码签收。丰巢柜【自提柜】"))
+            for text in ["请签收人凭\(code)码签收", "签收人凭\(code)码签收后请评价", "签收人凭\(code)码签收，实际未收到包裹", "预计签收人凭\(code)码签收", "签收人凭\(code)码签收？", "签收人凭\(code)码签收失败", "如您已签收，签收人凭\(code)码签收请忽略"] {
+                XCTAssertFalse(MallDeliveryState.recipientCollected(latest: text), text)
+            }
+        }
+        XCTAssertTrue(MallDeliveryState.recipientCollected(latest: "本人已签收"))
+        XCTAssertFalse(MallDeliveryState.recipientCollected(latest: "非本人已签收"))
+    }
+    func testInvalidCompletionSchemaRejectsSnapshot() throws {
+        for completion in [KDYZMPickupCompletion(version: 2, autoPicked: true, manualOverride: ""), .init(version: 1, autoPicked: true, manualOverride: "unknown")] {
+            var remote = snapshot()
+            remote.shipments[0].pickupCompletion = completion
+            XCTAssertThrowsError(try remote.validated())
+        }
+        let record = PickupRecord(groupID: UUID(), code: "42")
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(record)) as? [String: Any])
+        json.removeValue(forKey: "completionOverride")
+        XCTAssertNil(try JSONDecoder().decode(PickupRecord.self, from: JSONSerialization.data(withJSONObject: json)).completionOverride)
+    }
+    func testCompletionDecodesFromActualSnapshotShipmentShape() throws {
+        let json = #"{"id":"s","orderId":"o","accountId":"a","waybillNo":"YT7653693173234","carrier":"圆通","status":"arrived","picked":true,"pickupCompletion":{"version":1,"autoPicked":true,"manualOverride":"","completedAt":300000,"evidence":{"kind":"user_collected"}}}"#
+        let remote = try JSONDecoder().decode(KDYZMRemoteShipment.self, from: Data(json.utf8))
+        XCTAssertTrue(try XCTUnwrap(remote.pickupCompletion).autoPicked)
+        XCTAssertTrue(KDYZMMerger.recipientCollected(remote))
     }
 }

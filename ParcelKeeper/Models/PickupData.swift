@@ -19,6 +19,9 @@ struct PickupRecord: Codable, Equatable, Identifiable {
     var updatedAt: Date = Date()
     // The shipment remains authoritative for its original logistics and reminder fields.
     var shipmentID: UUID? = nil
+    // nil follows automatic completion; explicit user completion/reopen wins.
+    // Optional for datasets/backups written before backend pickup synchronization.
+    var completionOverride: Bool? = nil
 }
 
 struct PickupDataset: Codable, Equatable {

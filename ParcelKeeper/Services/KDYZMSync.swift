@@ -36,6 +36,14 @@ struct KDYZMRemoteShipment: Decodable {
     var logisticsCheckedAt: Double? = nil
     var logisticsUpdatedAt: Double? = nil
     var logisticsTruncated: Bool? = nil
+    var pickupCompletion: KDYZMPickupCompletion? = nil
+}
+struct KDYZMPickupCompletion: Decodable {
+    var version: Int
+    var autoPicked: Bool
+    var manualOverride: String
+
+    var isValid: Bool { version == 1 && ["", "picked", "pending"].contains(manualOverride) }
 }
 struct KDYZMSnapshot: Decodable {
     var schemaVersion: Int
@@ -95,6 +103,7 @@ struct KDYZMSnapshot: Decodable {
             if !number.isEmpty { guard identities.insert(key).inserted else { throw KDYZMError.invalid } }
             for time in [shipment.arrivalAt, shipment.updatedAt, shipment.logisticsCheckedAt, shipment.logisticsUpdatedAt].compactMap({ $0 }) { _ = try KDYZMTime.date(time) }
             let events = shipment.logisticsEvents ?? []
+            if let completion = shipment.pickupCompletion, !completion.isValid { throw KDYZMError.invalid }
             guard events.count <= 100, Set(events).count == events.count else { throw KDYZMError.invalid }
             for event in events {
                 _ = try KDYZMTime.date(event.time)
@@ -171,15 +180,46 @@ enum KDYZMMerger {
         current.refreshChannel == before.refreshChannel && current.platformOrderID == before.platformOrderID &&
         current.taobaoOrderID == before.taobaoOrderID && current.uapiCarrierCode == before.uapiCarrierCode
     }
+    /// Backend collection is independent of coarse signed/arrived logistics status.
+    /// An explicit server restore wins over both legacy picked and text inference.
+    static func recipientCollected(_ remote: KDYZMRemoteShipment) -> Bool {
+        if let completion = remote.pickupCompletion, completion.isValid {
+            if completion.manualOverride == "pending" { return false }
+            return completion.manualOverride == "picked" || completion.autoPicked
+        } else if remote.picked == true {
+            return true
+        }
+        // Legacy snapshots have no versioned server completion decision.
+        // Infer only from the newest dated group in this successful response.
+        guard remote.logisticsState == "ok", let events = remote.logisticsEvents,
+              (try? KDYZMTime.date(remote.logisticsUpdatedAt ?? 0)) != nil,
+              let latest = events.compactMap({ try? KDYZMTime.date($0.time) }).max() else { return false }
+        return MallDeliveryState.recipientCollected(events: events.filter {
+            (try? KDYZMTime.date($0.time)) == latest
+        }.map(\.description))
+    }
+    /// Repair previously imported pending records as well as newly collected ones.
+    /// Never clear a user's completion, or overwrite an explicit local reopen.
+    @discardableResult
+    static func completePickup(_ remote: KDYZMRemoteShipment, shipmentID: UUID, in data: inout PickupDataset) throws -> Bool {
+        guard recipientCollected(remote) else { return false }
+        let linked = data.records.indices.filter { data.records[$0].shipmentID == shipmentID }
+        guard linked.count == 1, let index = linked.first else { throw KDYZMError.invalid }
+        guard !data.records[index].isCompleted, data.records[index].completionOverride != false else { return false }
+        data.records[index].isCompleted = true
+        data.records[index].updatedAt = Date()
+        return true
+    }
     static func update(_ remote: KDYZMRemoteShipment, local: inout Shipment, refresh: Bool = false, operation: UUID? = nil) throws -> Bool {
         guard local.status != .archived else { return false }
         let original = local
+        defer { if local != original { local.updatedAt = Date() } }
+        // A saved server collection decision remains usable without cached events.
+        if recipientCollected(remote) { local.status = .delivered }
         // Failed/empty cache responses never clear history, and never count as a successful refresh.
         guard remote.logisticsState == "ok", let incoming = remote.logisticsEvents, !incoming.isEmpty,
               let successTime = try KDYZMTime.date(remote.logisticsUpdatedAt ?? 0) else { return false }
         let latest = incoming.compactMap { try? KDYZMTime.date($0.time) }.max()
-        let latestDescriptions = incoming.filter { (try? KDYZMTime.date($0.time)) == latest }.map(\.description)
-        let recipientCollected = latest != nil && MallDeliveryState.recipientCollected(events: latestDescriptions)
         // Event ordering selects the main node within this response only.
         // Older/equal remote times never block it from replacing the saved main node.
         let combined = Array(Set((local.backendEvents ?? []) + incoming)).sorted {
@@ -201,9 +241,8 @@ enum KDYZMMerger {
             return [time, $0.description, $0.location].filter { !$0.isEmpty }.joined(separator: " · ")
         }.joined(separator: "\n") + (remote.logisticsTruncated == true ? "\n【后台轨迹已截断，非完整历史；本地已有节点保留】" : "")
         local.queryInfo = TrackingQueryHistory.merged(local.queryInfo, priorHistory)
-        // signed is a logistics fact, not proof the user collected the parcel.
-        // Never mutate PickupRecord.isCompleted from remote signed/picked.
-        if recipientCollected { local.status = .delivered }
+        // Generic signed can describe a station deposit; only collection evidence
+        // completes the linked pickup record in completePickup.
         if local.status != .archived && local.status != .delivered {
             switch remote.status {
             case "signed": local.status = .delivered
@@ -214,7 +253,6 @@ enum KDYZMMerger {
         }
         local.logisticsSource = "kdyzm"; local.lastRefreshError = nil
         if refresh { local.lastQueriedAt = Date() }
-        if local != original { local.updatedAt = Date() }
         return true
     }
     @discardableResult
@@ -265,8 +303,10 @@ enum KDYZMMerger {
                 local.backendBinding = binding; local.originPlatform = order.platform
                 local.platformOrderID = order.platformOrderId
                 // Only explicit overrides opt out; historical source is not routing.
+                var recordChanged = false
                 if local.refreshChannel == nil {
                     _ = try update(remote, local: &local, operation: operation)
+                    recordChanged = try completePickup(remote, shipmentID: local.id, in: &data)
                 }
                 let code = remote.pickupCode ?? ""
                 if local.pickupCode.isEmpty, !code.isEmpty {
@@ -278,18 +318,19 @@ enum KDYZMMerger {
                     data.records[record].code = code
                 }
                 data.shipments[index] = local
-                if local != original { result.updated += 1 }
+                if local != original || recordChanged { result.updated += 1 }
                 else { result.unchanged += 1 }
             } else {
                 guard let group = data.expressGroupID, data.groups.contains(where: { $0.id == group }) else { throw KDYZMError.invalid }
                 let detection = CarrierDetector.detect(number, context: remote.carrier)
-                // Remote metadata seeds new tickets, never implies manual collection.
+                // Retain completed history, but do not add it to pending pickup codes.
                 let pickupCode = remote.pickupCode ?? ""
+                let completed = recipientCollected(remote)
                 var local = Shipment(trackingNumber: number, carrierName: remote.carrier.isEmpty ? detection.carrier.name : remote.carrier,
                                      carrierCode: detection.carrier.code, note: order.title ?? "", pickupCode: pickupCode,
                                      originPlatform: order.platform, platformOrderID: order.platformOrderId)
                 local.backendBinding = binding
-                guard pickupCode.isEmpty || !conflictingPickup(code: pickupCode, groupID: group, shipment: local, in: data) else { throw KDYZMError.invalid }
+                guard completed || pickupCode.isEmpty || !conflictingPickup(code: pickupCode, groupID: group, shipment: local, in: data) else { throw KDYZMError.invalid }
                 switch remote.status {
                 case "signed": local.status = .delivered
                 case "arrived": local.status = .readyForPickup
@@ -297,7 +338,7 @@ enum KDYZMMerger {
                 }
                 _ = try update(remote, local: &local, operation: operation)
                 data.shipments.append(local)
-                data.records.append(PickupRecord(groupID: group, code: local.pickupCode, location: remote.station ?? "", source: local.note, isCompleted: false, shipmentID: local.id))
+                data.records.append(PickupRecord(groupID: group, code: local.pickupCode, location: remote.station ?? "", source: local.note, isCompleted: completed, shipmentID: local.id))
                 result.imported += 1
             }
         }
@@ -456,11 +497,12 @@ struct KDYZMRefreshService {
                 let wasDelivered = data.shipments[index].status == .delivered
                 trace.begin(.merge)
                 guard try KDYZMMerger.update(remote, local: &data.shipments[index], refresh: true, operation: trace.operation) else { throw KDYZMError.empty }
+                try KDYZMMerger.completePickup(remote, shipmentID: before.id, in: &data)
                 newlyDelivered = !wasDelivered && data.shipments[index].status == .delivered
                 data.shipments[index].backendRefreshJobID = nil
                 data.shipments[index].backendRefreshGeneration = nil
                 trace.begin(.save)
-                // Record completion, code, group, location, source and reminder remain local.
+                // Codes, groups, locations, notes and reminders remain local.
             }
         }
         } catch {

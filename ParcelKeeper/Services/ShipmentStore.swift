@@ -376,6 +376,7 @@ final class ShipmentStore: ObservableObject {
                 // Editing a note/reminder must preserve an explicit pickup restore.
                 if previousStatus != shipment.status {
                     data.records[recordIndex].isCompleted = shipment.status == .delivered || shipment.status == .archived
+                    data.records[recordIndex].completionOverride = data.records[recordIndex].isCompleted
                 }
                 data.records[recordIndex].updatedAt = shipment.updatedAt
                 try checkPendingDuplicate(data.records[recordIndex], previous: previous, in: data)
@@ -522,6 +523,7 @@ final class ShipmentStore: ObservableObject {
         let previous = d.records[i]
         if let expected, !(previous == expected) { throw PickupStorageError.staleCompletion }
         d.records[i].isCompleted = completed; d.records[i].updatedAt = Date()
+        d.records[i].completionOverride = completed
         try checkPendingDuplicate(d.records[i], previous: previous, in: d)
     } }
     func pendingPickupRecords(groupID: UUID) -> [PickupRecord] { pickupRecords.filter { $0.groupID == groupID && !$0.isCompleted && !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }

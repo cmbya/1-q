@@ -9,15 +9,25 @@ enum MallDeliveryState {
     }
     /// Narrow recipient collection evidence; generic signed/妥投 is not sufficient.
     static func recipientCollected(latest: String) -> Bool {
-        guard !isConditional(latest) else { return false }
-        return factualClauses(latest).contains { clause in
+        let text = latest.precomposedStringWithCompatibilityMapping.components(separatedBy: .whitespacesAndNewlines).joined()
+        guard !isConditional(text), !collectionDenied(text) else { return false }
+        return factualClauses(text).contains { clause in
             guard !["请", "請", "待", "等待", "需", "须", "务必", "以便", "才能", "方可"].contains(where: clause.contains) else { return false }
-            return clause.range(of: #"(?:收件人|取件人|本人|客户)凭取件码完成取件"#, options: .regularExpression) != nil ||
-                ["已完成取件", "已在代收点取出", "已从代收点取出", "已从快递柜取出", "已从丰巢取出", "收件人已取件", "本人已取件", "客户已取件"].contains(where: clause.contains)
+            return clause.range(of: #"(?:签收人|收件人|取件人|本人|客户|用户)(?:已|已经)?凭(?:取货|取件)码(?:完成取件|签收)"#, options: .regularExpression) != nil ||
+                clause.range(of: #"(?:本人|收件人)(?:本人)?(?:已|已经)?(?:确认)?签收|已由(?:收件人)?本人签收|签收人(?:为|是)(?:收件人|本人)"#, options: .regularExpression) != nil ||
+                ["已完成取件", "已在代收点取出", "已从代收点取出", "已从快递柜取出", "已从丰巢取出", "收件人已取件", "本人已取件", "客户已取件", "用户已取走", "收件人领取成功"].contains(where: clause.contains)
         }
     }
+    /// A later correction in the same node must veto an earlier positive phrase.
+    private static func collectionDenied(_ text: String) -> Bool {
+        ["尚未", "未签收", "未实际签收", "未取件", "未领取", "未完成", "没有签收", "没有取件", "未能", "未收到", "未收货", "非本人", "非收件人", "并非", "不是", "误签", "虚假签收", "代签", "代收", "门卫", "保安", "前台", "邻居", "退回", "退货", "退件", "取消", "撤销", "拒收", "失败", "异常", "重新入库", "重新派送", "待取件", "待领取", "等待领取", "核实", "核验", "疑似", "无法确认", "?", "？"].contains {
+            // A confirmed exit may name the pickup point as its location.
+            text.replacingOccurrences(of: "代收点", with: "取件点").contains($0)
+        } || text.range(of: #"(?:未(?:曾|能|有)?|没(?:有|能)?)(?:签收|取件|领取|取出|收货|收到)|(?:须|应当|要求|指定|仅限|支持|安排|选择)(?:由)?(?:签收人|本人|收件人|用户|客户).{0,8}(?:签收|取件)"#, options: .regularExpression) != nil
+    }
     private static func isConditional(_ latest: String) -> Bool {
-        ["预计", "预估", "如果", "如已", "若已", "如您", "若您", "如有", "若有", "签收后", "取件后", "是否"].contains(where: latest.contains)
+        ["预计", "预估", "如果", "如已", "若已", "如您", "若您", "如有", "若有", "签收后", "取件后", "是否", "计划", "预约", "可能", "签收服务", "签收要求", "签收方式", "签收流程"].contains(where: latest.contains) ||
+            latest.range(of: #"(?:签收|取件)(?:完成|成功)?(?:前|时|中)|(?:本人|收件人|用户|客户|您)(?:将|会|正|拟|可).{0,8}(?:签收|领取|取件)"#, options: .regularExpression) != nil
     }
     private static func factualClauses(_ latest: String) -> [String] {
         latest.components(separatedBy: CharacterSet(charactersIn: "，,。；;！!？?\n")).filter { clause in

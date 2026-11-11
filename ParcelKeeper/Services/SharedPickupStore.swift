@@ -316,6 +316,7 @@ final class SharedPickupStore {
                 throw PickupStorageError.staleCompletion
             }
             data.records[index].isCompleted = true
+            data.records[index].completionOverride = true
             data.records[index].updatedAt = Date()
         }
     }
