@@ -17,19 +17,7 @@ struct HomeView: View {
 
     private var filteredShipments: [Shipment] {
         store.shipments.filter { shipment in
-            let matchesFilter: Bool
-            switch selectedFilter {
-            case .active:
-                matchesFilter = (shipment.status != .delivered || shipment.needsReceiptConfirmation) && shipment.status != .archived
-            case .pickup:
-                matchesFilter = shipment.status == .readyForPickup
-            case .delivered:
-                matchesFilter = shipment.status == .delivered && !shipment.needsReceiptConfirmation
-            case .all:
-                matchesFilter = true
-            }
-
-            guard matchesFilter else { return false }
+            guard selectedFilter.includes(shipment) else { return false }
             guard !searchText.isEmpty else { return true }
             return shipment.trackingNumber.localizedCaseInsensitiveContains(searchText)
                 || shipment.carrierName.localizedCaseInsensitiveContains(searchText)
@@ -351,12 +339,28 @@ private enum ImportRoute: Identifiable {
     }
 }
 
-private enum ShipmentFilter: String, CaseIterable, Identifiable {
+enum ShipmentFilter: String, CaseIterable, Identifiable {
     case active = "进行中"
     case pickup = "待取件"
     case delivered = "已签收"
     case all = "全部"
 
     var id: String { rawValue }
+
+    /// 待取件有独立入口，进行中只保留运输、派送、异常和送达待确认。
+    func includes(_ shipment: Shipment) -> Bool {
+        switch self {
+        case .active:
+            return shipment.status != .readyForPickup
+                && (shipment.status != .delivered || shipment.needsReceiptConfirmation)
+                && shipment.status != .archived
+        case .pickup:
+            return shipment.status == .readyForPickup
+        case .delivered:
+            return shipment.status == .delivered && !shipment.needsReceiptConfirmation
+        case .all:
+            return true
+        }
+    }
 }
 
